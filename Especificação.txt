@@ -1,0 +1,48 @@
+
+
+FÁBRICA
+
+- ENTRADA: ORDEM DE SERVIÇO
+
+Gerenciar ordem de serviço: Cada OS é de um ambiente.
+- Criar tabelas
+	Tabela: OrdemServico - Ordem de Serviço
+	#OSNumero 	N(10) Número da OS 		- Composição Ano(4) + Sequencial(6). Ex: 2026000001. Obs: Iniciar o sequencial, quando o ano mudar.
+	OSAbertura 	DateTime() Data de abertura  	- Atribuir a data e hora atual
+	OSFechamento 	DataTime() Data de fechamento	- Default = null
+	OSSituacao 	Char(10) Situação da OS		- Default = Aberta Dominio(Aberta, Fechada, Suspensa, EmProducao)
+	OSAmbiente 	Char1(30) Nome do ambiente	- default = null
+	ClienteID 	N(10) ID do Cliente		- defult = null
+	OSTempoTotalPrev N(10) Tempo previsto		- default = 0
+	OSTempoTotalReal N(10) Tempo Real		- default = 0
+
+	Tabela: OSServico - Serviços da OS
+	#OSNumero N(10) Chave Primaria
+	#ServicoID Foreing Key		 
+	OSServicoQtd N(10) - Quantidade			
+	OSServicoTempoPrev N(10) Tempo previsto		= OSServicoQtd * ServicoTempo
+	OSServicoDataHInicio DataTime() Data inicial
+	OSServicoDataHFim DataTime() Data final
+	OSServicoTempoReal N(10) Tempo real (Diferenca entre OSServicoDataHFim e OSServicoDataHInicio)
+	
+	Tabela: Serviço
+	#ServicoID	N(3) ID
+	ServicoNome	Char(50) Nome
+	ServicoUnidade 	N(2) Forma de medição - Default = 1 Dominio(1-Chapa, 2-Peca, 3-Metro, 4-Caixa, 5-Unidade, 6-Outro)
+	ServicoTempo	N(6) Tempo médio
+
+	
+
+
+- Criar o WBS da OS
+	- Revisar projeto no promob
+	- Gerar Arquivos GCODE
+	- Gerar Etiquetas
+	- Gerar Lista de materiais
+	- Gerar Caderno Técnico
+- Incluir OS na fila de produção
+	- Organizar MDF na sequencia
+	- Separar materiais internos
+	- Separar materiais montagem
+	- Registrar compra de material
+- 

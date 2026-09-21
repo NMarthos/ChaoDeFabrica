@@ -1,0 +1,1 @@
+// Arquivo auxiliar de verificação
