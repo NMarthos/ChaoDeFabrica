@@ -7,7 +7,8 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-const dbPath = process.env.DATABASE_PATH || './database/erp.db';
+const rawDbPath = process.env.DATABASE_PATH || './database/erp.db';
+const dbPath = path.isAbsolute(rawDbPath) ? rawDbPath : path.resolve(process.cwd(), rawDbPath);
 const dbDir = path.dirname(dbPath);
 
 // Ensure database directory exists

@@ -69,10 +69,14 @@ import {
   Hash
 } from 'lucide-react';
 
+// Base URL da API (relativa por padrão para mesmo domínio/produção ou configurável via VITE_API_URL)
+export const API_BASE_URL = import.meta.env.VITE_API_URL || '/api';
+
 // Create API instance
 const api = axios.create({
-  baseURL: 'http://localhost:3001/api'
+  baseURL: API_BASE_URL
 });
+
 
 // Workday calendar utilities
 const avancarProximaHoraUtil = (date) => {
@@ -362,9 +366,10 @@ const valorPorExtenso = (valor) => {
 // Utilitário global para resolução de URL de imagens e anexos da API
 export const getMediaUrl = (imgPath) => {
   if (!imgPath) return '';
-  if (imgPath.startsWith('http://') || imgPath.startsWith('https://') || imgPath.startsWith('data:')) return imgPath;
+  if (imgPath.startsWith('http://') || imgPath.startsWith('https://') || imgPath.startsWith('blob:') || imgPath.startsWith('data:')) return imgPath;
   const clean = imgPath.startsWith('/') ? imgPath.substring(1) : imgPath;
-  return `http://${window.location.hostname}:3001/${clean}`;
+  const apiRoot = (import.meta.env.VITE_API_URL || '').replace(/\/api\/?$/, '');
+  return apiRoot ? `${apiRoot}/${clean}` : `/${clean}`;
 };
 
 // Cache para parâmetros da empresa utilizados na geração de impressões e documentos
@@ -2940,7 +2945,7 @@ const handleGerarOrcamentoImpresso = async (orc, projs = []) => {
             ${propImages.map(img => `
               <div style="display: flex; flex-direction: column; align-items: center; width: 72px; text-align: center;">
                 <img 
-                  src="${img.MaterialImagem.startsWith('http') ? img.MaterialImagem : `http://localhost:3001/${img.MaterialImagem}`}" 
+                  src="${getMediaUrl(img.MaterialImagem)}" 
                   alt="${img.MaterialDescricao || ''}" 
                   style="width: 62px; height: 62px; object-fit: cover; border-radius: 6px; border: 1.5px solid #cbd5e1; background: #ffffff; box-shadow: 0 1px 3px rgba(0,0,0,0.08);"
                 />
@@ -2993,7 +2998,7 @@ const handleGerarOrcamentoImpresso = async (orc, projs = []) => {
                 <div style="background: #fff; border: 1px solid #cbd5e1; border-radius: 6px; padding: 8px; text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
                   <div style="width: 100%; height: 160px; overflow: hidden; border-radius: 4px; background: #f1f5f9; display: flex; align-items: center; justify-content: center; margin-bottom: 6px;">
                     <img 
-                      src="http://localhost:3001/${img.caminho}" 
+                      src="${getMediaUrl(img.caminho)}" 
                       alt="${img.nome_original}" 
                       style="max-width: 100%; max-height: 100%; object-fit: contain;" 
                     />
@@ -3272,7 +3277,7 @@ const handleGerarOrcamentoImpresso = async (orc, projs = []) => {
             btn.disabled = true;
 
             try {
-              const res = await fetch('http://localhost:3001/api/orcamentos/${orc.numero}/compartilhar', {
+              const res = await fetch(`${API_BASE_URL}/orcamentos/${orc.numero}/compartilhar`, {
                 method: 'POST',
                 headers: {
                   'Content-Type': 'application/json',
@@ -6117,9 +6122,7 @@ function Produtos() {
   const [imagemPreview, setImagemPreview] = useState(null);
 
   const getImageUrl = (path) => {
-    if (!path) return null;
-    if (path.startsWith('http')) return path;
-    return `http://localhost:3001/${path}`;
+    return getMediaUrl(path);
   };
 
   const handleImageChange = (e) => {
@@ -10100,9 +10103,7 @@ function MateriaisCrudModal({ isOpen, onClose, onMaterialsUpdated }) {
   const [imagemPreview, setImagemPreview] = useState(null);
 
   const getImageUrl = (path) => {
-    if (!path) return null;
-    if (path.startsWith('http')) return path;
-    return `http://localhost:3001/${path}`;
+    return getMediaUrl(path);
   };
 
   const handleImageChange = (e) => {
@@ -14570,11 +14571,8 @@ function ModalMinutaContrato({ isOpen, onClose, orcamento, cliente, projetos = [
     };
   }, [isOpen, projetos]);
 
-  const getMediaUrl = (imgPath) => {
-    if (!imgPath) return '';
-    if (imgPath.startsWith('http://') || imgPath.startsWith('https://') || imgPath.startsWith('data:')) return imgPath;
-    const clean = imgPath.startsWith('/') ? imgPath.substring(1) : imgPath;
-    return `http://localhost:3001/${clean}`;
+  const getLocalMediaUrl = (imgPath) => {
+    return getMediaUrl(imgPath);
   };
 
   const isImageAttachment = (a) => {
@@ -16248,9 +16246,7 @@ function Orcamentos() {
   const [lastAdjustedCodigo, setLastAdjustedCodigo] = useState(null);
 
   const getImageUrl = (path) => {
-    if (!path) return null;
-    if (path.startsWith('http')) return path;
-    return `http://localhost:3001/${path}`;
+    return getMediaUrl(path);
   };
 
   const handleMatImageChange = (e) => {
@@ -19445,9 +19441,7 @@ function Projetos() {
   const [lastAdjustedCodigo, setLastAdjustedCodigo] = useState(null);
 
   const getImageUrl = (path) => {
-    if (!path) return null;
-    if (path.startsWith('http')) return path;
-    return `http://localhost:3001/${path}`;
+    return getMediaUrl(path);
   };
 
   const handleMatImageChange = (e) => {
@@ -22167,7 +22161,7 @@ function ModalAnexosProjeto({ projeto, onClose, onUpdate }) {
                   const cat = getFileCategory(anexo.nome_original, anexo.tipo_mime);
                   const isImg = cat === 'image';
                   const isPdf = cat === 'pdf';
-                  const fileUrl = `http://localhost:3001/${anexo.caminho}`;
+                  const fileUrl = getMediaUrl(anexo.caminho);
 
                   return (
                     <div 
@@ -22362,7 +22356,7 @@ function ModalAnexosProjeto({ projeto, onClose, onUpdate }) {
               <div style={{ fontWeight: 600, fontSize: '0.95rem' }}>{previewAnexo.nome_original}</div>
               <div style={{ display: 'flex', gap: '8px' }}>
                 <a 
-                  href={`http://localhost:3001/${previewAnexo.caminho}`} 
+                  href={getMediaUrl(previewAnexo.caminho)} 
                   target="_blank" 
                   rel="noopener noreferrer"
                   className="btn btn-secondary"
@@ -22381,7 +22375,7 @@ function ModalAnexosProjeto({ projeto, onClose, onUpdate }) {
               </div>
             </div>
             <img 
-              src={`http://localhost:3001/${previewAnexo.caminho}`} 
+              src={getMediaUrl(previewAnexo.caminho)} 
               alt={previewAnexo.nome_original} 
               style={{ maxWidth: '100%', maxHeight: '75vh', objectFit: 'contain', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.2)' }}
             />
@@ -22710,7 +22704,7 @@ function ParametrosEmpresa({ isEmbedded = false }) {
         );
       case 7: // 7 - Imagem
         const isUrlValid = conteudo.startsWith('uploads/') || conteudo.startsWith('http');
-        const imgUrl = conteudo.startsWith('http') ? conteudo : `http://localhost:3001/${conteudo}`;
+        const imgUrl = getMediaUrl(conteudo);
         return (
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             {isUrlValid ? (
@@ -23235,7 +23229,7 @@ function ParametrosEmpresa({ isEmbedded = false }) {
                     {formData.conteudo && (
                       <div style={{ display: 'flex', alignItems: 'center', gap: '10px', background: 'rgba(0,0,0,0.2)', padding: '6px 10px', borderRadius: '6px', border: '1px solid var(--glass-border)' }}>
                         <img 
-                          src={formData.conteudo.startsWith('http') ? formData.conteudo : `http://localhost:3001/${formData.conteudo}`} 
+                          src={getMediaUrl(formData.conteudo)} 
                           alt="Preview" 
                           style={{ width: '40px', height: '40px', objectFit: 'cover', borderRadius: '4px', background: '#000' }}
                           onError={(e) => { e.target.style.display = 'none'; }}
@@ -23802,7 +23796,7 @@ function PropostaPublica() {
       setLoading(true);
       setError(null);
       try {
-        const res = await axios.get(`http://${window.location.hostname}:3001/api/public/propostas/${token}`);
+        const res = await axios.get(`${API_BASE_URL}/public/propostas/${token}`);
         setData(res.data);
         if (res.data?.orcamento?.anotacoes_cliente) {
           setAnotacoes(res.data.orcamento.anotacoes_cliente);
@@ -23941,7 +23935,7 @@ function PropostaPublica() {
     setSaving(true);
     setActionStatus(null);
     try {
-      const res = await axios.post(`http://${window.location.hostname}:3001/api/public/propostas/${token}/anotacoes`, {
+      const res = await axios.post(`${API_BASE_URL}/public/propostas/${token}/anotacoes`, {
         anotacoes: anotacoes,
         forma_pagamento_descricao: descForma
       });
@@ -23968,7 +23962,7 @@ function PropostaPublica() {
     setApproving(true);
     setActionStatus(null);
     try {
-      const res = await axios.post(`http://${window.location.hostname}:3001/api/public/propostas/${token}/aprovar`, {
+      const res = await axios.post(`${API_BASE_URL}/public/propostas/${token}/aprovar`, {
         forma_pagamento_descricao: descForma,
         anotacoes: anotacoes
       });
@@ -24135,7 +24129,7 @@ function PropostaPublica() {
                             {propImages.map((img, imgIdx) => (
                               <div key={imgIdx} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: '72px', textAlign: 'center' }}>
                                 <img 
-                                  src={img.MaterialImagem.startsWith('http') ? img.MaterialImagem : `http://localhost:3001/${img.MaterialImagem}`} 
+                                  src={getMediaUrl(img.MaterialImagem)} 
                                   alt={img.MaterialDescricao || ''} 
                                   style={{ width: '62px', height: '62px', objectFit: 'cover', borderRadius: '6px', border: '1.5px solid #cbd5e1', background: '#ffffff', boxShadow: '0 1px 3px rgba(0,0,0,0.08)' }} 
                                 />
@@ -24311,12 +24305,12 @@ function PropostaPublica() {
                       <div 
                         key={img.id} 
                         style={{ background: '#fff', border: '1px solid #cbd5e1', borderRadius: '6px', padding: '8px', textAlign: 'center', boxShadow: '0 1px 3px rgba(0,0,0,0.05)', cursor: 'pointer' }}
-                        onClick={() => window.open(`http://localhost:3001/${img.caminho}`, '_blank')}
+                        onClick={() => window.open(getMediaUrl(img.caminho), '_blank')}
                         title="Clique para abrir imagem em tamanho original"
                       >
                         <div style={{ width: '100%', height: '160px', overflow: 'hidden', borderRadius: '4px', background: '#f1f5f9', display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: '6px' }}>
                           <img 
-                            src={`http://localhost:3001/${img.caminho}`} 
+                            src={getMediaUrl(img.caminho)} 
                             alt={img.nome_original} 
                             style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} 
                           />

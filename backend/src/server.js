@@ -20,18 +20,34 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_jwt_token_key_12345';
 
+// Base directory for uploads (supports custom UPLOADS_PATH env var to store files outside app/git directory)
+const rawUploadsDir = process.env.UPLOADS_PATH || './uploads';
+export const uploadsBaseDir = path.isAbsolute(rawUploadsDir) ? rawUploadsDir : path.resolve(process.cwd(), rawUploadsDir);
+const uploadDir = uploadsBaseDir;
+const layoutsUploadDir = path.join(uploadsBaseDir, 'layouts');
+const anexosUploadDir = path.join(uploadsBaseDir, 'anexos');
+const parametrosUploadDir = path.join(uploadsBaseDir, 'parametros');
+
+if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+if (!fs.existsSync(layoutsUploadDir)) fs.mkdirSync(layoutsUploadDir, { recursive: true });
+if (!fs.existsSync(anexosUploadDir)) fs.mkdirSync(anexosUploadDir, { recursive: true });
+if (!fs.existsSync(parametrosUploadDir)) fs.mkdirSync(parametrosUploadDir, { recursive: true });
+
+// Helper to safely resolve physical path of uploaded files
+export function getUploadPhysicalPath(relPath) {
+  if (!relPath) return '';
+  if (path.isAbsolute(relPath)) return relPath;
+  const clean = relPath.replace(/^[\\\/]*uploads[\\\/]*/i, '');
+  return path.join(uploadsBaseDir, clean);
+}
+
 // Middlewares
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use('/uploads', express.static(path.resolve('uploads')));
+app.use('/uploads', express.static(uploadsBaseDir));
 
 // Setup multer upload folder locally
-const uploadDir = './uploads';
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-}
-
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     cb(null, uploadDir);
@@ -44,11 +60,6 @@ const storage = multer.diskStorage({
 const upload = multer({ storage });
 
 // Setup multer upload folder for layout files
-const layoutsUploadDir = './uploads/layouts';
-if (!fs.existsSync(layoutsUploadDir)) {
-  fs.mkdirSync(layoutsUploadDir, { recursive: true });
-}
-
 const layoutsStorage = multer.diskStorage({
   destination: (req, file, cb) => {
     cb(null, layoutsUploadDir);
@@ -61,11 +72,6 @@ const layoutsStorage = multer.diskStorage({
 const uploadLayouts = multer({ storage: layoutsStorage });
 
 // Setup multer upload folder for project attachment files
-const anexosUploadDir = './uploads/anexos';
-if (!fs.existsSync(anexosUploadDir)) {
-  fs.mkdirSync(anexosUploadDir, { recursive: true });
-}
-
 const anexosStorage = multer.diskStorage({
   destination: (req, file, cb) => {
     cb(null, anexosUploadDir);
@@ -5181,11 +5187,6 @@ app.post('/api/public/propostas/:token/aprovar', async (req, res) => {
 // -------------------------------------------------------------
 
 // Upload de Imagem para Parâmetro (Tipo 7)
-const parametrosUploadDir = './uploads/parametros';
-if (!fs.existsSync(parametrosUploadDir)) {
-  fs.mkdirSync(parametrosUploadDir, { recursive: true });
-}
-
 const parametrosStorage = multer.diskStorage({
   destination: (req, file, cb) => {
     cb(null, parametrosUploadDir);
@@ -5362,6 +5363,32 @@ app.delete('/api/parametros-empresa/:id', authenticateToken, async (req, res) =>
     res.status(500).json({ error: 'Erro ao excluir parâmetro da empresa.' });
   }
 });
+
+// -------------------------------------------------------------
+// Servir Frontend Estático e SPA Fallback (Produção / Hostinger)
+// -------------------------------------------------------------
+const candidateDistPaths = [
+  process.env.FRONTEND_DIST_PATH,
+  path.resolve(process.cwd(), 'frontend/dist'),
+  path.resolve(process.cwd(), '../frontend/dist'),
+  path.resolve(process.cwd(), 'dist')
+].filter(Boolean);
+
+const frontendDistPath = candidateDistPaths.find(p => fs.existsSync(path.join(p, 'index.html')));
+
+if (frontendDistPath) {
+  console.log(`[Frontend] Servindo frontend estático a partir de: ${frontendDistPath}`);
+  app.use(express.static(frontendDistPath));
+
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api') || req.path.startsWith('/uploads')) {
+      return next();
+    }
+    res.sendFile(path.join(frontendDistPath, 'index.html'));
+  });
+} else {
+  console.log('[Frontend] Diretório frontend/dist não encontrado. Servindo apenas rotas de API.');
+}
 
 // Start Server
 app.listen(PORT, () => {

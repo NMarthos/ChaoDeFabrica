@@ -4,10 +4,13 @@
   "description": "ERP Monorepo with Node.js and React",
   "private": true,
   "scripts": {
-    "install:all": "npm install && cd backend && npm install && cd ../frontend && npm install",
+    "install:all": "npm install && npm install --prefix backend && npm install --prefix frontend",
+    "build": "npm run build --prefix frontend",
+    "build:all": "npm install --prefix backend && npm install --prefix frontend && npm run build --prefix frontend",
+    "start": "node backend/src/server.js",
     "dev": "npx concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
-    "dev:backend": "cd backend && npm run dev",
-    "dev:frontend": "cd frontend && npm run dev"
+    "dev:backend": "npm run dev --prefix backend",
+    "dev:frontend": "npm run dev --prefix frontend"
   },
   "devDependencies": {
     "concurrently": "^8.2.2"
