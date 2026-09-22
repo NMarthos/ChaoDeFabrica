@@ -88,6 +88,17 @@ class MySQLDatabaseAdapter {
       return { lastID: 0, changes: 0 };
     }
 
+    const trimmed = (sql || '').trim().replace(/;$/, '').toUpperCase();
+    if (
+      trimmed === 'BEGIN TRANSACTION' ||
+      trimmed === 'BEGIN' ||
+      trimmed === 'START TRANSACTION' ||
+      trimmed === 'COMMIT' ||
+      trimmed === 'ROLLBACK'
+    ) {
+      return { lastID: 0, changes: 0 };
+    }
+
     const [result] = await this.pool.query(sql, params);
     return {
       lastID: result && result.insertId ? result.insertId : 0,
@@ -105,6 +116,17 @@ class MySQLDatabaseAdapter {
       .trim();
 
     if (!sanitizedSql) return;
+
+    const trimmed = sanitizedSql.replace(/;$/, '').toUpperCase();
+    if (
+      trimmed === 'BEGIN TRANSACTION' ||
+      trimmed === 'BEGIN' ||
+      trimmed === 'START TRANSACTION' ||
+      trimmed === 'COMMIT' ||
+      trimmed === 'ROLLBACK'
+    ) {
+      return;
+    }
 
     await this.pool.query(sanitizedSql);
   }
