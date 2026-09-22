@@ -1,513 +1,619 @@
-import sqlite3 from 'sqlite3';
-import { open } from 'sqlite';
-import path from 'path';
-import fs from 'fs';
+import mysql from 'mysql2/promise';
 import bcrypt from 'bcryptjs';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
-const rawDbPath = process.env.DATABASE_PATH || './database/erp.db';
-const dbPath = path.isAbsolute(rawDbPath) ? rawDbPath : path.resolve(process.cwd(), rawDbPath);
-const dbDir = path.dirname(dbPath);
+const dbHost = process.env.DB_HOST || 'localhost';
+const dbPort = parseInt(process.env.DB_PORT || '3306', 10);
+const dbUser = process.env.DB_USER || 'root';
+const dbPassword = process.env.DB_PASSWORD || '';
+const dbName = process.env.DB_NAME || 'erp_chaodefabrica';
 
-// Ensure database directory exists
-if (!fs.existsSync(dbDir)) {
-  fs.mkdirSync(dbDir, { recursive: true });
+/**
+ * Cria a conexão e abstrai as operações com a mesma interface usada pelo SQLite:
+ * - db.get(sql, params) -> retorna objeto da primeira linha ou null
+ * - db.all(sql, params) -> retorna array com as linhas encontradas
+ * - db.run(sql, params) -> retorna { lastID: insertId, changes: affectedRows }
+ * - db.exec(sql) -> executa query/queries DDL ou múltiplas instruções
+ */
+class MySQLDatabaseAdapter {
+  constructor(pool) {
+    this.pool = pool;
+  }
+
+  async query(sql, params = []) {
+    return this.pool.query(sql, params);
+  }
+
+  async get(sql, params = []) {
+    // Intercepta PRAGMA table_info para compatibilidade
+    const pragmaMatch = sql.match(/PRAGMA\s+table_info\(([`"']?)(\w+)\1\)/i);
+    if (pragmaMatch) {
+      const tableName = pragmaMatch[2];
+      try {
+        const [cols] = await this.pool.query(`SHOW COLUMNS FROM \`${tableName}\``);
+        return cols.map(c => ({
+          name: c.Field,
+          type: c.Type,
+          notnull: c.Null === 'NO' ? 1 : 0,
+          dflt_value: c.Default,
+          pk: c.Key === 'PRI' ? 1 : 0
+        }))[0] || null;
+      } catch (err) {
+        return null;
+      }
+    }
+
+    if (/PRAGMA\s+foreign_keys/i.test(sql)) {
+      return null;
+    }
+
+    const [rows] = await this.pool.query(sql, params);
+    if (Array.isArray(rows) && rows.length > 0) {
+      return rows[0];
+    }
+    return null;
+  }
+
+  async all(sql, params = []) {
+    // Intercepta PRAGMA table_info para compatibilidade
+    const pragmaMatch = sql.match(/PRAGMA\s+table_info\(([`"']?)(\w+)\1\)/i);
+    if (pragmaMatch) {
+      const tableName = pragmaMatch[2];
+      try {
+        const [cols] = await this.pool.query(`SHOW COLUMNS FROM \`${tableName}\``);
+        return cols.map(c => ({
+          name: c.Field,
+          type: c.Type,
+          notnull: c.Null === 'NO' ? 1 : 0,
+          dflt_value: c.Default,
+          pk: c.Key === 'PRI' ? 1 : 0
+        }));
+      } catch (err) {
+        return [];
+      }
+    }
+
+    if (/PRAGMA\s+foreign_keys/i.test(sql)) {
+      return [];
+    }
+
+    const [rows] = await this.pool.query(sql, params);
+    return Array.isArray(rows) ? rows : [];
+  }
+
+  async run(sql, params = []) {
+    if (/PRAGMA\s+foreign_keys/i.test(sql)) {
+      return { lastID: 0, changes: 0 };
+    }
+
+    const [result] = await this.pool.query(sql, params);
+    return {
+      lastID: result && result.insertId ? result.insertId : 0,
+      changes: result && result.affectedRows !== undefined ? result.affectedRows : 0
+    };
+  }
+
+  async exec(sql) {
+    if (!sql || !sql.trim()) return;
+
+    // Filtra instruções de PRAGMA exclusivas do SQLite
+    const sanitizedSql = sql
+      .replace(/PRAGMA\s+foreign_keys\s*=\s*(ON|OFF)\s*;?/gi, '')
+      .replace(/PRAGMA\s+foreign_keys\s*;?/gi, '')
+      .trim();
+
+    if (!sanitizedSql) return;
+
+    await this.pool.query(sanitizedSql);
+  }
+}
+
+/**
+ * Função auxiliar para garantir que colunas existam na tabela
+ */
+export async function ensureColumn(db, tableName, columnName, columnDefinition) {
+  try {
+    const cols = await db.all(`SHOW COLUMNS FROM \`${tableName}\` LIKE ?`, [columnName]);
+    if (!cols || cols.length === 0) {
+      await db.exec(`ALTER TABLE \`${tableName}\` ADD COLUMN \`${columnName}\` ${columnDefinition}`);
+      console.log(`Database migration: Added "${columnName}" column to "${tableName}" table.`);
+    }
+  } catch (err) {
+    console.error(`Migration check error for ${tableName}.${columnName}:`, err.message);
+  }
 }
 
 export async function initDb() {
-  const db = await open({
-    filename: dbPath,
-    driver: sqlite3.Database
+  console.log(`Connecting to MySQL server at ${dbHost}:${dbPort}...`);
+
+  // 1. Conecta inicialmente ao MySQL sem selecionar banco para criar a base caso não exista
+  const rootConn = await mysql.createConnection({
+    host: dbHost,
+    port: dbPort,
+    user: dbUser,
+    password: dbPassword
   });
 
-  // Enable foreign keys
-  await db.get('PRAGMA foreign_keys = ON');
+  await rootConn.query(
+    `CREATE DATABASE IF NOT EXISTS \`${dbName}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`
+  );
+  await rootConn.end();
 
-  // Drop tables for schema migrations cleanly
-  // Comentado para habilitar persistência de dados.
-  /*
-  try {
-    await db.run('PRAGMA foreign_keys = OFF');
-    await db.exec('DROP TABLE IF EXISTS OS_ChapasPecas');
-    await db.exec('DROP TABLE IF EXISTS OS_Chapas');
-    await db.exec('DROP TABLE IF EXISTS os_pecas');
-    await db.exec('DROP TABLE IF EXISTS os_servicos');
-    await db.exec('DROP TABLE IF EXISTS ordens_servico');
-    await db.exec('DROP TABLE IF EXISTS servicos');
-    await db.exec('DROP TABLE IF EXISTS Material');
-    await db.exec('DROP TABLE IF EXISTS Projeto_Pecas');
-    await db.exec('DROP TABLE IF EXISTS Projeto_Chapa');
-    await db.exec('DROP TABLE IF EXISTS Projeto_Modulo');
-    await db.exec('DROP TABLE IF EXISTS Projeto_Materiais');
-    await db.exec('DROP TABLE IF EXISTS ProjetoItem');
-    await db.exec('DROP TABLE IF EXISTS arquivos_importados');
-    await db.exec('DROP TABLE IF EXISTS projetos');
-    await db.exec('DROP TABLE IF EXISTS orcamentos');
-    await db.run('PRAGMA foreign_keys = ON');
-    console.log('Migration drop tables successful.');
-  } catch (err) {
-    console.error('Migration drop tables error:', err);
-  }
-  */
+  // 2. Cria o pool de conexões direcionado ao banco do ERP
+  const pool = mysql.createPool({
+    host: dbHost,
+    port: dbPort,
+    user: dbUser,
+    password: dbPassword,
+    database: dbName,
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0,
+    multipleStatements: true,
+    decimalNumbers: true,
+    dateStrings: true
+  });
 
-  // Create Users Table
+  const db = new MySQLDatabaseAdapter(pool);
+
+  // 3. Criação do Schema das Tabelas no MySQL
+
+  // Tabela: usuarios
   await db.exec(`
     CREATE TABLE IF NOT EXISTS usuarios (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      nome TEXT NOT NULL,
-      email TEXT NOT NULL UNIQUE,
-      senha TEXT NOT NULL,
-      role TEXT NOT NULL DEFAULT 'user',
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      nome VARCHAR(255) NOT NULL,
+      email VARCHAR(255) NOT NULL UNIQUE,
+      senha VARCHAR(255) NOT NULL,
+      role VARCHAR(50) NOT NULL DEFAULT 'user',
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
   `);
 
-  // Create Clients Table
+  // Tabela: clientes
   await db.exec(`
     CREATE TABLE IF NOT EXISTS clientes (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      nome TEXT NOT NULL,
-      documento TEXT,
-      email TEXT,
-      telefone TEXT,
-      status TEXT NOT NULL DEFAULT 'Ativo',
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      nome VARCHAR(255) NOT NULL,
+      documento VARCHAR(50) DEFAULT NULL,
+      email VARCHAR(255) DEFAULT NULL,
+      telefone VARCHAR(50) DEFAULT NULL,
+      status VARCHAR(50) NOT NULL DEFAULT 'Ativo',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      rg VARCHAR(50) DEFAULT NULL,
+      endereco VARCHAR(255) DEFAULT NULL,
+      numero VARCHAR(50) DEFAULT NULL,
+      complemento VARCHAR(255) DEFAULT NULL,
+      bairro VARCHAR(100) DEFAULT NULL,
+      cidade VARCHAR(100) DEFAULT NULL,
+      uf VARCHAR(10) DEFAULT NULL,
+      cep VARCHAR(20) DEFAULT NULL,
+      entrega_endereco VARCHAR(255) DEFAULT NULL,
+      entrega_numero VARCHAR(50) DEFAULT NULL,
+      entrega_complemento VARCHAR(255) DEFAULT NULL,
+      entrega_bairro VARCHAR(100) DEFAULT NULL,
+      entrega_cidade VARCHAR(100) DEFAULT NULL,
+      entrega_uf VARCHAR(10) DEFAULT NULL,
+      entrega_cep VARCHAR(20) DEFAULT NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
   `);
 
-  try {
-    const tableInfo = await db.all('PRAGMA table_info(clientes)');
-    const colNames = tableInfo.map(c => c.name);
-    if (!colNames.includes('rg')) await db.exec("ALTER TABLE clientes ADD COLUMN rg TEXT");
-    if (!colNames.includes('endereco')) await db.exec("ALTER TABLE clientes ADD COLUMN endereco TEXT");
-    if (!colNames.includes('numero')) await db.exec("ALTER TABLE clientes ADD COLUMN numero TEXT");
-    if (!colNames.includes('complemento')) await db.exec("ALTER TABLE clientes ADD COLUMN complemento TEXT");
-    if (!colNames.includes('bairro')) await db.exec("ALTER TABLE clientes ADD COLUMN bairro TEXT");
-    if (!colNames.includes('cidade')) await db.exec("ALTER TABLE clientes ADD COLUMN cidade TEXT");
-    if (!colNames.includes('uf')) await db.exec("ALTER TABLE clientes ADD COLUMN uf TEXT");
-    if (!colNames.includes('cep')) await db.exec("ALTER TABLE clientes ADD COLUMN cep TEXT");
-    if (!colNames.includes('entrega_endereco')) await db.exec("ALTER TABLE clientes ADD COLUMN entrega_endereco TEXT");
-    if (!colNames.includes('entrega_numero')) await db.exec("ALTER TABLE clientes ADD COLUMN entrega_numero TEXT");
-    if (!colNames.includes('entrega_complemento')) await db.exec("ALTER TABLE clientes ADD COLUMN entrega_complemento TEXT");
-    if (!colNames.includes('entrega_bairro')) await db.exec("ALTER TABLE clientes ADD COLUMN entrega_bairro TEXT");
-    if (!colNames.includes('entrega_cidade')) await db.exec("ALTER TABLE clientes ADD COLUMN entrega_cidade TEXT");
-    if (!colNames.includes('entrega_uf')) await db.exec("ALTER TABLE clientes ADD COLUMN entrega_uf TEXT");
-    if (!colNames.includes('entrega_cep')) await db.exec("ALTER TABLE clientes ADD COLUMN entrega_cep TEXT");
-
-    const docCol = tableInfo.find(c => c.name === 'documento');
-    const emailCol = tableInfo.find(c => c.name === 'email');
-    if ((docCol && docCol.notnull === 1) || (emailCol && emailCol.notnull === 1)) {
-      await db.exec('PRAGMA foreign_keys=OFF;');
-      await db.exec(`
-        CREATE TABLE clientes_temp_migration (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          nome TEXT NOT NULL,
-          documento TEXT,
-          email TEXT,
-          telefone TEXT,
-          status TEXT NOT NULL DEFAULT 'Ativo',
-          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-          rg TEXT,
-          endereco TEXT,
-          numero TEXT,
-          complemento TEXT,
-          bairro TEXT,
-          cidade TEXT,
-          uf TEXT,
-          cep TEXT,
-          entrega_endereco TEXT,
-          entrega_numero TEXT,
-          entrega_complemento TEXT,
-          entrega_bairro TEXT,
-          entrega_cidade TEXT,
-          entrega_uf TEXT,
-          entrega_cep TEXT
-        );
-        INSERT INTO clientes_temp_migration (id, nome, documento, email, telefone, status, created_at, rg, endereco, numero, complemento, bairro, cidade, uf, cep, entrega_endereco, entrega_numero, entrega_complemento, entrega_bairro, entrega_cidade, entrega_uf, entrega_cep)
-          SELECT id, nome, documento, email, telefone, status, created_at, rg, endereco, numero, complemento, bairro, cidade, uf, cep, entrega_endereco, entrega_numero, entrega_complemento, entrega_bairro, entrega_cidade, entrega_uf, entrega_cep FROM clientes;
-        DROP TABLE clientes;
-        ALTER TABLE clientes_temp_migration RENAME TO clientes;
-      `);
-      await db.exec('PRAGMA foreign_keys=ON;');
-      console.log('Database migration: Relaxed constraints on clientes table.');
-    }
-  } catch (err) {
-    console.error('Migration clientes error:', err);
-  }
-
-  // Create Contracts Table
+  // Tabela: contratos
   await db.exec(`
     CREATE TABLE IF NOT EXISTS contratos (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      cliente_id INTEGER NOT NULL,
-      numero TEXT NOT NULL UNIQUE,
-      valor REAL NOT NULL,
-      data_inicio TEXT NOT NULL,
-      data_fim TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'Ativo',
-      drive_file_id TEXT,
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      cliente_id INT NOT NULL,
+      numero VARCHAR(100) NOT NULL UNIQUE,
+      valor DECIMAL(15,2) NOT NULL,
+      data_inicio VARCHAR(50) NOT NULL,
+      data_fim VARCHAR(50) NOT NULL,
+      status VARCHAR(50) NOT NULL DEFAULT 'Ativo',
+      drive_file_id VARCHAR(255) DEFAULT NULL,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (cliente_id) REFERENCES clientes(id) ON DELETE CASCADE
-    )
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
   `);
 
-  // Create Services Table
+  // Tabela: servicos
   await db.exec(`
     CREATE TABLE IF NOT EXISTS servicos (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      nome TEXT NOT NULL,
-      unidade INTEGER NOT NULL DEFAULT 1,
-      tempo INTEGER NOT NULL,
-      sequencia INTEGER DEFAULT 0
-    )
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      nome VARCHAR(255) NOT NULL,
+      unidade INT NOT NULL DEFAULT 1,
+      tempo INT NOT NULL,
+      sequencia INT DEFAULT 0
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
   `);
 
-  // Migration for existing tables: add column if not exists
-  try {
-    await db.exec('ALTER TABLE servicos ADD COLUMN sequencia INTEGER DEFAULT 0');
-    console.log('Database migration: Added "sequencia" column to "servicos" table.');
-  } catch (err) {
-    // Column might already exist
-  }
-
-  try {
-    await db.exec('ALTER TABLE ordens_servico ADD COLUMN cronograma TEXT DEFAULT NULL');
-    console.log('Database migration: Added "cronograma" column to "ordens_servico" table.');
-  } catch (err) {
-    // Column might already exist
-  }
-
-  try {
-    await db.exec("ALTER TABLE Material ADD COLUMN ExibirNaProposta TEXT DEFAULT 'Nao'");
-    console.log('Database migration: Added "ExibirNaProposta" column to "Material" table.');
-  } catch (err) {
-    // Column might already exist
-  }
-
-  try {
-    await db.exec('ALTER TABLE projetos ADD COLUMN ProjetoURL TEXT DEFAULT NULL');
-    console.log('Database migration: Added "ProjetoURL" column to "projetos" table.');
-  } catch (err) {
-    // Column might already exist
-  }
-
-  try {
-    await db.exec('ALTER TABLE projetos ADD COLUMN ProjetoQtdPecas INTEGER DEFAULT 0');
-    console.log('Database migration: Added "ProjetoQtdPecas" column to "projetos" table.');
-  } catch (err) {
-    // Column might already exist
-  }
-
-  try {
-    // Migra e sincroniza ProjetoQtdPecas a partir de registros legados de FAB.QTD.PCA
-    await db.exec(`
-      UPDATE projetos 
-      SET ProjetoQtdPecas = COALESCE((
-        SELECT CAST(qtd AS INTEGER) FROM Projeto_Materiais 
-        WHERE Projeto_Materiais.projeto_id = projetos.id AND Projeto_Materiais.referencia = 'FAB.QTD.PCA'
-      ), (
-        SELECT CAST(ProjetoItemQtd AS INTEGER) FROM ProjetoItem 
-        WHERE ProjetoItem.ProjetoID = projetos.id AND ProjetoItem.MaterialReferencia = 'FAB.QTD.PCA'
-      ), 0)
-      WHERE (ProjetoQtdPecas IS NULL OR ProjetoQtdPecas = 0)
-    `);
-    await db.exec("DELETE FROM ProjetoItem WHERE MaterialReferencia = 'FAB.QTD.PCA'");
-    await db.exec("DELETE FROM Projeto_Materiais WHERE referencia = 'FAB.QTD.PCA'");
-  } catch (err) {
-    // Ignora se tabelas ainda não existirem no primeiro boot
-  }
-
-  try {
-    await db.exec('ALTER TABLE orcamentos ADD COLUMN parametro_financeiro_id INTEGER DEFAULT 1');
-    console.log('Database migration: Added "parametro_financeiro_id" column to "orcamentos" table.');
-  } catch (err) {
-    // Column might already exist
-  }
-
-  try {
-    // Migra parametro_financeiro_id dos projetos para o orçamento se ainda for nulo
-    await db.exec(`
-      UPDATE orcamentos 
-      SET parametro_financeiro_id = COALESCE((
-        SELECT parametro_financeiro_id FROM projetos 
-        WHERE projetos.orcamento_numero = orcamentos.numero AND projetos.parametro_financeiro_id IS NOT NULL 
-        LIMIT 1
-      ), 1)
-      WHERE parametro_financeiro_id IS NULL OR parametro_financeiro_id = 0
-    `);
-  } catch (err) {
-    // Ignore if not present
-  }
-
-  // Create Work Orders Table
+  // Tabela: ordens_servico
   await db.exec(`
     CREATE TABLE IF NOT EXISTS ordens_servico (
-      numero INTEGER PRIMARY KEY,
+      numero BIGINT PRIMARY KEY,
       data_abertura DATETIME DEFAULT CURRENT_TIMESTAMP,
       data_fechamento DATETIME DEFAULT NULL,
-      status TEXT NOT NULL DEFAULT 'Aberta',
-      ambiente TEXT DEFAULT NULL,
-      cliente TEXT DEFAULT NULL,
-      qtd_pecas INTEGER DEFAULT 0,
-      qtd_chapas INTEGER DEFAULT 0,
-      qtd_especiais INTEGER DEFAULT 0,
-      qtd_caixa INTEGER DEFAULT 0,
-      tempo_previsto INTEGER DEFAULT 0,
-      tempo_real INTEGER DEFAULT 0,
-      cronograma TEXT DEFAULT NULL,
+      status VARCHAR(50) NOT NULL DEFAULT 'Aberta',
+      ambiente VARCHAR(255) DEFAULT NULL,
+      cliente VARCHAR(255) DEFAULT NULL,
+      qtd_pecas INT DEFAULT 0,
+      qtd_chapas INT DEFAULT 0,
+      qtd_especiais INT DEFAULT 0,
+      qtd_caixa INT DEFAULT 0,
+      tempo_previsto INT DEFAULT 0,
+      tempo_real INT DEFAULT 0,
+      cronograma LONGTEXT DEFAULT NULL,
       data_inicio DATETIME DEFAULT NULL,
       data_fim DATETIME DEFAULT NULL
-    )
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
   `);
 
-  // Create Work Order Items Table
+  // Tabela: os_servicos
   await db.exec(`
     CREATE TABLE IF NOT EXISTS os_servicos (
-      os_numero INTEGER NOT NULL,
-      servico_id INTEGER NOT NULL,
-      quantidade INTEGER NOT NULL,
-      tempo_previsto INTEGER NOT NULL,
+      os_numero BIGINT NOT NULL,
+      servico_id INT NOT NULL,
+      quantidade INT NOT NULL,
+      tempo_previsto INT NOT NULL,
       data_inicio DATETIME DEFAULT NULL,
       data_fim DATETIME DEFAULT NULL,
-      tempo_real INTEGER DEFAULT NULL,
+      tempo_real INT DEFAULT NULL,
       PRIMARY KEY (os_numero, servico_id),
       FOREIGN KEY (os_numero) REFERENCES ordens_servico(numero) ON DELETE CASCADE,
       FOREIGN KEY (servico_id) REFERENCES servicos(id) ON DELETE RESTRICT
-    )
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
   `);
 
-  // Create Work Order Pieces Table
+  // Tabela: os_pecas
   await db.exec(`
     CREATE TABLE IF NOT EXISTS os_pecas (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      os_numero INTEGER NOT NULL,
-      modulo TEXT,
-      chapa TEXT,
-      posicao TEXT,
-      dimensoes TEXT,
-      descricao TEXT NOT NULL,
-      codigo TEXT,
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      os_numero BIGINT NOT NULL,
+      modulo VARCHAR(255) DEFAULT NULL,
+      chapa VARCHAR(255) DEFAULT NULL,
+      posicao VARCHAR(255) DEFAULT NULL,
+      dimensoes VARCHAR(255) DEFAULT NULL,
+      descricao VARCHAR(255) NOT NULL,
+      codigo VARCHAR(255) DEFAULT NULL,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (os_numero) REFERENCES ordens_servico(numero) ON DELETE CASCADE
-    )
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
   `);
 
-  // Create OS Chapas Table
+  // Tabela: OS_Chapas
   await db.exec(`
     CREATE TABLE IF NOT EXISTS OS_Chapas (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      os_numero INTEGER NOT NULL,
-      cliente TEXT,
-      projeto TEXT,
-      chapa TEXT,
-      acabamento TEXT,
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      os_numero BIGINT NOT NULL,
+      cliente VARCHAR(255) DEFAULT NULL,
+      projeto VARCHAR(255) DEFAULT NULL,
+      chapa VARCHAR(255) DEFAULT NULL,
+      acabamento VARCHAR(255) DEFAULT NULL,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (os_numero) REFERENCES ordens_servico(numero) ON DELETE CASCADE
-    )
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
   `);
 
-  // Create OS Chapas Pieces Table
+  // Tabela: OS_ChapasPecas
   await db.exec(`
     CREATE TABLE IF NOT EXISTS OS_ChapasPecas (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      chapa_id INTEGER NOT NULL,
-      item TEXT,
-      descricao TEXT,
-      dimensao TEXT,
-      descricao_pai TEXT,
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      chapa_id INT NOT NULL,
+      item VARCHAR(255) DEFAULT NULL,
+      descricao TEXT DEFAULT NULL,
+      dimensao VARCHAR(255) DEFAULT NULL,
+      descricao_pai VARCHAR(255) DEFAULT NULL,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (chapa_id) REFERENCES OS_Chapas(id) ON DELETE CASCADE
-    )
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
   `);
 
-  // Create Imported Files Table
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS arquivos_importados (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      nome_arquivo TEXT NOT NULL,
-      tamanho INTEGER NOT NULL,
-      tipo_layout TEXT NOT NULL,
-      caminho_arquivo TEXT NOT NULL,
-      projeto_id INTEGER DEFAULT NULL,
-      data_upload DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (projeto_id) REFERENCES projetos(id) ON DELETE CASCADE
-    )
-  `);
-
-  // Create Orcamento Table
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS orcamentos (
-      numero INTEGER PRIMARY KEY,
-      data_criacao DATETIME DEFAULT CURRENT_TIMESTAMP,
-      cliente_id INTEGER NOT NULL,
-      descricao TEXT,
-      status TEXT DEFAULT 'Em Aberto',
-      parametro_financeiro_id INTEGER DEFAULT 1,
-      FOREIGN KEY (cliente_id) REFERENCES clientes(id) ON DELETE CASCADE,
-      FOREIGN KEY (parametro_financeiro_id) REFERENCES Parametro_Financeiro(id)
-    )
-  `);
-
-  // Create Projetos Table
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS projetos (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      orcamento_numero INTEGER NOT NULL,
-      nome TEXT NOT NULL,
-      descricao TEXT,
-      ProjetoURL TEXT,
-      ProjetoQtdPecas INTEGER DEFAULT 0,
-      CustoTotal DECIMAL(15,2) DEFAULT 0.0,
-      CustoMaterial DECIMAL(15,2) DEFAULT 0.0,
-      CustoProducao DECIMAL(15,2) DEFAULT 0.0,
-      DuracaoFabricacao INTEGER DEFAULT 0,
-      DuracaoMontagem INTEGER DEFAULT 0,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (orcamento_numero) REFERENCES orcamentos(numero) ON DELETE CASCADE
-    )
-  `);
-
-  // Create Projeto_Materiais Table
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS Projeto_Materiais (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      projeto_id INTEGER NOT NULL,
-      referencia TEXT NOT NULL,
-      descricao TEXT NOT NULL,
-      qtd REAL NOT NULL,
-      un TEXT NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (projeto_id) REFERENCES projetos(id) ON DELETE CASCADE
-    )
-  `);
-
-  // Create Projeto_Anexos Table
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS projeto_anexos (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      projeto_id INTEGER NOT NULL,
-      nome_original TEXT NOT NULL,
-      nome_arquivo TEXT NOT NULL,
-      caminho TEXT NOT NULL,
-      tipo_mime TEXT,
-      tamanho INTEGER,
-      exibir_na_proposta TEXT DEFAULT 'Sim',
-      criado_em DATETIME DEFAULT CURRENT_TIMESTAMP,
-      criado_por_nome TEXT,
-      FOREIGN KEY (projeto_id) REFERENCES projetos(id) ON DELETE CASCADE
-    )
-  `);
-
-  // Create Projeto_Modulo Table
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS Projeto_Modulo (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      projeto_id INTEGER NOT NULL,
-      modulo TEXT NOT NULL,
-      peca TEXT NOT NULL,
-      imagem TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (projeto_id) REFERENCES projetos(id) ON DELETE CASCADE
-    )
-  `);
-
-  // Create Projeto_Chapa Table
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS Projeto_Chapa (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      projeto_id INTEGER NOT NULL,
-      chapa TEXT NOT NULL,
-      acabamento TEXT NOT NULL,
-      DescChapa TEXT,
-      item TEXT NOT NULL,
-      descricao TEXT NOT NULL,
-      dimensao TEXT NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (projeto_id) REFERENCES projetos(id) ON DELETE CASCADE
-    )
-  `);
-
-  // Create Projeto_Pecas Table
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS Projeto_Pecas (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      projeto_id INTEGER NOT NULL,
-      peca TEXT NOT NULL,
-      etiqueta TEXT NOT NULL,
-      dimen TEXT NOT NULL,
-      chapa TEXT NOT NULL,
-      modulo TEXT NOT NULL,
-      cod_item TEXT NOT NULL,
-      imagem TEXT,
-      cor_barras TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (projeto_id) REFERENCES projetos(id) ON DELETE CASCADE
-    )
-  `);
-
-  // Create Material Table
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS Material (
-      MaterialReferencia TEXT PRIMARY KEY,
-      MaterialDescricao TEXT NOT NULL,
-      MaterialUnidade TEXT CHECK(MaterialUnidade IN ('CHP', 'M2', 'M', 'L', 'UNI', 'PAR', 'KG', 'CXA', 'VAR', 'DIA')),
-      MaterialValorUnitario REAL DEFAULT 0.0,
-      GrupoSigla TEXT,
-      ProdutoGrupo INTEGER DEFAULT 8,
-      MaterialTipo TEXT DEFAULT 'Produto' CHECK(MaterialTipo IN ('Produto', 'Serviço')),
-      MaterialImagem TEXT,
-      MaterialTempo INTEGER DEFAULT 0,
-      ExibirNaProposta TEXT DEFAULT 'Nao' CHECK(ExibirNaProposta IN ('Sim', 'Nao'))
-    )
-  `);
-
-  // Create ProjetoItem Table
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS ProjetoItem (
-      ProjetoID INTEGER NOT NULL,
-      ProjetoItemID INTEGER NOT NULL,
-      MaterialReferencia TEXT NOT NULL,
-      ProjetoItemVlrUnit DECIMAL(15,2) NOT NULL,
-      ProjetoItemUnidade VARCHAR(3) NOT NULL,
-      ProjetoItemQtd DECIMAL(8,2) NOT NULL,
-      ProjetoItemTotal DECIMAL(15,2) NOT NULL,
-      ProjetoItemTempo INTEGER DEFAULT 0,
-      ProjetoItemDuracao INTEGER DEFAULT 0,
-      PRIMARY KEY (ProjetoID, ProjetoItemID),
-      FOREIGN KEY (ProjetoID) REFERENCES projetos(id) ON DELETE CASCADE,
-      FOREIGN KEY (MaterialReferencia) REFERENCES Material(MaterialReferencia)
-    )
-  `);
-
-  // Create Parametro_Financeiro Table
+  // Tabela: Parametro_Financeiro
   await db.exec(`
     CREATE TABLE IF NOT EXISTS Parametro_Financeiro (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      nome TEXT NOT NULL,
-      situacao TEXT DEFAULT 'Ativado' CHECK(situacao IN ('Ativado', 'Desativado')),
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      nome VARCHAR(255) NOT NULL,
+      situacao VARCHAR(50) DEFAULT 'Ativado',
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
   `);
 
-  // Create Configuracoes Financeiras Table (subordinated to Parametro_Financeiro)
+  // Tabela: configuracoes_financeiras
   await db.exec(`
     CREATE TABLE IF NOT EXISTS configuracoes_financeiras (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      parametro_id INTEGER NOT NULL UNIQUE,
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      parametro_id INT NOT NULL UNIQUE,
       perc_imposto DECIMAL(5,2) DEFAULT 6.00,
       perc_comissao DECIMAL(5,2) DEFAULT 5.00,
       perc_custo_financeiro DECIMAL(5,2) DEFAULT 4.00,
       perc_markup_lucro DECIMAL(5,2) DEFAULT 20.00,
       perc_margem_minima DECIMAL(5,2) DEFAULT 10.00,
-      metodo_calculo TEXT DEFAULT 'divisor',
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      metodo_calculo VARCHAR(50) DEFAULT 'divisor',
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
       FOREIGN KEY (parametro_id) REFERENCES Parametro_Financeiro(id) ON DELETE CASCADE
-    )
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
   `);
 
-  // Seed default Parametro_Financeiro and configuracoes_financeiras if not exists
+  // Tabela: orcamentos
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS orcamentos (
+      numero BIGINT PRIMARY KEY,
+      data_criacao DATETIME DEFAULT CURRENT_TIMESTAMP,
+      cliente_id INT NOT NULL,
+      descricao TEXT,
+      status VARCHAR(50) DEFAULT 'Em Aberto',
+      situacao VARCHAR(50) DEFAULT 'Em Aberto',
+      parametro_financeiro_id INT DEFAULT 1,
+      desconto_percentual DECIMAL(6,2) DEFAULT 0.00,
+      desconto_valor DECIMAL(15,2) DEFAULT 0.00,
+      total_venda DECIMAL(15,2) DEFAULT NULL,
+      forma_pagamento_selecionada TEXT DEFAULT NULL,
+      anotacoes_cliente TEXT DEFAULT NULL,
+      anotacoes_conclusao TEXT DEFAULT NULL,
+      data_aprovacao DATETIME DEFAULT NULL,
+      data_entrada TEXT DEFAULT NULL,
+      fluxo_financeiro TEXT DEFAULT NULL,
+      FOREIGN KEY (cliente_id) REFERENCES clientes(id) ON DELETE CASCADE,
+      FOREIGN KEY (parametro_financeiro_id) REFERENCES Parametro_Financeiro(id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+  `);
+
+  // Tabela: projetos
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS projetos (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      orcamento_numero BIGINT NOT NULL,
+      nome VARCHAR(255) NOT NULL,
+      descricao TEXT,
+      ProjetoURL TEXT DEFAULT NULL,
+      ProjetoQtdPecas INT DEFAULT 0,
+      CustoTotal DECIMAL(15,2) DEFAULT 0.00,
+      CustoMaterial DECIMAL(15,2) DEFAULT 0.00,
+      CustoProducao DECIMAL(15,2) DEFAULT 0.00,
+      DuracaoFabricacao INT DEFAULT 0,
+      DuracaoMontagem INT DEFAULT 0,
+      perc_imposto DECIMAL(5,2) DEFAULT NULL,
+      perc_comissao DECIMAL(5,2) DEFAULT NULL,
+      perc_custo_financeiro DECIMAL(5,2) DEFAULT NULL,
+      perc_markup_lucro DECIMAL(5,2) DEFAULT NULL,
+      preco_venda_sugerido DECIMAL(15,2) DEFAULT 0.00,
+      preco_venda_final DECIMAL(15,2) DEFAULT 0.00,
+      parametro_financeiro_id INT DEFAULT 1,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (orcamento_numero) REFERENCES orcamentos(numero) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+  `);
+
+  // Tabela: arquivos_importados
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS arquivos_importados (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      nome_arquivo VARCHAR(255) NOT NULL,
+      tamanho INT NOT NULL,
+      tipo_layout VARCHAR(50) NOT NULL,
+      caminho_arquivo VARCHAR(500) NOT NULL,
+      projeto_id INT DEFAULT NULL,
+      data_upload DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (projeto_id) REFERENCES projetos(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+  `);
+
+  // Tabela: Projeto_Materiais
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS Projeto_Materiais (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      projeto_id INT NOT NULL,
+      referencia VARCHAR(255) NOT NULL,
+      descricao TEXT NOT NULL,
+      qtd DECIMAL(15,4) NOT NULL,
+      un VARCHAR(50) NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (projeto_id) REFERENCES projetos(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+  `);
+
+  // Tabela: projeto_anexos
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS projeto_anexos (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      projeto_id INT NOT NULL,
+      nome_original VARCHAR(255) NOT NULL,
+      nome_arquivo VARCHAR(255) NOT NULL,
+      caminho VARCHAR(500) NOT NULL,
+      tipo_mime VARCHAR(100) DEFAULT NULL,
+      tamanho INT DEFAULT NULL,
+      exibir_na_proposta VARCHAR(10) DEFAULT 'Sim',
+      criado_em DATETIME DEFAULT CURRENT_TIMESTAMP,
+      criado_por_nome VARCHAR(255) DEFAULT NULL,
+      FOREIGN KEY (projeto_id) REFERENCES projetos(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+  `);
+
+  // Tabela: Projeto_Modulo
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS Projeto_Modulo (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      projeto_id INT NOT NULL,
+      modulo VARCHAR(255) NOT NULL,
+      peca VARCHAR(255) NOT NULL,
+      imagem LONGTEXT DEFAULT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (projeto_id) REFERENCES projetos(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+  `);
+
+  // Tabela: Projeto_Chapa
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS Projeto_Chapa (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      projeto_id INT NOT NULL,
+      chapa VARCHAR(255) NOT NULL,
+      acabamento VARCHAR(255) NOT NULL,
+      DescChapa TEXT DEFAULT NULL,
+      item VARCHAR(255) NOT NULL,
+      descricao TEXT NOT NULL,
+      dimensao VARCHAR(255) NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (projeto_id) REFERENCES projetos(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+  `);
+
+  // Tabela: Projeto_Pecas
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS Projeto_Pecas (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      projeto_id INT NOT NULL,
+      peca VARCHAR(255) NOT NULL,
+      etiqueta VARCHAR(255) NOT NULL,
+      dimen VARCHAR(255) NOT NULL,
+      chapa VARCHAR(255) NOT NULL,
+      modulo VARCHAR(255) NOT NULL,
+      cod_item VARCHAR(255) NOT NULL,
+      imagem LONGTEXT DEFAULT NULL,
+      cor_barras VARCHAR(100) DEFAULT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (projeto_id) REFERENCES projetos(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+  `);
+
+  // Tabela: Material
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS Material (
+      MaterialReferencia VARCHAR(100) PRIMARY KEY,
+      MaterialDescricao VARCHAR(255) NOT NULL,
+      MaterialUnidade VARCHAR(20) DEFAULT NULL,
+      MaterialValorUnitario DECIMAL(15,4) DEFAULT 0.0000,
+      GrupoSigla VARCHAR(50) DEFAULT NULL,
+      ProdutoGrupo INT DEFAULT 8,
+      MaterialTipo VARCHAR(50) DEFAULT 'Produto',
+      MaterialImagem LONGTEXT DEFAULT NULL,
+      MaterialTempo INT DEFAULT 0,
+      ExibirNaProposta VARCHAR(10) DEFAULT 'Nao'
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+  `);
+
+  // Tabela: ProjetoItem
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS ProjetoItem (
+      ProjetoID INT NOT NULL,
+      ProjetoItemID INT NOT NULL,
+      MaterialReferencia VARCHAR(100) NOT NULL,
+      ProjetoItemVlrUnit DECIMAL(15,2) NOT NULL,
+      ProjetoItemUnidade VARCHAR(10) NOT NULL,
+      ProjetoItemQtd DECIMAL(15,4) NOT NULL,
+      ProjetoItemTotal DECIMAL(15,2) NOT NULL,
+      ProjetoItemTempo INT DEFAULT 0,
+      ProjetoItemDuracao INT DEFAULT 0,
+      PRIMARY KEY (ProjetoID, ProjetoItemID),
+      FOREIGN KEY (ProjetoID) REFERENCES projetos(id) ON DELETE CASCADE,
+      FOREIGN KEY (MaterialReferencia) REFERENCES Material(MaterialReferencia)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+  `);
+
+  // Tabela: formas_pagamento
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS formas_pagamento (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      nome VARCHAR(255) NOT NULL,
+      descricao TEXT DEFAULT NULL,
+      valor_minimo DECIMAL(15,2) DEFAULT 0.00,
+      valor_maximo DECIMAL(15,2) DEFAULT 0.00,
+      ativo VARCHAR(10) NOT NULL DEFAULT 'Sim',
+      ordem INT DEFAULT 1,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+  `);
+
+  // Tabela: condicoes_pagamento
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS condicoes_pagamento (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      forma_pagamento_id INT NOT NULL,
+      perc_entrada DECIMAL(5,2) DEFAULT 0.00,
+      num_parcelas INT DEFAULT 0,
+      perc_desconto DECIMAL(5,2) DEFAULT 0.00,
+      meio_pagamento VARCHAR(50) DEFAULT '',
+      descricao VARCHAR(255) NOT NULL,
+      ordem INT DEFAULT 1,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (forma_pagamento_id) REFERENCES formas_pagamento(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+  `);
+
+  // Tabela: proposta_compartilhamentos
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS proposta_compartilhamentos (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      orcamento_numero BIGINT NOT NULL,
+      token VARCHAR(255) UNIQUE NOT NULL,
+      criado_por INT DEFAULT NULL,
+      criado_por_nome VARCHAR(255) DEFAULT NULL,
+      criado_em DATETIME DEFAULT CURRENT_TIMESTAMP,
+      expira_em DATETIME NOT NULL,
+      acessos_count INT DEFAULT 0,
+      ultimo_acesso DATETIME DEFAULT NULL,
+      status VARCHAR(50) DEFAULT 'Ativo',
+      aprovado_em DATETIME DEFAULT NULL,
+      forma_pagamento_selecionada TEXT DEFAULT NULL,
+      anotacoes_cliente TEXT DEFAULT NULL,
+      FOREIGN KEY (orcamento_numero) REFERENCES orcamentos(numero) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+  `);
+
+  // Tabela: parametros_empresa
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS parametros_empresa (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      chave VARCHAR(50) NOT NULL UNIQUE,
+      tipo INT NOT NULL,
+      conteudo VARCHAR(255) DEFAULT NULL,
+      descricao TEXT DEFAULT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+  `);
+
+  // 4. Migrações automáticas de colunas adicionais
+  await ensureColumn(db, 'servicos', 'sequencia', 'INT DEFAULT 0');
+  await ensureColumn(db, 'ordens_servico', 'cronograma', 'LONGTEXT DEFAULT NULL');
+  await ensureColumn(db, 'Material', 'ExibirNaProposta', "VARCHAR(10) DEFAULT 'Nao'");
+  await ensureColumn(db, 'Material', 'ProdutoGrupo', 'INT DEFAULT 8');
+  await ensureColumn(db, 'Material', 'MaterialTempo', 'INT DEFAULT 0');
+  await ensureColumn(db, 'projetos', 'ProjetoURL', 'TEXT DEFAULT NULL');
+  await ensureColumn(db, 'projetos', 'ProjetoQtdPecas', 'INT DEFAULT 0');
+  await ensureColumn(db, 'projetos', 'CustoMaterial', 'DECIMAL(15,2) DEFAULT 0.00');
+  await ensureColumn(db, 'projetos', 'CustoProducao', 'DECIMAL(15,2) DEFAULT 0.00');
+  await ensureColumn(db, 'projetos', 'DuracaoFabricacao', 'INT DEFAULT 0');
+  await ensureColumn(db, 'projetos', 'DuracaoMontagem', 'INT DEFAULT 0');
+  await ensureColumn(db, 'projetos', 'perc_imposto', 'DECIMAL(5,2) DEFAULT NULL');
+  await ensureColumn(db, 'projetos', 'perc_comissao', 'DECIMAL(5,2) DEFAULT NULL');
+  await ensureColumn(db, 'projetos', 'perc_custo_financeiro', 'DECIMAL(5,2) DEFAULT NULL');
+  await ensureColumn(db, 'projetos', 'perc_markup_lucro', 'DECIMAL(5,2) DEFAULT NULL');
+  await ensureColumn(db, 'projetos', 'preco_venda_sugerido', 'DECIMAL(15,2) DEFAULT 0.00');
+  await ensureColumn(db, 'projetos', 'preco_venda_final', 'DECIMAL(15,2) DEFAULT 0.00');
+  await ensureColumn(db, 'projetos', 'parametro_financeiro_id', 'INT DEFAULT 1');
+
+  await ensureColumn(db, 'orcamentos', 'parametro_financeiro_id', 'INT DEFAULT 1');
+  await ensureColumn(db, 'orcamentos', 'desconto_percentual', 'DECIMAL(6,2) DEFAULT 0.00');
+  await ensureColumn(db, 'orcamentos', 'desconto_valor', 'DECIMAL(15,2) DEFAULT 0.00');
+  await ensureColumn(db, 'orcamentos', 'total_venda', 'DECIMAL(15,2) DEFAULT NULL');
+  await ensureColumn(db, 'orcamentos', 'forma_pagamento_selecionada', 'TEXT DEFAULT NULL');
+  await ensureColumn(db, 'orcamentos', 'anotacoes_cliente', 'TEXT DEFAULT NULL');
+  await ensureColumn(db, 'orcamentos', 'anotacoes_conclusao', 'TEXT DEFAULT NULL');
+  await ensureColumn(db, 'orcamentos', 'data_aprovacao', 'DATETIME DEFAULT NULL');
+  await ensureColumn(db, 'orcamentos', 'data_entrada', 'TEXT DEFAULT NULL');
+  await ensureColumn(db, 'orcamentos', 'fluxo_financeiro', 'TEXT DEFAULT NULL');
+  await ensureColumn(db, 'orcamentos', 'status', "VARCHAR(50) DEFAULT 'Em Aberto'");
+  await ensureColumn(db, 'orcamentos', 'situacao', "VARCHAR(50) DEFAULT 'Em Aberto'");
+
+  await ensureColumn(db, 'projeto_anexos', 'exibir_na_proposta', "VARCHAR(10) DEFAULT 'Sim'");
+  await ensureColumn(db, 'proposta_compartilhamentos', 'aprovado_em', 'DATETIME DEFAULT NULL');
+  await ensureColumn(db, 'proposta_compartilhamentos', 'forma_pagamento_selecionada', 'TEXT DEFAULT NULL');
+  await ensureColumn(db, 'proposta_compartilhamentos', 'anotacoes_cliente', 'TEXT DEFAULT NULL');
+
+  // 5. Seeds padrão caso o banco esteja vazio
+
+  // Seed default Parametro_Financeiro and configuracoes_financeiras
   const existingParam = await db.get('SELECT * FROM Parametro_Financeiro WHERE id = 1');
   if (!existingParam) {
     await db.run(`INSERT INTO Parametro_Financeiro (id, nome, situacao) VALUES (1, 'Padrão Fábrica', 'Ativado')`);
@@ -517,7 +623,7 @@ export async function initDb() {
     `);
   }
 
-  // Seed default admin user if not exists
+  // Seed default admin user
   const adminEmail = 'admin@erp.com';
   const existingAdmin = await db.get('SELECT * FROM usuarios WHERE email = ?', [adminEmail]);
   if (!existingAdmin) {
@@ -529,9 +635,9 @@ export async function initDb() {
     console.log('Seeded default admin user: admin@erp.com / admin123');
   }
 
-  // Seed some dummy clients if empty
+  // Seed default clients if empty
   const clientsCount = await db.get('SELECT COUNT(*) as count FROM clientes');
-  if (clientsCount.count === 0) {
+  if (clientsCount && (clientsCount.count === 0 || clientsCount.count === '0')) {
     await db.run('INSERT INTO clientes (nome, documento, email, telefone, status) VALUES (?, ?, ?, ?, ?)', [
       'Tech Solutions Ltda',
       '12.345.678/0001-99',
@@ -556,9 +662,9 @@ export async function initDb() {
     console.log('Seeded initial mock clients');
   }
 
-  // Seed some dummy contracts if empty
+  // Seed default contracts if empty
   const contractsCount = await db.get('SELECT COUNT(*) as count FROM contratos');
-  if (contractsCount.count === 0) {
+  if (contractsCount && (contractsCount.count === 0 || contractsCount.count === '0')) {
     const client1 = await db.get('SELECT id FROM clientes WHERE nome = ?', ['Tech Solutions Ltda']);
     const client2 = await db.get('SELECT id FROM clientes WHERE nome = ?', ['Indústrias Metalúrgicas Alfa']);
 
@@ -585,45 +691,20 @@ export async function initDb() {
     console.log('Seeded initial mock contracts');
   }
 
-  // Seed some dummy services if empty
+  // Seed default services if empty
   const servicesCount = await db.get('SELECT COUNT(*) as count FROM servicos');
-  if (servicesCount.count === 0) {
-    await db.run('INSERT INTO servicos (nome, unidade, tempo, sequencia) VALUES (?, ?, ?, ?)', [
-      'Separação',
-      1,
-      15,
-      5
-    ]);
-    await db.run('INSERT INTO servicos (nome, unidade, tempo, sequencia) VALUES (?, ?, ?, ?)', [
-      'Usinagem',
-      2,
-      45,
-      10
-    ]);
-    await db.run('INSERT INTO servicos (nome, unidade, tempo, sequencia) VALUES (?, ?, ?, ?)', [
-      'Fitagem',
-      3,
-      10,
-      20
-    ]);
-    await db.run('INSERT INTO servicos (nome, unidade, tempo, sequencia) VALUES (?, ?, ?, ?)', [
-      'Montagem de caixa',
-      4,
-      30,
-      30
-    ]);
-    await db.run('INSERT INTO servicos (nome, unidade, tempo, sequencia) VALUES (?, ?, ?, ?)', [
-      'Especial',
-      6,
-      60,
-      40
-    ]);
+  if (servicesCount && (servicesCount.count === 0 || servicesCount.count === '0')) {
+    await db.run('INSERT INTO servicos (nome, unidade, tempo, sequencia) VALUES (?, ?, ?, ?)', ['Separação', 1, 15, 5]);
+    await db.run('INSERT INTO servicos (nome, unidade, tempo, sequencia) VALUES (?, ?, ?, ?)', ['Usinagem', 2, 45, 10]);
+    await db.run('INSERT INTO servicos (nome, unidade, tempo, sequencia) VALUES (?, ?, ?, ?)', ['Fitagem', 3, 10, 20]);
+    await db.run('INSERT INTO servicos (nome, unidade, tempo, sequencia) VALUES (?, ?, ?, ?)', ['Montagem de caixa', 4, 30, 30]);
+    await db.run('INSERT INTO servicos (nome, unidade, tempo, sequencia) VALUES (?, ?, ?, ?)', ['Especial', 6, 60, 40]);
     console.log('Seeded initial mock services');
   }
 
-  // Seed some dummy Work Orders if empty
+  // Seed default Work Orders if empty
   const osCount = await db.get('SELECT COUNT(*) as count FROM ordens_servico');
-  if (osCount.count === 0) {
+  if (osCount && (osCount.count === 0 || osCount.count === '0')) {
     const client = await db.get('SELECT id FROM clientes ORDER BY id ASC LIMIT 1');
     const service1 = await db.get('SELECT id, tempo FROM servicos WHERE nome = ?', ['Usinagem']);
     const service2 = await db.get('SELECT id, tempo FROM servicos WHERE nome = ?', ['Fitagem']);
@@ -646,9 +727,9 @@ export async function initDb() {
     }
   }
 
-  // Seed some dummy budgets if empty
+  // Seed default budgets if empty
   const budgetsCount = await db.get('SELECT COUNT(*) as count FROM orcamentos');
-  if (budgetsCount.count === 0) {
+  if (budgetsCount && (budgetsCount.count === 0 || budgetsCount.count === '0')) {
     const client = await db.get('SELECT id FROM clientes ORDER BY id ASC LIMIT 1');
     if (client) {
       const year = new Date().getFullYear();
@@ -660,9 +741,9 @@ export async function initDb() {
     }
   }
 
-  // Seed some dummy projects if empty
+  // Seed default projects if empty
   const projectsCount = await db.get('SELECT COUNT(*) as count FROM projetos');
-  if (projectsCount.count === 0) {
+  if (projectsCount && (projectsCount.count === 0 || projectsCount.count === '0')) {
     const budget = await db.get('SELECT numero FROM orcamentos ORDER BY numero ASC LIMIT 1');
     if (budget) {
       await db.run(
@@ -677,418 +758,70 @@ export async function initDb() {
     }
   }
 
-  // Schema migration: add CustoMaterial, CustoProducao, DuracaoFabricacao and DuracaoMontagem columns to projetos if they don't exist
-  try {
-    const tableInfoProj = await db.all("PRAGMA table_info(projetos)");
-    const hasCustoMaterialProj = tableInfoProj.some(col => col.name === 'CustoMaterial');
-    const hasCustoProducaoProj = tableInfoProj.some(col => col.name === 'CustoProducao');
-    const hasDuracaoFabricacaoProj = tableInfoProj.some(col => col.name === 'DuracaoFabricacao');
-    const hasDuracaoProj = tableInfoProj.some(col => col.name === 'Duracao');
-    const hasDuracaoMontagemProj = tableInfoProj.some(col => col.name === 'DuracaoMontagem');
+  // Seed FAB.MON.CLI in Material if not exists
+  const fabMonCli = await db.get("SELECT MaterialReferencia FROM Material WHERE MaterialReferencia = 'FAB.MON.CLI'");
+  if (!fabMonCli) {
+    await db.run(
+      `INSERT INTO Material (MaterialReferencia, MaterialDescricao, MaterialUnidade, MaterialValorUnitario, GrupoSigla, ProdutoGrupo, MaterialTipo, MaterialTempo)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      ['FAB.MON.CLI', 'Montagem cliente', 'DIA', 0.0, null, 8, 'Serviço', 0]
+    );
+    console.log("Migration: Seeded FAB.MON.CLI in Material table.");
+  }
 
-    if (!hasCustoMaterialProj) {
-      await db.exec("ALTER TABLE projetos ADD COLUMN CustoMaterial DECIMAL(15,2) DEFAULT 0.0");
-      console.log("Migration: Added CustoMaterial column to projetos.");
-    }
-    if (!hasCustoProducaoProj) {
-      await db.exec("ALTER TABLE projetos ADD COLUMN CustoProducao DECIMAL(15,2) DEFAULT 0.0");
-      console.log("Migration: Added CustoProducao column to projetos.");
-    }
-    if (hasDuracaoProj && !hasDuracaoFabricacaoProj) {
-      try {
-        await db.exec("ALTER TABLE projetos RENAME COLUMN Duracao TO DuracaoFabricacao");
-        console.log("Migration: Renamed Duracao to DuracaoFabricacao in projetos.");
-      } catch (e) {
-        await db.exec("ALTER TABLE projetos ADD COLUMN DuracaoFabricacao INTEGER DEFAULT 0");
-        await db.exec("UPDATE projetos SET DuracaoFabricacao = Duracao");
-        console.log("Migration: Added DuracaoFabricacao and copied from Duracao.");
-      }
-    } else if (!hasDuracaoFabricacaoProj) {
-      await db.exec("ALTER TABLE projetos ADD COLUMN DuracaoFabricacao INTEGER DEFAULT 0");
-      console.log("Migration: Added DuracaoFabricacao column to projetos.");
-    }
-    if (!hasDuracaoMontagemProj) {
-      await db.exec("ALTER TABLE projetos ADD COLUMN DuracaoMontagem INTEGER DEFAULT 0");
-      console.log("Migration: Added DuracaoMontagem column to projetos.");
-    }
+  // Seed Formas de Pagamento & Condicoes de Pagamento if empty
+  const countFormas = await db.get('SELECT COUNT(*) as cnt FROM formas_pagamento');
+  if (countFormas && (countFormas.cnt === 0 || countFormas.cnt === '0')) {
+    const resForma = await db.run(
+      `INSERT INTO formas_pagamento (nome, descricao, valor_minimo, valor_maximo, ativo, ordem)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      ['Orçamento até 10 mil', 'Condições para orçamentos de até R$ 10.000,00', 0, 10000, 'Sim', 1]
+    );
+    const formaId = resForma.lastID;
 
-    const tableInfoProjCols = await db.all("PRAGMA table_info(projetos)");
-    if (!tableInfoProjCols.some(col => col.name === 'perc_imposto')) {
-      await db.exec("ALTER TABLE projetos ADD COLUMN perc_imposto DECIMAL(5,2) DEFAULT NULL");
-    }
-    if (!tableInfoProjCols.some(col => col.name === 'perc_comissao')) {
-      await db.exec("ALTER TABLE projetos ADD COLUMN perc_comissao DECIMAL(5,2) DEFAULT NULL");
-    }
-    if (!tableInfoProjCols.some(col => col.name === 'perc_custo_financeiro')) {
-      await db.exec("ALTER TABLE projetos ADD COLUMN perc_custo_financeiro DECIMAL(5,2) DEFAULT NULL");
-    }
-    if (!tableInfoProjCols.some(col => col.name === 'perc_markup_lucro')) {
-      await db.exec("ALTER TABLE projetos ADD COLUMN perc_markup_lucro DECIMAL(5,2) DEFAULT NULL");
-    }
-    if (!tableInfoProjCols.some(col => col.name === 'preco_venda_sugerido')) {
-      await db.exec("ALTER TABLE projetos ADD COLUMN preco_venda_sugerido DECIMAL(15,2) DEFAULT 0.0");
-    }
-    if (!tableInfoProjCols.some(col => col.name === 'preco_venda_final')) {
-      await db.exec("ALTER TABLE projetos ADD COLUMN preco_venda_final DECIMAL(15,2) DEFAULT 0.0");
-    }
-    if (!tableInfoProjCols.some(col => col.name === 'parametro_financeiro_id')) {
-      await db.exec("ALTER TABLE projetos ADD COLUMN parametro_financeiro_id INTEGER DEFAULT 1");
-      console.log("Migration: Added parametro_financeiro_id column to projetos.");
-    }
-
-    // Migration for configuracoes_financeiras table structure
-    const tableInfoConf = await db.all("PRAGMA table_info(configuracoes_financeiras)");
-    if (!tableInfoConf.some(col => col.name === 'parametro_id')) {
-      await db.exec("PRAGMA foreign_keys = OFF;");
-      await db.exec("BEGIN TRANSACTION;");
-      await db.exec(`
-        CREATE TABLE IF NOT EXISTS Parametro_Financeiro (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          nome TEXT NOT NULL,
-          situacao TEXT DEFAULT 'Ativado' CHECK(situacao IN ('Ativado', 'Desativado')),
-          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        );
-      `);
-      const p1 = await db.get("SELECT id FROM Parametro_Financeiro WHERE id = 1");
-      if (!p1) {
-        await db.run("INSERT INTO Parametro_Financeiro (id, nome, situacao) VALUES (1, 'Padrão Fábrica', 'Ativado')");
-      }
-      await db.exec(`
-        CREATE TABLE configuracoes_financeiras_new (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          parametro_id INTEGER NOT NULL UNIQUE,
-          perc_imposto DECIMAL(5,2) DEFAULT 6.00,
-          perc_comissao DECIMAL(5,2) DEFAULT 5.00,
-          perc_custo_financeiro DECIMAL(5,2) DEFAULT 4.00,
-          perc_markup_lucro DECIMAL(5,2) DEFAULT 20.00,
-          perc_margem_minima DECIMAL(5,2) DEFAULT 10.00,
-          metodo_calculo TEXT DEFAULT 'divisor',
-          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-          FOREIGN KEY (parametro_id) REFERENCES Parametro_Financeiro(id) ON DELETE CASCADE
-        );
-      `);
-      await db.exec(`
-        INSERT INTO configuracoes_financeiras_new (id, parametro_id, perc_imposto, perc_comissao, perc_custo_financeiro, perc_markup_lucro, perc_margem_minima, metodo_calculo, updated_at)
-        SELECT id, 1, perc_imposto, perc_comissao, perc_custo_financeiro, perc_markup_lucro, perc_margem_minima, metodo_calculo, updated_at FROM configuracoes_financeiras;
-      `);
-      await db.exec("DROP TABLE configuracoes_financeiras;");
-      await db.exec("ALTER TABLE configuracoes_financeiras_new RENAME TO configuracoes_financeiras;");
-      await db.exec("COMMIT;");
-      await db.exec("PRAGMA foreign_keys = ON;");
-      console.log("Migration: Recreated configuracoes_financeiras table with parametro_id column.");
-    }
-
-    const tableInfoOrc = await db.all("PRAGMA table_info(orcamentos)");
-    const hasCustoMaterialOrc = tableInfoOrc.some(col => col.name === 'CustoMaterial');
-    const hasCustoProducaoOrc = tableInfoOrc.some(col => col.name === 'CustoProducao');
-
-    if (hasCustoMaterialOrc) {
-      await db.exec("ALTER TABLE orcamentos DROP COLUMN CustoMaterial");
-      console.log("Migration: Dropped CustoMaterial column from orcamentos.");
-    }
-    if (hasCustoProducaoOrc) {
-      await db.exec("ALTER TABLE orcamentos DROP COLUMN CustoProducao");
-      console.log("Migration: Dropped CustoProducao column from orcamentos.");
-    }
-
-    const hasStatusOrc = tableInfoOrc.some(col => col.name === 'status');
-    if (!hasStatusOrc) {
-      await db.exec("ALTER TABLE orcamentos ADD COLUMN status TEXT DEFAULT 'Em Aberto'");
-      console.log("Migration: Added status column to orcamentos.");
-    }
-
-    const tableInfoMat = await db.all("PRAGMA table_info(Material)");
-    const hasMaterialTempo = tableInfoMat.some(col => col.name === 'MaterialTempo');
-    if (!hasMaterialTempo) {
-      await db.exec("ALTER TABLE Material ADD COLUMN MaterialTempo INTEGER DEFAULT 0");
-      console.log("Migration: Added MaterialTempo column to Material table.");
-    }
-    const hasExibirNaProposta = tableInfoMat.some(col => col.name === 'ExibirNaProposta');
-    if (!hasExibirNaProposta) {
-      await db.exec("ALTER TABLE Material ADD COLUMN ExibirNaProposta TEXT DEFAULT 'Nao'");
-      console.log("Migration: Added ExibirNaProposta column to Material table.");
-    }
-
-    const hasProdutoGrupo = tableInfoMat.some(col => col.name === 'ProdutoGrupo');
-    if (!hasProdutoGrupo) {
-      await db.exec("ALTER TABLE Material ADD COLUMN ProdutoGrupo INTEGER DEFAULT 8");
-      console.log("Migration: Added ProdutoGrupo column to Material table.");
-    }
-    // Todos os produtos já cadastrados, atribuir o domínio Outros (8) se nulo ou não definido
-    await db.exec("UPDATE Material SET ProdutoGrupo = 8 WHERE ProdutoGrupo IS NULL OR ProdutoGrupo = 0");
-
-    const tableInfoPi = await db.all("PRAGMA table_info(ProjetoItem)");
-    const hasPiTempo = tableInfoPi.some(col => col.name === 'ProjetoItemTempo');
-    const hasPiDuracao = tableInfoPi.some(col => col.name === 'ProjetoItemDuracao');
-
-    if (!hasPiTempo) {
-      await db.exec("ALTER TABLE ProjetoItem ADD COLUMN ProjetoItemTempo INTEGER DEFAULT 0");
-      console.log("Migration: Added ProjetoItemTempo column to ProjetoItem table.");
-    }
-    if (!hasPiDuracao) {
-      await db.exec("ALTER TABLE ProjetoItem ADD COLUMN ProjetoItemDuracao INTEGER DEFAULT 0");
-      console.log("Migration: Added ProjetoItemDuracao column to ProjetoItem table.");
-    }
-
-    if (!hasPiTempo || !hasPiDuracao) {
-      await db.exec(`
-        UPDATE ProjetoItem
-        SET 
-          ProjetoItemTempo = COALESCE((SELECT MaterialTempo FROM Material WHERE Material.MaterialReferencia = ProjetoItem.MaterialReferencia), 0),
-          ProjetoItemDuracao = CAST(ROUND(COALESCE((SELECT MaterialTempo FROM Material WHERE Material.MaterialReferencia = ProjetoItem.MaterialReferencia), 0) * ProjetoItemQtd) AS INTEGER)
-      `);
-      console.log("Migration: Backfilled ProjetoItemTempo and ProjetoItemDuracao.");
-    }
-
-    // Migration to allow 'DIA' in Material table check constraint if needed
-    const matTableSql = await db.get("SELECT sql FROM sqlite_master WHERE type='table' AND name='Material'");
-    if (matTableSql && matTableSql.sql && !matTableSql.sql.includes("'DIA'")) {
-      await db.exec("PRAGMA foreign_keys = OFF;");
-      await db.exec("BEGIN TRANSACTION;");
-      await db.exec(`
-        CREATE TABLE Material_new (
-          MaterialReferencia TEXT PRIMARY KEY,
-          MaterialDescricao TEXT NOT NULL,
-          MaterialUnidade TEXT CHECK(MaterialUnidade IN ('CHP', 'M2', 'M', 'L', 'UNI', 'PAR', 'KG', 'CXA', 'VAR', 'DIA')),
-          MaterialValorUnitario REAL DEFAULT 0.0,
-          GrupoSigla TEXT,
-          ProdutoGrupo INTEGER DEFAULT 8,
-          MaterialTipo TEXT DEFAULT 'Produto' CHECK(MaterialTipo IN ('Produto', 'Serviço')),
-          MaterialImagem TEXT,
-          MaterialTempo INTEGER DEFAULT 0,
-          ExibirNaProposta TEXT DEFAULT 'Nao'
-        );
-      `);
-      await db.exec("INSERT INTO Material_new SELECT MaterialReferencia, MaterialDescricao, MaterialUnidade, MaterialValorUnitario, GrupoSigla, COALESCE(ProdutoGrupo, 8), MaterialTipo, MaterialImagem, MaterialTempo, COALESCE(ExibirNaProposta, 'Nao') FROM Material;");
-      await db.exec("DROP TABLE Material;");
-      await db.exec("ALTER TABLE Material_new RENAME TO Material;");
-      await db.exec("COMMIT;");
-      await db.exec("PRAGMA foreign_keys = ON;");
-      console.log("Migration: Recreated Material table with 'DIA' constraint.");
-    }
-
-    // Ensure 'FAB.MON.CLI' exists in Material
-    const fabMonCli = await db.get("SELECT MaterialReferencia FROM Material WHERE MaterialReferencia = 'FAB.MON.CLI'");
-    if (!fabMonCli) {
+    if (formaId) {
       await db.run(
-        `INSERT INTO Material (MaterialReferencia, MaterialDescricao, MaterialUnidade, MaterialValorUnitario, GrupoSigla, ProdutoGrupo, MaterialTipo, MaterialTempo)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        ['FAB.MON.CLI', 'Montagem cliente', 'DIA', 0.0, null, 8, 'Serviço', 0]
+        `INSERT INTO condicoes_pagamento (forma_pagamento_id, perc_entrada, num_parcelas, perc_desconto, meio_pagamento, descricao, ordem)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [formaId, 100, 0, 10, '', 'À vista - 10% desc', 1]
       );
-      console.log("Migration: Seeded FAB.MON.CLI in Material table.");
-    }
-
-    // Recalculate DuracaoFabricacao excluding FAB.MON.CLI and sync DuracaoMontagem for existing projects
-    await db.exec(`
-      UPDATE projetos
-      SET 
-        DuracaoFabricacao = COALESCE((
-          SELECT SUM(pi.ProjetoItemDuracao)
-          FROM ProjetoItem pi
-          WHERE pi.ProjetoID = projetos.id AND pi.MaterialReferencia != 'FAB.MON.CLI'
-        ), DuracaoFabricacao, 0),
-        DuracaoMontagem = COALESCE((
-          SELECT CAST(ROUND(pi.ProjetoItemQtd) AS INTEGER)
-          FROM ProjetoItem pi
-          WHERE pi.ProjetoID = projetos.id AND pi.MaterialReferencia = 'FAB.MON.CLI'
-        ), DuracaoMontagem, 0)
-    `);
-
-    // Create Formas de Pagamento & Condicoes de Pagamento tables
-    await db.exec(`
-      CREATE TABLE IF NOT EXISTS formas_pagamento (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        nome TEXT NOT NULL,
-        descricao TEXT,
-        valor_minimo REAL DEFAULT 0.0,
-        valor_maximo REAL DEFAULT 0.0,
-        ativo TEXT NOT NULL DEFAULT 'Sim',
-        ordem INTEGER DEFAULT 1,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      await db.run(
+        `INSERT INTO condicoes_pagamento (forma_pagamento_id, perc_entrada, num_parcelas, perc_desconto, meio_pagamento, descricao, ordem)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [formaId, 50, 1, 5, '', 'Entrada 50% + saldo entrega', 2]
       );
-
-      CREATE TABLE IF NOT EXISTS condicoes_pagamento (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        forma_pagamento_id INTEGER NOT NULL,
-        perc_entrada REAL DEFAULT 0.0,
-        num_parcelas INTEGER DEFAULT 0,
-        perc_desconto REAL DEFAULT 0.0,
-        meio_pagamento TEXT DEFAULT '',
-        descricao TEXT NOT NULL,
-        ordem INTEGER DEFAULT 1,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (forma_pagamento_id) REFERENCES formas_pagamento(id) ON DELETE CASCADE
+      await db.run(
+        `INSERT INTO condicoes_pagamento (forma_pagamento_id, perc_entrada, num_parcelas, perc_desconto, meio_pagamento, descricao, ordem)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [formaId, 40, 3, 0, 'C.Crédito', 'Entrada 40% + 3x C.Crédito', 3]
       );
+      console.log('Database seed: Formas de Pagamento e Condições criadas com sucesso.');
+    }
+  }
 
-      CREATE TABLE IF NOT EXISTS proposta_compartilhamentos (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        orcamento_numero INTEGER NOT NULL,
-        token TEXT UNIQUE NOT NULL,
-        criado_por INTEGER,
-        criado_por_nome TEXT,
-        criado_em DATETIME DEFAULT CURRENT_TIMESTAMP,
-        expira_em DATETIME NOT NULL,
-        acessos_count INTEGER DEFAULT 0,
-        ultimo_acesso DATETIME,
-        status TEXT DEFAULT 'Ativo',
-        FOREIGN KEY (orcamento_numero) REFERENCES orcamentos(numero) ON DELETE CASCADE
+  // Seed ParametrosEmpresa if empty
+  const paramsCount = await db.get('SELECT COUNT(*) as count FROM parametros_empresa');
+  if (paramsCount && (paramsCount.count === 0 || paramsCount.count === '0')) {
+    const seedParams = [
+      { chave: 'RAZAO_SOC', tipo: 1, conteudo: 'EZATTUS PLANEJADOS LTDA', descricao: 'Razão social oficial da empresa' },
+      { chave: 'NOME_FANT', tipo: 1, conteudo: 'EZATTUS PLANEJADOS', descricao: 'Nome fantasia da marca' },
+      { chave: 'CNPJ', tipo: 1, conteudo: '12.345.678/0001-90', descricao: 'CNPJ da matriz' },
+      { chave: 'VAL_HORA', tipo: 2, conteudo: '85.00', descricao: 'Valor da hora técnica padrão (R$)' },
+      { chave: 'DT_FUNDAC', tipo: 3, conteudo: '2015-06-10', descricao: 'Data de fundação da empresa' },
+      { chave: 'DESC_MAX', tipo: 4, conteudo: '15.00', descricao: 'Percentual de desconto máximo para vendedores (%)' },
+      { chave: 'MIN_PECAS', tipo: 5, conteudo: '1 UN', descricao: 'Lote mínimo padrão de peças por projeto' },
+      { chave: 'HORA_INI', tipo: 6, conteudo: '08:00', descricao: 'Horário de início do expediente' },
+      { chave: 'EMP_LOGO', tipo: 7, conteudo: '', descricao: 'Logomarca da empresa para cabeçalhos e documentos' },
+      { chave: 'EMP_ASS', tipo: 7, conteudo: '', descricao: 'Assinatura do responsável para contratos e recibos' }
+    ];
+
+    for (const p of seedParams) {
+      await db.run(
+        'INSERT INTO parametros_empresa (chave, tipo, conteudo, descricao) VALUES (?, ?, ?, ?)',
+        [p.chave, p.tipo, p.conteudo, p.descricao]
       );
-    `);
-
-    // Seed default Formas de Pagamento if empty
-    const countFormas = await db.get('SELECT COUNT(*) as cnt FROM formas_pagamento');
-    if (countFormas && countFormas.cnt === 0) {
-      const resForma = await db.run(
-        `INSERT INTO formas_pagamento (nome, descricao, valor_minimo, valor_maximo, ativo, ordem)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        ['Orçamento até 10 mil', 'Condições para orçamentos de até R$ 10.000,00', 0, 10000, 'Sim', 1]
-      );
-      const formaId = resForma.lastID;
-
-      if (formaId) {
-        await db.run(
-          `INSERT INTO condicoes_pagamento (forma_pagamento_id, perc_entrada, num_parcelas, perc_desconto, meio_pagamento, descricao, ordem)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          [formaId, 100, 0, 10, '', 'À vista - 10% desc', 1]
-        );
-        await db.run(
-          `INSERT INTO condicoes_pagamento (forma_pagamento_id, perc_entrada, num_parcelas, perc_desconto, meio_pagamento, descricao, ordem)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          [formaId, 50, 1, 5, '', 'Entrada 50% + saldo entrega', 2]
-        );
-        await db.run(
-          `INSERT INTO condicoes_pagamento (forma_pagamento_id, perc_entrada, num_parcelas, perc_desconto, meio_pagamento, descricao, ordem)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          [formaId, 40, 3, 0, 'C.Crédito', 'Entrada 40% + 3x C.Crédito', 3]
-        );
-        console.log('Database seed: Formas de Pagamento e Condições criadas com sucesso.');
-      }
     }
-    // Check migration for projeto_anexos exibir_na_proposta column
-    try {
-      const tableInfoAnexos = await db.all("PRAGMA table_info(projeto_anexos)");
-      const hasExibirNaProposta = tableInfoAnexos.some(col => col.name === 'exibir_na_proposta');
-      if (!hasExibirNaProposta) {
-        await db.exec("ALTER TABLE projeto_anexos ADD COLUMN exibir_na_proposta TEXT DEFAULT 'Sim'");
-        console.log("Migration: Added exibir_na_proposta column to projeto_anexos table.");
-      }
-    } catch (e) {
-      console.error("Migration check for projeto_anexos error:", e);
-    }
-
-    // Check migration for orcamentos approval and conclusion fields
-    try {
-      const tableInfoOrc = await db.all("PRAGMA table_info(orcamentos)");
-      const colNamesOrc = tableInfoOrc.map(col => col.name);
-      if (!colNamesOrc.includes('forma_pagamento_selecionada')) {
-        await db.exec("ALTER TABLE orcamentos ADD COLUMN forma_pagamento_selecionada TEXT");
-      }
-      if (!colNamesOrc.includes('anotacoes_cliente')) {
-        await db.exec("ALTER TABLE orcamentos ADD COLUMN anotacoes_cliente TEXT");
-      }
-      if (!colNamesOrc.includes('data_aprovacao')) {
-        await db.exec("ALTER TABLE orcamentos ADD COLUMN data_aprovacao DATETIME");
-      }
-      if (!colNamesOrc.includes('desconto_percentual')) {
-        await db.exec("ALTER TABLE orcamentos ADD COLUMN desconto_percentual DECIMAL(6,2) DEFAULT 0.0");
-      }
-      if (!colNamesOrc.includes('desconto_valor')) {
-        await db.exec("ALTER TABLE orcamentos ADD COLUMN desconto_valor DECIMAL(15,2) DEFAULT 0.0");
-      }
-      if (!colNamesOrc.includes('total_venda')) {
-        await db.exec("ALTER TABLE orcamentos ADD COLUMN total_venda DECIMAL(15,2) DEFAULT NULL");
-      }
-      if (!colNamesOrc.includes('anotacoes_conclusao')) {
-        await db.exec("ALTER TABLE orcamentos ADD COLUMN anotacoes_conclusao TEXT");
-      }
-      if (!colNamesOrc.includes('situacao')) {
-        await db.exec("ALTER TABLE orcamentos ADD COLUMN situacao TEXT DEFAULT 'Em Aberto'");
-      }
-      if (!colNamesOrc.includes('data_entrada')) {
-        await db.exec("ALTER TABLE orcamentos ADD COLUMN data_entrada TEXT");
-      }
-      if (!colNamesOrc.includes('fluxo_financeiro')) {
-        await db.exec("ALTER TABLE orcamentos ADD COLUMN fluxo_financeiro TEXT");
-      }
-    } catch (e) {
-      console.error("Migration check for orcamentos approval fields error:", e);
-    }
-
-    // Check migration for proposta_compartilhamentos approval fields
-    try {
-      const tableInfoShare = await db.all("PRAGMA table_info(proposta_compartilhamentos)");
-      const colNamesShare = tableInfoShare.map(col => col.name);
-      if (!colNamesShare.includes('aprovado_em')) {
-        await db.exec("ALTER TABLE proposta_compartilhamentos ADD COLUMN aprovado_em DATETIME");
-      }
-      if (!colNamesShare.includes('forma_pagamento_selecionada')) {
-        await db.exec("ALTER TABLE proposta_compartilhamentos ADD COLUMN forma_pagamento_selecionada TEXT");
-      }
-      if (!colNamesShare.includes('anotacoes_cliente')) {
-        await db.exec("ALTER TABLE proposta_compartilhamentos ADD COLUMN anotacoes_cliente TEXT");
-      }
-    } catch (e) {
-      console.error("Migration check for proposta_compartilhamentos approval fields error:", e);
-    }
-
-    // Create ParametrosEmpresa Table
-    try {
-      await db.exec(`
-        CREATE TABLE IF NOT EXISTS parametros_empresa (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          chave VARCHAR(10) NOT NULL UNIQUE,
-          tipo INTEGER NOT NULL,
-          conteudo VARCHAR(60),
-          descricao TEXT,
-          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-      `);
-
-      const paramsCount = await db.get('SELECT COUNT(*) as count FROM parametros_empresa');
-      if (paramsCount && paramsCount.count === 0) {
-        const seedParams = [
-          { chave: 'RAZAO_SOC', tipo: 1, conteudo: 'EZATTUS PLANEJADOS LTDA', descricao: 'Razão social oficial da empresa' },
-          { chave: 'NOME_FANT', tipo: 1, conteudo: 'EZATTUS PLANEJADOS', descricao: 'Nome fantasia da marca' },
-          { chave: 'CNPJ', tipo: 1, conteudo: '12.345.678/0001-90', descricao: 'CNPJ da matriz' },
-          { chave: 'VAL_HORA', tipo: 2, conteudo: '85.00', descricao: 'Valor da hora técnica padrão (R$)' },
-          { chave: 'DT_FUNDAC', tipo: 3, conteudo: '2015-06-10', descricao: 'Data de fundação da empresa' },
-          { chave: 'DESC_MAX', tipo: 4, conteudo: '15.00', descricao: 'Percentual de desconto máximo para vendedores (%)' },
-          { chave: 'MIN_PECAS', tipo: 5, conteudo: '1 UN', descricao: 'Lote mínimo padrão de peças por projeto' },
-          { chave: 'HORA_INI', tipo: 6, conteudo: '08:00', descricao: 'Horário de início do expediente' },
-          { chave: 'EMP_LOGO', tipo: 7, conteudo: '', descricao: 'Logomarca da empresa para cabeçalhos e documentos' },
-          { chave: 'EMP_ASS', tipo: 7, conteudo: '', descricao: 'Assinatura do responsável para contratos e recibos' }
-        ];
-
-        for (const p of seedParams) {
-          await db.run(
-            'INSERT INTO parametros_empresa (chave, tipo, conteudo, descricao) VALUES (?, ?, ?, ?)',
-            [p.chave, p.tipo, p.conteudo, p.descricao]
-          );
-        }
-        console.log('Database seed: Parâmetros da Empresa inseridos com sucesso.');
-      } else {
-        // Garantir migração das chaves EMP_LOGO e EMP_ASS caso o banco já exista
-        const logoParam = await db.get("SELECT * FROM parametros_empresa WHERE chave = 'EMP_LOGO'");
-        if (!logoParam) {
-          const oldLogo = await db.get("SELECT * FROM parametros_empresa WHERE chave = 'LOGO_EMP'");
-          if (oldLogo) {
-            await db.run("UPDATE parametros_empresa SET chave = 'EMP_LOGO', descricao = 'Logomarca da empresa para cabeçalhos e documentos' WHERE id = ?", [oldLogo.id]);
-          } else {
-            await db.run("INSERT INTO parametros_empresa (chave, tipo, conteudo, descricao) VALUES ('EMP_LOGO', 7, '', 'Logomarca da empresa para cabeçalhos e documentos')");
-          }
-        }
-
-        const assParam = await db.get("SELECT * FROM parametros_empresa WHERE chave = 'EMP_ASS'");
-        if (!assParam) {
-          await db.run("INSERT INTO parametros_empresa (chave, tipo, conteudo, descricao) VALUES ('EMP_ASS', 7, '', 'Assinatura do responsável para contratos e recibos')");
-        }
-      }
-    } catch (e) {
-      console.error("Migration check for parametros_empresa error:", e);
-    }
-  } catch (err) {
-    console.error("Migration check failed:", err);
+    console.log('Database seed: Parâmetros da Empresa inseridos com sucesso.');
   }
 
   return db;

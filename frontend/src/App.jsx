@@ -3277,7 +3277,7 @@ const handleGerarOrcamentoImpresso = async (orc, projs = []) => {
             btn.disabled = true;
 
             try {
-              const res = await fetch(`${API_BASE_URL}/orcamentos/${orc.numero}/compartilhar`, {
+              const res = await fetch('${API_BASE_URL}/orcamentos/${orc.numero}/compartilhar', {
                 method: 'POST',
                 headers: {
                   'Content-Type': 'application/json',

@@ -87,10 +87,20 @@ const uploadAnexos = multer({ storage: anexosStorage });
 let db;
 try {
   db = await initDb();
-  console.log('SQLite database initialized successfully.');
+  console.log('MySQL database initialized successfully.');
   await ensureOrcamentosSchema(db);
 } catch (error) {
-  console.error('Failed to initialize SQLite database:', error);
+  console.error('\n❌ [ERRO DE BANCO DE DADOS]');
+  if (error.code === 'ECONNREFUSED' || (error.errors && error.errors.some(e => e.code === 'ECONNREFUSED'))) {
+    console.error(`Não foi possível conectar ao servidor MySQL (${process.env.DB_HOST || 'localhost'}:${process.env.DB_PORT || '3306'}).`);
+    console.error('👉 Verifique se o serviço do MySQL está iniciado na sua máquina (ex: XAMPP, Laragon, WAMP, Docker ou Serviço Windows).');
+    console.error('👉 Verifique também as credenciais (DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME) no arquivo backend/.env.\n');
+  } else if (error.code === 'ER_ACCESS_DENIED_ERROR') {
+    console.error('Acesso negado para o usuário/senha informados no arquivo backend/.env.');
+    console.error('👉 Verifique as variáveis DB_USER e DB_PASSWORD no backend/.env.\n');
+  } else {
+    console.error('Falha ao inicializar banco MySQL:', error.message || error);
+  }
   process.exit(1);
 }
 
@@ -236,7 +246,7 @@ app.post('/api/clientes', authenticateToken, async (req, res) => {
     const newClient = await db.get('SELECT * FROM clientes WHERE id = ?', [result.lastID]);
     res.status(201).json(newClient);
   } catch (error) {
-    if (error.message.includes('UNIQUE constraint failed')) {
+    if (error.code === 'ER_DUP_ENTRY' || (error.message && (error.message.includes('UNIQUE constraint failed') || error.message.includes('Duplicate entry')))) {
       return res.status(400).json({ error: 'Documento ou email já cadastrado.' });
     }
     res.status(500).json({ error: 'Erro ao cadastrar cliente.' });
@@ -366,7 +376,7 @@ app.post('/api/contratos', authenticateToken, upload.single('documento'), async 
     const newContract = await db.get('SELECT * FROM contratos WHERE id = ?', [result.lastID]);
     res.status(201).json(newContract);
   } catch (error) {
-    if (error.message.includes('UNIQUE constraint failed')) {
+    if (error.code === 'ER_DUP_ENTRY' || (error.message && (error.message.includes('UNIQUE constraint failed') || error.message.includes('Duplicate entry')))) {
       return res.status(400).json({ error: 'Número de contrato já existente.' });
     }
     res.status(500).json({ error: 'Erro ao cadastrar contrato.' });
