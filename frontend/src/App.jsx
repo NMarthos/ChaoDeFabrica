@@ -6231,7 +6231,7 @@ function Produtos() {
         await api.delete(`/produtos/${id}`);
         fetchProdutos();
       } catch (err) {
-        setError('Erro ao excluir produto.');
+        setError(err.response?.data?.error || 'Erro ao excluir produto.');
       }
     }
   };
@@ -10216,7 +10216,7 @@ function MateriaisCrudModal({ isOpen, onClose, onMaterialsUpdated }) {
         await fetchProdutos();
         if (onMaterialsUpdated) onMaterialsUpdated();
       } catch (err) {
-        setError('Erro ao excluir material.');
+        setError(err.response?.data?.error || 'Erro ao excluir material.');
       }
     }
   };
@@ -16533,7 +16533,7 @@ function Orcamentos() {
       try {
         const res = await api.get(`/orcamentos/${selectedOrcamento.numero}`);
         setSelectedOrcamento(res.data);
-        fetchProjetos(selectedOrcamento.numero);
+        await fetchProjetos(selectedOrcamento.numero);
         
         // Refresh budget list in background
         const oRes = await api.get('/orcamentos');

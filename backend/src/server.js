@@ -142,6 +142,13 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
+function formatDateTimeForMySQL(date) {
+  if (!date) return null;
+  const d = date instanceof Date ? date : new Date(date);
+  if (isNaN(d.getTime())) return null;
+  return d.toISOString().slice(0, 19).replace('T', ' ');
+}
+
 // ---------------- API Routes ----------------
 
 // 1. Authentication Routes
@@ -677,18 +684,48 @@ app.delete('/api/produtos/:id', authenticateToken, async (req, res) => {
       return res.status(404).json({ error: 'Produto não encontrado.' });
     }
 
-    // Deletar arquivo de imagem se existir
-    if (product.MaterialImagem) {
-      const imgPath = path.resolve(product.MaterialImagem);
-      if (fs.existsSync(imgPath)) {
-        fs.unlinkSync(imgPath);
+    // Verificar se o produto está vinculado a algum item de projeto
+    const linkedProjects = await db.all(`
+      SELECT DISTINCT p.id, p.nome 
+      FROM ProjetoItem pi 
+      JOIN projetos p ON pi.ProjetoID = p.id 
+      WHERE pi.MaterialReferencia = ?
+    `, [id]);
+
+    if (linkedProjects && linkedProjects.length > 0) {
+      const projectNames = linkedProjects.map(p => `"${p.nome}" (ID: ${p.id})`).join(', ');
+      return res.status(400).json({ 
+        error: `Não é possível excluir o produto "${id}" pois ele está em uso no(s) projeto(s): ${projectNames}. Remova o item do projeto antes de excluí-lo do catálogo.` 
+      });
+    }
+
+    // Deletar arquivo de imagem se existir e for caminho local
+    if (product.MaterialImagem && typeof product.MaterialImagem === 'string' && !product.MaterialImagem.startsWith('data:')) {
+      try {
+        const imgPath = path.resolve(product.MaterialImagem);
+        if (fs.existsSync(imgPath)) {
+          fs.unlinkSync(imgPath);
+        }
+      } catch (imgErr) {
+        console.warn('Erro ao remover arquivo de imagem do produto:', imgErr.message);
       }
     }
+
+    // Limpa eventuais vínculos em Projeto_Materiais se não estiver em ProjetoItem
+    try {
+      await db.run('DELETE FROM Projeto_Materiais WHERE referencia = ?', [id]);
+    } catch (e) {}
 
     await db.run('DELETE FROM Material WHERE MaterialReferencia = ?', [id]);
     res.json({ message: 'Produto removido com sucesso.' });
   } catch (error) {
-    res.status(500).json({ error: 'Erro ao excluir produto.' });
+    console.error('DELETE PRODUCT ERROR:', error);
+    if (error.code === 'ER_ROW_IS_REFERENCED_2' || error.errno === 1451) {
+      return res.status(400).json({ 
+        error: `Não é possível excluir o produto "${id}" pois ele possui vínculos ativos no banco de dados.` 
+      });
+    }
+    res.status(500).json({ error: error.message || 'Erro ao excluir produto.' });
   }
 });
 
@@ -854,7 +891,7 @@ app.post('/api/ordens-servico', authenticateToken, async (req, res) => {
       d.setDate(d.getDate() + 1);
       d.setHours(8, 0, 0, 0);
       const nextWorkday = avancarProximaHoraUtil(d);
-      computedDataInicio = nextWorkday.toISOString();
+      computedDataInicio = formatDateTimeForMySQL(nextWorkday);
     }
 
     // Insert OS Header with computed data_inicio
@@ -883,7 +920,7 @@ app.put('/api/ordens-servico/:numero', authenticateToken, async (req, res) => {
 
     let dataFechamento = os.data_fechamento;
     if (status === 'Fechada' && os.status !== 'Fechada') {
-      dataFechamento = new Date().toISOString();
+      dataFechamento = formatDateTimeForMySQL(new Date());
     } else if (status && status !== 'Fechada') {
       dataFechamento = null;
     }
@@ -912,8 +949,8 @@ app.put('/api/ordens-servico/:numero', authenticateToken, async (req, res) => {
             }
           }
         });
-        computedDataInicio = minStart ? minStart.toISOString() : null;
-        computedDataFim = maxEnd ? maxEnd.toISOString() : null;
+        computedDataInicio = minStart ? formatDateTimeForMySQL(minStart) : null;
+        computedDataFim = maxEnd ? formatDateTimeForMySQL(maxEnd) : null;
       } else {
         computedDataInicio = null;
         computedDataFim = null;
@@ -2701,7 +2738,7 @@ app.put('/api/orcamentos/:numero', authenticateToken, async (req, res) => {
     const updatedAnotacoes = anotacoes_cliente !== undefined ? anotacoes_cliente : budget.anotacoes_cliente;
     const updatedParamId = parametro_financeiro_id !== undefined && parametro_financeiro_id !== null ? parseInt(parametro_financeiro_id, 10) : (budget.parametro_financeiro_id || 1);
     const dataAprovacao = (updatedStatus === 'Aprovado' && !budget.data_aprovacao)
-      ? new Date().toISOString()
+      ? formatDateTimeForMySQL(new Date())
       : (updatedStatus !== 'Aprovado' ? null : budget.data_aprovacao);
 
     await db.run(
@@ -3074,35 +3111,20 @@ async function recalculateProjectCosts(projectId) {
       const budgetCheck = await db.get('SELECT status FROM orcamentos WHERE numero = ?', [projData.orcamento_numero]);
       if (budgetCheck?.status !== 'Aprovado') {
         await db.run(`
-          UPDATE ProjetoItem
+          UPDATE ProjetoItem pi
+          JOIN Material m ON pi.MaterialReferencia = m.MaterialReferencia
           SET 
-            ProjetoItemVlrUnit = COALESCE((
-              SELECT m.MaterialValorUnitario 
-              FROM Material m 
-              WHERE m.MaterialReferencia = ProjetoItem.MaterialReferencia
-            ), ProjetoItemVlrUnit),
-            ProjetoItemTotal = ProjetoItemQtd * COALESCE((
-              SELECT m.MaterialValorUnitario 
-              FROM Material m 
-              WHERE m.MaterialReferencia = ProjetoItem.MaterialReferencia
-            ), ProjetoItemVlrUnit),
-            ProjetoItemTempo = COALESCE((
-              SELECT m.MaterialTempo 
-              FROM Material m 
-              WHERE m.MaterialReferencia = ProjetoItem.MaterialReferencia
-            ), ProjetoItemTempo),
-            ProjetoItemDuracao = ROUND(COALESCE((
-              SELECT m.MaterialTempo 
-              FROM Material m 
-              WHERE m.MaterialReferencia = ProjetoItem.MaterialReferencia
-            ), ProjetoItemTempo) * ProjetoItemQtd)
-          WHERE ProjetoID = ?
+            pi.ProjetoItemVlrUnit = m.MaterialValorUnitario,
+            pi.ProjetoItemTotal = pi.ProjetoItemQtd * m.MaterialValorUnitario,
+            pi.ProjetoItemTempo = m.MaterialTempo,
+            pi.ProjetoItemDuracao = ROUND(m.MaterialTempo * pi.ProjetoItemQtd)
+          WHERE pi.ProjetoID = ?
         `, [projectId]);
       }
     }
 
     const monCliItem = await db.get(
-      "SELECT CAST(ROUND(ProjetoItemQtd) AS INTEGER) as diasMontagem FROM ProjetoItem WHERE ProjetoID = ? AND MaterialReferencia = 'FAB.MON.CLI'",
+      "SELECT ROUND(ProjetoItemQtd) as diasMontagem FROM ProjetoItem WHERE ProjetoID = ? AND MaterialReferencia = 'FAB.MON.CLI'",
       [projectId]
     );
 
@@ -3134,9 +3156,13 @@ async function recalculateProjectCosts(projectId) {
     `;
     const params = [projectId, projectId, projectId, projectId];
 
-    if (monCliItem && monCliItem.diasMontagem !== undefined && monCliItem.diasMontagem !== null) {
+    const diasMontagemVal = monCliItem && monCliItem.diasMontagem !== null && monCliItem.diasMontagem !== undefined
+      ? parseInt(monCliItem.diasMontagem, 10)
+      : null;
+
+    if (diasMontagemVal !== null && !isNaN(diasMontagemVal)) {
       updateQuery += `, DuracaoMontagem = ? WHERE id = ?`;
-      params.push(monCliItem.diasMontagem, projectId);
+      params.push(diasMontagemVal, projectId);
     } else {
       updateQuery += ` WHERE id = ?`;
       params.push(projectId);
@@ -3200,13 +3226,13 @@ async function recalculateProjectCosts(projectId) {
       await db.run(`
         UPDATE orcamentos
         SET 
-          total_venda = ?,
-          valor_total = ?
+          total_venda = ?
         WHERE numero = ?
-      `, [novoTotalVenda, novoTotalVenda, updatedProj.orcamento_numero]);
+      `, [novoTotalVenda, updatedProj.orcamento_numero]);
     }
   } catch (error) {
     console.error('Error recalculating project costs:', error);
+    throw error;
   }
 }
 
@@ -4837,7 +4863,8 @@ app.post('/api/orcamentos/:numero/compartilhar', authenticateToken, async (req, 
     const token = crypto.randomBytes(16).toString('hex');
     const agora = new Date();
     const dias = parseInt(diasValidade, 10) > 0 ? parseInt(diasValidade, 10) : 3;
-    const expiraEm = new Date(agora.getTime() + dias * 24 * 60 * 60 * 1000).toISOString();
+    const expiraEmDate = new Date(agora.getTime() + dias * 24 * 60 * 60 * 1000);
+    const expiraEm = formatDateTimeForMySQL(expiraEmDate);
     const userId = req.user?.id || null;
     const userNome = req.user?.nome || req.user?.name || req.user?.login || 'Usuário';
 
@@ -4852,12 +4879,13 @@ app.post('/api/orcamentos/:numero/compartilhar', authenticateToken, async (req, 
 
     res.status(201).json({
       ...share,
+      token,
       diasValidade: dias,
       message: 'Token de compartilhamento gerado com sucesso.'
     });
   } catch (error) {
     console.error('POST COMPARTILHAR ORCAMENTO ERROR:', error);
-    res.status(500).json({ error: 'Erro ao gerar link de compartilhamento.' });
+    res.status(500).json({ error: error.message || 'Erro ao gerar link de compartilhamento.' });
   }
 });
 
