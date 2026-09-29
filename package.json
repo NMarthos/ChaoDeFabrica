@@ -11,7 +11,7 @@
     "dev": "npx concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
     "dev:backend": "npm run dev --prefix backend",
     "dev:frontend": "npm run dev --prefix frontend",
-    "mysql:start": "\"C:\\Program Files\\MySQL\\MySQL Server 8.4\\bin\\mysqld.exe\" --datadir=\"c:\\NMartos\\mysql_data\" --port=3306"
+    "mysql:start": "\"\"C:\\Program Files\\MySQL\\MySQL Server 8.4\\bin\\mysqld.exe\" --defaults-file=\"C:\\ProgramData\\MySQL\\MySQL Server 8.4\\my.ini\" --console\""
   },
   "devDependencies": {
     "concurrently": "^8.2.2"

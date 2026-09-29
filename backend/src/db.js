@@ -199,6 +199,7 @@ export async function initDb() {
     CREATE TABLE IF NOT EXISTS clientes (
       id INT AUTO_INCREMENT PRIMARY KEY,
       nome VARCHAR(255) NOT NULL,
+      tipo_pessoa VARCHAR(20) NOT NULL DEFAULT 'Física',
       documento VARCHAR(50) DEFAULT NULL,
       email VARCHAR(255) DEFAULT NULL,
       telefone VARCHAR(50) DEFAULT NULL,
@@ -562,6 +563,33 @@ export async function initDb() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
   `);
 
+  // Tabela: propostas (Versões de Proposta Comercial)
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS propostas (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      orcamento_numero BIGINT NOT NULL,
+      versao INT NOT NULL DEFAULT 1,
+      codigo VARCHAR(50) DEFAULT '',
+      titulo VARCHAR(255) DEFAULT '',
+      descricao TEXT DEFAULT NULL,
+      valor_total DECIMAL(15,2) DEFAULT 0.00,
+      desconto_percentual DECIMAL(6,2) DEFAULT 0.00,
+      desconto_valor DECIMAL(15,2) DEFAULT 0.00,
+      valor_final DECIMAL(15,2) DEFAULT 0.00,
+      forma_pagamento_selecionada TEXT DEFAULT NULL,
+      dados_snapshot LONGTEXT DEFAULT NULL,
+      status VARCHAR(50) DEFAULT 'Gerada',
+      observacoes TEXT DEFAULT NULL,
+      criado_por INT DEFAULT NULL,
+      criado_por_nome VARCHAR(255) DEFAULT NULL,
+      criado_em DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      INDEX idx_orcamento_numero (orcamento_numero),
+      INDEX idx_versao (versao),
+      FOREIGN KEY (orcamento_numero) REFERENCES orcamentos(numero) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+  `);
+
   // Tabela: proposta_compartilhamentos
   await db.exec(`
     CREATE TABLE IF NOT EXISTS proposta_compartilhamentos (
@@ -595,8 +623,37 @@ export async function initDb() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
   `);
 
+  // Tabela: FluxoRecebimento
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS FluxoRecebimento (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      orcamento_numero BIGINT NOT NULL,
+      cliente_id INT DEFAULT NULL,
+      cliente_nome VARCHAR(255) DEFAULT NULL,
+      descricao VARCHAR(255) NOT NULL,
+      tipo VARCHAR(50) DEFAULT 'Parcela',
+      numero_parcela INT DEFAULT 1,
+      total_parcelas INT DEFAULT 1,
+      percentual DECIMAL(6,2) DEFAULT 0.00,
+      valor DECIMAL(15,2) NOT NULL,
+      valor_recebido DECIMAL(15,2) DEFAULT 0.00,
+      data_vencimento VARCHAR(50) NOT NULL,
+      data_recebimento VARCHAR(50) DEFAULT NULL,
+      meio_pagamento VARCHAR(100) DEFAULT 'PIX',
+      status VARCHAR(50) NOT NULL DEFAULT 'Pendente',
+      recibo_emitido VARCHAR(10) NOT NULL DEFAULT 'Nao',
+      observacoes TEXT DEFAULT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_orcamento_numero (orcamento_numero),
+      INDEX idx_cliente_id (cliente_id),
+      INDEX idx_status (status),
+      INDEX idx_data_vencimento (data_vencimento)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+  `);
+
   // 4. Migrações automáticas de colunas adicionais
   await ensureColumn(db, 'servicos', 'sequencia', 'INT DEFAULT 0');
+  await ensureColumn(db, 'clientes', 'tipo_pessoa', "VARCHAR(20) NOT NULL DEFAULT 'Física'");
   await ensureColumn(db, 'ordens_servico', 'cronograma', 'LONGTEXT DEFAULT NULL');
   await ensureColumn(db, 'Material', 'ExibirNaProposta', "VARCHAR(10) DEFAULT 'Nao'");
   await ensureColumn(db, 'Material', 'ProdutoGrupo', 'INT DEFAULT 8');
@@ -625,13 +682,19 @@ export async function initDb() {
   await ensureColumn(db, 'orcamentos', 'data_aprovacao', 'DATETIME DEFAULT NULL');
   await ensureColumn(db, 'orcamentos', 'data_entrada', 'TEXT DEFAULT NULL');
   await ensureColumn(db, 'orcamentos', 'fluxo_financeiro', 'TEXT DEFAULT NULL');
+  await ensureColumn(db, 'orcamentos', 'fluxo_efetivado', 'TINYINT DEFAULT 0');
   await ensureColumn(db, 'orcamentos', 'status', "VARCHAR(50) DEFAULT 'Em Aberto'");
   await ensureColumn(db, 'orcamentos', 'situacao', "VARCHAR(50) DEFAULT 'Em Aberto'");
+  await ensureColumn(db, 'orcamentos', 'data_assinatura', 'DATETIME DEFAULT NULL');
+  await ensureColumn(db, 'orcamentos', 'assinatura_responsavel', 'TEXT DEFAULT NULL');
+  await ensureColumn(db, 'orcamentos', 'usuario_assinatura_nome', 'VARCHAR(255) DEFAULT NULL');
+  await ensureColumn(db, 'usuarios', 'assinatura', 'TEXT DEFAULT NULL');
 
   await ensureColumn(db, 'projeto_anexos', 'exibir_na_proposta', "VARCHAR(10) DEFAULT 'Sim'");
   await ensureColumn(db, 'proposta_compartilhamentos', 'aprovado_em', 'DATETIME DEFAULT NULL');
   await ensureColumn(db, 'proposta_compartilhamentos', 'forma_pagamento_selecionada', 'TEXT DEFAULT NULL');
   await ensureColumn(db, 'proposta_compartilhamentos', 'anotacoes_cliente', 'TEXT DEFAULT NULL');
+  await ensureColumn(db, 'proposta_compartilhamentos', 'proposta_id', 'INT DEFAULT NULL');
 
   // 5. Seeds padrão caso o banco esteja vazio
 

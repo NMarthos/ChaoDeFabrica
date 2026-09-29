@@ -66,7 +66,10 @@ import {
   Receipt,
   Sliders,
   Type,
-  Hash
+  Hash,
+  Layers,
+  History,
+  PlusCircle
 } from 'lucide-react';
 
 // Base URL da API (relativa por padrão para mesmo domínio/produção ou configurável via VITE_API_URL)
@@ -438,9 +441,10 @@ const gerarDocumentoReciboHtml = ({ orcamento, cliente, parcela, index = 0, tota
 
   const formatarDataBr = (dt) => {
     if (!dt) return '-';
-    const p = dt.split('T')[0].split('-');
-    if (p.length === 3) return `${p[2]}/${p[1]}/${p[0]}`;
-    return dt;
+    const str = String(dt).split('T')[0].split(' ')[0].trim();
+    const p = str.split('-');
+    if (p.length === 3 && p[0].length === 4) return `${p[2].padStart(2, '0')}/${p[1].padStart(2, '0')}/${p[0]}`;
+    return str || dt;
   };
 
   const dataVencimento = isTotal ? formatarDataBr(orcamento?.data_aprovacao) : formatarDataBr(parcela?.data);
@@ -2778,11 +2782,24 @@ const imprimirMateriaisProjeto = async (orc, proj, itensParam = null) => {
   printWindow.document.close();
 };
 
-// Função global para gerar e imprimir a Proposta Comercial de Orçamento com Formas de Pagamento
-const handleGerarOrcamentoImpresso = async (orc, projs = []) => {
-  if (!orc) return;
+// Função global para gerar e imprimir a Proposta Comercial de Orçamento com Formas de Pagamento (suporta Fotografia/Snapshot da Versão)
+const handleGerarOrcamentoImpresso = async (orc, projs = [], versaoInfo = null) => {
+  if (!orc && !versaoInfo?.snapshot) return;
 
-  const empresaParams = await getEmpresaParametros();
+  const snapshot = versaoInfo?.snapshot || null;
+  const effectiveOrc = snapshot?.orcamento || orc || {};
+  let effectiveProjs = snapshot?.projetos || (Array.isArray(projs) && projs.length > 0 ? projs : []);
+  
+  if (effectiveProjs.length === 0 && effectiveOrc?.numero) {
+    try {
+      const resProjs = await api.get(`/projetos?orcamento_numero=${effectiveOrc.numero}`);
+      effectiveProjs = Array.isArray(resProjs.data) ? resProjs.data : [];
+    } catch (e) {
+      effectiveProjs = [];
+    }
+  }
+
+  const empresaParams = (snapshot?.empresaParams) || (await getEmpresaParametros());
   const logoUrl = getMediaUrl(empresaParams?.EMP_LOGO || empresaParams?.LOGO_EMP || '');
   const assUrl = getMediaUrl(empresaParams?.EMP_ASS || '');
 
@@ -2797,27 +2814,44 @@ const handleGerarOrcamentoImpresso = async (orc, projs = []) => {
     return num.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
   };
 
-  const dataAtual = new Date().toLocaleDateString('pt-BR');
-  const totalPreco = (projs || []).reduce((sum, p) => sum + (parseFloat(p.preco_venda_final) || 0), 0) || (parseFloat(orc.total_venda) || 0);
+  const dataAtual = snapshot?.geradoEm 
+    ? new Date(snapshot.geradoEm).toLocaleDateString('pt-BR') 
+    : new Date().toLocaleDateString('pt-BR');
+
+  const totalPreco = snapshot?.valores?.valor_total !== undefined
+    ? parseFloat(snapshot.valores.valor_total || 0)
+    : ((effectiveProjs || []).reduce((sum, p) => sum + (parseFloat(p.preco_venda_final) || 0), 0) || (parseFloat(effectiveOrc.total_venda) || 0));
 
   // Buscar materiais e anexos de cada projeto para carregar as imagens
   const projectItemsMap = {};
   const projectAnexosMap = {};
-  await Promise.all(
-    (projs || []).map(async (p) => {
-      try {
-        const [resItens, resAnexos] = await Promise.all([
-          api.get(`/projetos/${p.id}/itens`),
-          api.get(`/projetos/${p.id}/anexos`)
-        ]);
-        projectItemsMap[p.id] = Array.isArray(resItens.data) ? resItens.data : [];
-        projectAnexosMap[p.id] = Array.isArray(resAnexos.data) ? resAnexos.data : [];
-      } catch (e) {
-        projectItemsMap[p.id] = [];
-        projectAnexosMap[p.id] = [];
-      }
-    })
-  );
+
+  if (snapshot?.itensPorProjeto) {
+    Object.assign(projectItemsMap, snapshot.itensPorProjeto);
+  }
+  if (snapshot?.anexosPorProjeto) {
+    Object.assign(projectAnexosMap, snapshot.anexosPorProjeto);
+  }
+
+  const projsToFetch = (effectiveProjs || []).filter(p => !projectItemsMap[p.id] || !projectAnexosMap[p.id]);
+
+  if (projsToFetch.length > 0 && !snapshot) {
+    await Promise.all(
+      projsToFetch.map(async (p) => {
+        try {
+          const [resItens, resAnexos] = await Promise.all([
+            api.get(`/projetos/${p.id}/itens`),
+            api.get(`/projetos/${p.id}/anexos`)
+          ]);
+          if (!projectItemsMap[p.id]) projectItemsMap[p.id] = Array.isArray(resItens.data) ? resItens.data : [];
+          if (!projectAnexosMap[p.id]) projectAnexosMap[p.id] = Array.isArray(resAnexos.data) ? resAnexos.data : [];
+        } catch (e) {
+          if (!projectItemsMap[p.id]) projectItemsMap[p.id] = [];
+          if (!projectAnexosMap[p.id]) projectAnexosMap[p.id] = [];
+        }
+      })
+    );
+  }
 
   const isImageAttachment = (anexo) => {
     if (!anexo) return false;
@@ -2827,13 +2861,17 @@ const handleGerarOrcamentoImpresso = async (orc, projs = []) => {
     return ['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg', 'bmp'].includes(ext) || mime.startsWith('image/');
   };
 
-  // Buscar Formas de Pagamento e Condições cadastradas
+  // Formas de Pagamento e Condições cadastradas / gravadas no snapshot
   let formasPagamento = [];
-  try {
-    const resFormas = await api.get('/formas-pagamento');
-    formasPagamento = Array.isArray(resFormas.data) ? resFormas.data : [];
-  } catch (e) {
-    console.error('Erro ao buscar formas de pagamento:', e);
+  if (snapshot?.formasPagamento && Array.isArray(snapshot.formasPagamento) && snapshot.formasPagamento.length > 0) {
+    formasPagamento = snapshot.formasPagamento;
+  } else {
+    try {
+      const resFormas = await api.get('/formas-pagamento');
+      formasPagamento = Array.isArray(resFormas.data) ? resFormas.data : [];
+    } catch (e) {
+      console.error('Erro ao buscar formas de pagamento:', e);
+    }
   }
 
   const activeFormas = formasPagamento.filter(f => f.ativo !== 'Nao');
@@ -2917,7 +2955,7 @@ const handleGerarOrcamentoImpresso = async (orc, projs = []) => {
     `;
   }).join('');
 
-  const projetosRows = (projs || []).map((p, idx) => {
+  const projetosRows = (effectiveProjs || []).map((p, idx) => {
     const rawImages = (projectItemsMap[p.id] || []).filter(item => {
       if (!item.MaterialImagem) return false;
       const isMdf = (
@@ -2962,12 +3000,12 @@ const handleGerarOrcamentoImpresso = async (orc, projs = []) => {
     return `
       <tr style="border-top: 1px solid #cbd5e1; ${propImages.length > 0 ? 'border-bottom: none;' : 'border-bottom: 1px solid #cbd5e1;'}">
         <td style="text-align: center; font-weight: bold; width: 40px; vertical-align: top; padding-top: 14px; ${propImages.length > 0 ? 'padding-bottom: 6px; border-bottom: none;' : ''}">${idx + 1}</td>
-        <td style="font-weight: bold; font-size: 14px; width: 220px; vertical-align: top; padding-top: 14px; ${propImages.length > 0 ? 'padding-bottom: 6px; border-bottom: none;' : ''}">${p.nome}</td>
+        <td style="font-weight: bold; font-size: 14px; width: 220px; vertical-align: top; padding-top: 14px; ${propImages.length > 0 ? 'padding-bottom: 6px; border-bottom: none;' : ''}">${p.nome || `Projeto #${p.id}`}</td>
         <td style="color: #374151; font-size: 13px; vertical-align: top; padding-top: 14px; ${propImages.length > 0 ? 'padding-bottom: 6px; border-bottom: none;' : ''}">
           <div style="white-space: pre-wrap; word-break: break-word;">${p.descricao ? p.descricao.replace(/</g, '&lt;').replace(/>/g, '&gt;') : '-'}</div>
         </td>
         <td style="text-align: right; font-weight: bold; font-size: 14px; color: #111827; width: 140px; vertical-align: top; padding-top: 14px; ${propImages.length > 0 ? 'padding-bottom: 6px; border-bottom: none;' : ''}">
-          ${formatCurrency(p.preco_venda_final || 0)}
+          ${formatCurrency(p.preco_venda_final || p.preco_venda_sugerido || 0)}
         </td>
       </tr>
       ${imagesRowHtml}
@@ -2975,7 +3013,7 @@ const handleGerarOrcamentoImpresso = async (orc, projs = []) => {
   }).join('');
 
   // Montar galeria de imagens/anexos dos projetos marcados com exibir_na_proposta = 'Sim'
-  const projetosComImagens = (projs || []).map(p => {
+  const projetosComImagens = (effectiveProjs || []).map(p => {
     const anexos = (projectAnexosMap[p.id] || []).filter(a => 
       isImageAttachment(a) && (a.exibir_na_proposta !== 'Nao')
     );
@@ -2991,7 +3029,7 @@ const handleGerarOrcamentoImpresso = async (orc, projs = []) => {
         ${projetosComImagens.map(p => `
           <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 14px 16px;">
             <div style="font-size: 13.5px; font-weight: 700; color: #0369a1; margin-bottom: 10px;">
-              📁 ${p.nome}
+              📁 ${p.nome || `Projeto #${p.id}`}
             </div>
             <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 14px;">
               ${p.anexosImagens.map(img => `
@@ -2999,12 +3037,12 @@ const handleGerarOrcamentoImpresso = async (orc, projs = []) => {
                   <div style="width: 100%; height: 160px; overflow: hidden; border-radius: 4px; background: #f1f5f9; display: flex; align-items: center; justify-content: center; margin-bottom: 6px;">
                     <img 
                       src="${getMediaUrl(img.caminho)}" 
-                      alt="${img.nome_original}" 
+                      alt="${img.nome_original || 'Anexo'}" 
                       style="max-width: 100%; max-height: 100%; object-fit: contain;" 
                     />
                   </div>
-                  <div style="font-size: 11px; font-weight: 600; color: #334155; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${img.nome_original}">
-                    ${img.nome_original}
+                  <div style="font-size: 11px; font-weight: 600; color: #334155; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${img.nome_original || ''}">
+                    ${img.nome_original || 'Imagem'}
                   </div>
                 </div>
               `).join('')}
@@ -3020,7 +3058,7 @@ const handleGerarOrcamentoImpresso = async (orc, projs = []) => {
     <html lang="pt-BR">
       <head>
         <meta charset="UTF-8">
-        <title>Orçamento Comercial #${orc.numero} - ${orc.cliente_nome}</title>
+        <title>Orçamento Comercial #${effectiveOrc.numero} - ${effectiveOrc.cliente_nome || 'Cliente'}</title>
         <style>
           * { box-sizing: border-box; margin: 0; padding: 0; }
           body { 
@@ -3186,22 +3224,22 @@ const handleGerarOrcamentoImpresso = async (orc, projs = []) => {
             font-weight: 700;
             border-radius: 6px;
             cursor: pointer;
-            .btn-share {
-              background: #0d9488;
-              color: #fff;
-              border: none;
-              padding: 8px 18px;
-              font-size: 14px;
-              font-weight: 700;
-              border-radius: 6px;
-              cursor: pointer;
-              display: inline-flex;
-              align-items: center;
-              gap: 6px;
-            }
-            .btn-share:hover {
-              background: #0f766e;
-            }
+          }
+          .btn-share {
+            background: #0d9488;
+            color: #fff;
+            border: none;
+            padding: 8px 18px;
+            font-size: 14px;
+            font-weight: 700;
+            border-radius: 6px;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+          }
+          .btn-share:hover {
+            background: #0f766e;
           }
           @media print {
             body { padding: 0; }
@@ -3212,7 +3250,7 @@ const handleGerarOrcamentoImpresso = async (orc, projs = []) => {
       </head>
       <body>
         <div class="no-print-bar">
-          <span>Visualização de Impressão do Orçamento Comercial</span>
+          <span>Visualização de Impressão ${versaoInfo?.codigo ? `(${versaoInfo.codigo})` : 'do Orçamento Comercial'}</span>
           <div style="display: flex; gap: 10px; align-items: center;">
             <button class="btn-share" onclick="compartilharProposta()">🔗 Compartilhar Link</button>
             <button class="btn-print" onclick="window.print()">Imprimir Proposta</button>
@@ -3260,6 +3298,7 @@ const handleGerarOrcamentoImpresso = async (orc, projs = []) => {
 
         <script>
           const authToken = '${localStorage.getItem('erp_token') || ''}';
+          const propIdVinculado = ${versaoInfo?.id ? parseInt(versaoInfo.id, 10) : 'null'};
           function compartilharProposta() {
             const modal = document.getElementById('modal-share');
             modal.style.display = 'flex';
@@ -3277,13 +3316,13 @@ const handleGerarOrcamentoImpresso = async (orc, projs = []) => {
             btn.disabled = true;
 
             try {
-              const res = await fetch('${API_BASE_URL}/orcamentos/${orc.numero}/compartilhar', {
+              const res = await fetch('${API_BASE_URL}/orcamentos/${effectiveOrc.numero}/compartilhar', {
                 method: 'POST',
                 headers: {
                   'Content-Type': 'application/json',
                   'Authorization': 'Bearer ' + authToken
                 },
-                body: JSON.stringify({ diasValidade: dias })
+                body: JSON.stringify({ diasValidade: dias, proposta_id: propIdVinculado })
               });
               const data = await res.json();
               if (!res.ok) throw new Error(data.error || 'Erro ao gerar link');
@@ -3325,7 +3364,7 @@ const handleGerarOrcamentoImpresso = async (orc, projs = []) => {
             </div>
           </div>
           <div class="budget-info">
-            <div class="budget-badge">Orçamento nº #${orc.numero}</div>
+            <div class="budget-badge">${versaoInfo?.codigo ? `Proposta ${versaoInfo.codigo}` : `Orçamento nº #${effectiveOrc.numero}`} ${versaoInfo?.versao ? `(Versão ${versaoInfo.versao})` : ''}</div>
             <div class="budget-date">Emissão: ${dataAtual}</div>
             <div class="budget-date">Validade: 10 dias</div>
           </div>
@@ -3335,11 +3374,11 @@ const handleGerarOrcamentoImpresso = async (orc, projs = []) => {
           <h3>Dados do Cliente / Orçamento</h3>
           <div class="client-grid">
             <div>
-              <strong>Cliente:</strong> ${orc.cliente_nome}<br>
-              <strong>Status:</strong> ${orc.status || 'Em Negociação'}
+              <strong>Cliente:</strong> ${effectiveOrc.cliente_nome || '-'}<br>
+              <strong>Status:</strong> ${effectiveOrc.status || 'Em Negociação'}
             </div>
             <div>
-              <strong>Descrição:</strong> ${orc.descricao || 'Proposta de fornecimento e instalação de mobiliário sob medida.'}
+              <strong>Descrição:</strong> ${effectiveOrc.descricao || 'Proposta de fornecimento e instalação de mobiliário sob medida.'}
             </div>
           </div>
         </div>
@@ -3355,7 +3394,7 @@ const handleGerarOrcamentoImpresso = async (orc, projs = []) => {
             </tr>
           </thead>
           <tbody>
-            ${(projs && projs.length > 0) ? projetosRows : '<tr><td colspan="4" style="text-align: center; color: #94a3b8; padding: 24px;">Nenhum projeto associado a este orçamento.</td></tr>'}
+            ${(effectiveProjs && effectiveProjs.length > 0) ? projetosRows : '<tr><td colspan="4" style="text-align: center; color: #94a3b8; padding: 24px;">Nenhum projeto associado a este orçamento.</td></tr>'}
           </tbody>
         </table>
 
@@ -3370,7 +3409,7 @@ const handleGerarOrcamentoImpresso = async (orc, projs = []) => {
         <div style="margin-bottom: 26px;">
           <div style="display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px;">
             <div style="font-size: 15px; font-weight: 700; color: #0f172a;">Formas e Condições de Pagamento</div>
-            ${selectedForma ? `<div style="font-size: 11.5px; font-weight: 600; color: #0284c7; background: #f0f9ff; padding: 3px 10px; border-radius: 9999px; border: 1px solid #bae6fd;">Faixa: ${selectedForma.nome}</div>` : ''}
+            ${selectedForma ? `<div style="font-size: 11.5px; font-weight: 600; color: #0284c7; background: #f0f9ff; padding: 3px 10px; border-radius: 9999px; border: 1px solid #bae6fd;">Faixa: ${selectedForma.nome || selectedForma.descricao}</div>` : ''}
           </div>
           <table style="width: 100%; border-collapse: collapse; background: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px; overflow: hidden;">
             <thead>
@@ -3402,7 +3441,7 @@ const handleGerarOrcamentoImpresso = async (orc, projs = []) => {
           <div class="signature-line">
             <div style="height: 48px;"></div>
             <div style="border-top: 1px solid #94a3b8; padding-top: 6px;">
-              <strong>${orc.cliente_nome}</strong><br>
+              <strong>${effectiveOrc.cliente_nome || 'Cliente'}</strong><br>
               De acordo com a proposta
             </div>
           </div>
@@ -3423,8 +3462,8 @@ const handleGerarOrcamentoImpresso = async (orc, projs = []) => {
   printWindow.document.close();
 };
 
-// Função global para gerar/obter token e abrir a Proposta Comercial Virtual
-const handleAbrirPropostaVirtual = async (orcParam) => {
+// Função global para gerar/obter token e abrir a Proposta Comercial Virtual (opcionalmente vinculada a uma versão de proposta)
+const handleAbrirPropostaVirtual = async (orcParam, propostaId = null) => {
   // Extrair número do orçamento de diversas formas possíveis
   let orcNumero = null;
   if (orcParam && typeof orcParam === 'object') {
@@ -3439,7 +3478,7 @@ const handleAbrirPropostaVirtual = async (orcParam) => {
     return;
   }
 
-  console.log('handleAbrirPropostaVirtual: Gerando token para orçamento:', orcNumero);
+  console.log('handleAbrirPropostaVirtual: Gerando token para orçamento:', orcNumero, 'propostaId:', propostaId);
 
   // Abre a aba síncronamente no clique para evitar bloqueio por popup blockers do navegador
   let newWin = null;
@@ -3450,7 +3489,11 @@ const handleAbrirPropostaVirtual = async (orcParam) => {
   }
 
   try {
-    const res = await api.post(`/orcamentos/${orcNumero}/compartilhar`, { diasValidade: 30 });
+    const payload = { diasValidade: 30 };
+    if (propostaId) {
+      payload.proposta_id = propostaId;
+    }
+    const res = await api.post(`/orcamentos/${orcNumero}/compartilhar`, payload);
     console.log('handleAbrirPropostaVirtual: Resposta da API:', res.data);
     
     if (res.data?.token) {
@@ -3601,9 +3644,13 @@ function Layout() {
     {
       id: 'financeiro',
       label: 'Financeiro',
-      path: '/financeiro',
       icon: TrendingUp,
-      type: 'single'
+      type: 'group',
+      items: [
+        { path: '/financeiro', label: 'Módulo Financeiro', icon: TrendingUp },
+        { path: '/orcamentos-efetivados', label: 'Efetivados e Concluídos', icon: CheckCircle2 },
+        { path: '/fluxo-recebimento', label: 'Fluxo de Recebimento', icon: Receipt }
+      ]
     },
     {
       id: 'administrativo',
@@ -3766,7 +3813,9 @@ function Layout() {
           <Route path="/clientes" element={<Clientes />} />
           <Route path="/contratos" element={<Contratos />} />
           <Route path="/orcamentos" element={<Orcamentos />} />
+          <Route path="/orcamentos-efetivados" element={<OrcamentosEfetivados />} />
           <Route path="/orcamentos/:numero/projetos" element={<Projetos />} />
+          <Route path="/fluxo-recebimento" element={<FluxoRecebimento />} />
           <Route path="/servicos" element={<Servicos />} />
           <Route path="/ordens-servico" element={<OrdensServico />} />
           <Route path="/ordens-servico/:numero/cronograma" element={<CronogramaOS />} />
@@ -3807,7 +3856,8 @@ function Login() {
       await login(email, senha);
       navigate(from, { replace: true });
     } catch (err) {
-      setError(err.response?.data?.error || 'Falha ao autenticar. Tente novamente.');
+      const errorMsg = err.response?.data?.error || (err.message === 'Network Error' ? 'Não foi possível conectar ao servidor backend (porta 3001).' : 'Falha ao autenticar. Tente novamente.');
+      setError(errorMsg);
     } finally {
       setLoading(false);
     }
@@ -3980,6 +4030,8 @@ function Clientes() {
 
   // Form State
   const [nome, setNome] = useState('');
+  const [tipoPessoa, setTipoPessoa] = useState('Física');
+  const [documento, setDocumento] = useState('');
   const [email, setEmail] = useState('');
   const [telefone, setTelefone] = useState('');
   const [status, setStatus] = useState('Ativo');
@@ -3996,6 +4048,25 @@ function Clientes() {
   useEffect(() => {
     fetchClientes();
   }, []);
+
+  const formatarDocumentoDinamico = (val, tipo) => {
+    if (!val) return '';
+    const digits = val.replace(/\D/g, '');
+    if (tipo === 'Jurídica') {
+      const d = digits.slice(0, 14);
+      if (d.length <= 2) return d;
+      if (d.length <= 5) return `${d.slice(0, 2)}.${d.slice(2)}`;
+      if (d.length <= 8) return `${d.slice(0, 2)}.${d.slice(2, 5)}.${d.slice(5)}`;
+      if (d.length <= 12) return `${d.slice(0, 2)}.${d.slice(2, 5)}.${d.slice(5, 8)}/${d.slice(8)}`;
+      return `${d.slice(0, 2)}.${d.slice(2, 5)}.${d.slice(5, 8)}/${d.slice(8, 12)}-${d.slice(12, 14)}`;
+    } else {
+      const d = digits.slice(0, 11);
+      if (d.length <= 3) return d;
+      if (d.length <= 6) return `${d.slice(0, 3)}.${d.slice(3)}`;
+      if (d.length <= 9) return `${d.slice(0, 3)}.${d.slice(3, 6)}.${d.slice(6)}`;
+      return `${d.slice(0, 3)}.${d.slice(3, 6)}.${d.slice(6, 9)}-${d.slice(9, 11)}`;
+    }
+  };
 
   const formatarTelefoneDinamico = (val) => {
     if (!val) return '';
@@ -4016,6 +4087,8 @@ function Clientes() {
   const handleOpenAddModal = () => {
     setEditMode(false);
     setNome('');
+    setTipoPessoa('Física');
+    setDocumento('');
     setEmail('');
     setTelefone('');
     setStatus('Ativo');
@@ -4026,6 +4099,9 @@ function Clientes() {
     setEditMode(true);
     setClientIdToEdit(client.id);
     setNome(client.nome || '');
+    const detectedTipo = client.tipo_pessoa || (client.documento && client.documento.replace(/\D/g, '').length > 11 ? 'Jurídica' : 'Física');
+    setTipoPessoa(detectedTipo);
+    setDocumento(formatarDocumentoDinamico(client.documento || '', detectedTipo));
     setEmail(client.email || '');
     setTelefone(formatarTelefoneDinamico(client.telefone || ''));
     setStatus(client.status || 'Ativo');
@@ -4037,9 +4113,9 @@ function Clientes() {
     setError('');
     try {
       if (editMode) {
-        await api.put(`/clientes/${clientIdToEdit}`, { nome, email, telefone, status });
+        await api.put(`/clientes/${clientIdToEdit}`, { nome, tipo_pessoa: tipoPessoa, documento, email, telefone, status });
       } else {
-        await api.post('/clientes', { nome, email, telefone, status });
+        await api.post('/clientes', { nome, tipo_pessoa: tipoPessoa, documento, email, telefone, status });
       }
       setShowModal(false);
       fetchClientes();
@@ -4061,6 +4137,7 @@ function Clientes() {
 
   const filteredClientes = clientes.filter(c => 
     (c.nome && c.nome.toLowerCase().includes(searchTerm.toLowerCase())) || 
+    (c.documento && c.documento.toLowerCase().includes(searchTerm.toLowerCase())) ||
     (c.email && c.email.toLowerCase().includes(searchTerm.toLowerCase())) ||
     (c.telefone && c.telefone.includes(searchTerm))
   );
@@ -4083,7 +4160,7 @@ function Clientes() {
           <Search size={18} style={{ color: 'var(--text-muted)', marginRight: '8px' }} />
           <input 
             type="text" 
-            placeholder="Buscar por nome, telefone ou email..." 
+            placeholder="Buscar por nome, CPF/CNPJ, telefone ou email..." 
             className="form-control" 
             style={{ border: 'none', background: 'transparent', padding: 0 }} 
             value={searchTerm}
@@ -4099,6 +4176,8 @@ function Clientes() {
             <thead>
               <tr>
                 <th>Nome</th>
+                <th style={{ textAlign: 'center', width: '90px' }}>Tipo</th>
+                <th>CPF / CNPJ</th>
                 <th>Telefone</th>
                 <th>Email</th>
                 <th>Status</th>
@@ -4108,12 +4187,27 @@ function Clientes() {
             <tbody>
               {filteredClientes.length === 0 ? (
                 <tr>
-                  <td colSpan="5" style={{ textAlign: 'center', color: 'var(--text-muted)' }}>Nenhum cliente correspondente encontrado.</td>
+                  <td colSpan="7" style={{ textAlign: 'center', color: 'var(--text-muted)' }}>Nenhum cliente correspondente encontrado.</td>
                 </tr>
               ) : (
                 filteredClientes.map((c) => (
                   <tr key={c.id}>
                     <td style={{ fontWeight: 600 }}>{c.nome}</td>
+                    <td style={{ textAlign: 'center' }}>
+                      <span 
+                        className="badge" 
+                        style={{ 
+                          fontSize: '0.72rem',
+                          padding: '3px 8px',
+                          backgroundColor: c.tipo_pessoa === 'Jurídica' ? 'rgba(59, 130, 246, 0.15)' : 'rgba(16, 185, 129, 0.15)', 
+                          color: c.tipo_pessoa === 'Jurídica' ? '#60A5FA' : '#34D399', 
+                          border: c.tipo_pessoa === 'Jurídica' ? '1px solid rgba(59, 130, 246, 0.3)' : '1px solid rgba(16, 185, 129, 0.3)' 
+                        }}
+                      >
+                        {c.tipo_pessoa === 'Jurídica' ? 'PJ' : 'PF'}
+                      </span>
+                    </td>
+                    <td>{c.documento || '-'}</td>
                     <td>{c.telefone || '-'}</td>
                     <td>{c.email || '-'}</td>
                     <td>
@@ -4142,21 +4236,70 @@ function Clientes() {
       {/* Modal */}
       {showModal && (
         <div className="modal-overlay">
-          <div className="glass-card modal-content">
+          <div className="glass-card modal-content" style={{ maxWidth: '600px', width: '95%' }}>
             <div className="modal-header">
               <h3 className="modal-title">{editMode ? 'Editar Cliente' : 'Novo Cliente'}</h3>
               <button onClick={() => setShowModal(false)} className="close-btn">&times;</button>
             </div>
             <form onSubmit={handleSubmit}>
-              <div className="form-group">
-                <label className="form-label">Nome da Empresa / Cliente</label>
-                <input 
-                  type="text" 
-                  className="form-control" 
-                  value={nome}
-                  onChange={(e) => setNome(e.target.value)}
-                  required 
-                />
+              {/* Tipo de Pessoa Selector */}
+              <div className="form-group" style={{ background: 'rgba(255,255,255,0.02)', padding: '12px', borderRadius: '8px', border: '1px solid var(--glass-border)' }}>
+                <label className="form-label" style={{ marginBottom: '8px', fontWeight: 600 }}>Tipo de Pessoa</label>
+                <div style={{ display: 'flex', gap: '20px' }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', color: 'var(--text-main)', fontSize: '0.9rem' }}>
+                    <input 
+                      type="radio" 
+                      name="tipoPessoa" 
+                      value="Física" 
+                      checked={tipoPessoa === 'Física'} 
+                      onChange={() => {
+                        setTipoPessoa('Física');
+                        setDocumento(formatarDocumentoDinamico(documento, 'Física'));
+                      }}
+                      style={{ accentColor: 'var(--accent-cyan)', cursor: 'pointer' }}
+                    />
+                    <span>Pessoa Física (CPF)</span>
+                  </label>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', color: 'var(--text-main)', fontSize: '0.9rem' }}>
+                    <input 
+                      type="radio" 
+                      name="tipoPessoa" 
+                      value="Jurídica" 
+                      checked={tipoPessoa === 'Jurídica'} 
+                      onChange={() => {
+                        setTipoPessoa('Jurídica');
+                        setDocumento(formatarDocumentoDinamico(documento, 'Jurídica'));
+                      }}
+                      style={{ accentColor: 'var(--accent-cyan)', cursor: 'pointer' }}
+                    />
+                    <span>Pessoa Jurídica (CNPJ)</span>
+                  </label>
+                </div>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: '16px' }}>
+                <div className="form-group">
+                  <label className="form-label">{tipoPessoa === 'Jurídica' ? 'Razão Social / Nome Fantasia' : 'Nome Completo'}</label>
+                  <input 
+                    type="text" 
+                    className="form-control" 
+                    placeholder={tipoPessoa === 'Jurídica' ? "Ex: Empresa Exemplo Ltda" : "Ex: João da Silva"}
+                    value={nome}
+                    onChange={(e) => setNome(e.target.value)}
+                    required 
+                  />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">{tipoPessoa === 'Jurídica' ? 'CNPJ' : 'CPF'}</label>
+                  <input 
+                    type="text" 
+                    className="form-control" 
+                    placeholder={tipoPessoa === 'Jurídica' ? "00.000.000/0000-00" : "000.000.000-00"}
+                    maxLength={tipoPessoa === 'Jurídica' ? 18 : 14}
+                    value={documento}
+                    onChange={(e) => setDocumento(formatarDocumentoDinamico(e.target.value, tipoPessoa))}
+                  />
+                </div>
               </div>
 
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
@@ -12504,8 +12647,8 @@ function ModalConclusaoProposta({ isOpen, onClose, orcamento, projetos = [], par
   const [precoFinal, setPrecoFinal] = useState('0,00');
   const [formaPagamento, setFormaPagamento] = useState(orcamento.forma_pagamento_selecionada || '');
   const [condicaoSelecionada, setCondicaoSelecionada] = useState(null);
-  const [dataAprovacao, setDataAprovacao] = useState(orcamento.data_aprovacao ? orcamento.data_aprovacao.split('T')[0] : dataHojeStr);
-  const [dataEntrada, setDataEntrada] = useState(orcamento.data_entrada ? orcamento.data_entrada.split('T')[0] : dataHojeStr);
+  const [dataAprovacao, setDataAprovacao] = useState(orcamento.data_aprovacao ? String(orcamento.data_aprovacao).split('T')[0].split(' ')[0] : dataHojeStr);
+  const [dataEntrada, setDataEntrada] = useState(orcamento.data_entrada ? String(orcamento.data_entrada).split('T')[0].split(' ')[0] : dataHojeStr);
   const [fluxoFinanceiro, setFluxoFinanceiro] = useState([]);
   const [modalFluxoOpen, setModalFluxoOpen] = useState(false);
   const [anotacoesConclusao, setAnotacoesConclusao] = useState(orcamento.anotacoes_conclusao || '');
@@ -12696,8 +12839,8 @@ function ModalConclusaoProposta({ isOpen, onClose, orcamento, projetos = [], par
     const descPct = parseFloat(orcamento.desconto_percentual) || (base > 0 && descVlr > 0 ? (descVlr / base) * 100 : 0);
     const finalVlr = (orcamento.total_venda !== null && orcamento.total_venda !== undefined) ? parseFloat(orcamento.total_venda) : Math.max(0, base - descVlr);
 
-    const dtAprovInit = orcamento.data_aprovacao ? orcamento.data_aprovacao.split('T')[0] : dataHojeStr;
-    const dtEntrInit = orcamento.data_entrada ? orcamento.data_entrada.split('T')[0] : dataHojeStr;
+    const dtAprovInit = orcamento.data_aprovacao ? String(orcamento.data_aprovacao).split('T')[0].split(' ')[0] : dataHojeStr;
+    const dtEntrInit = orcamento.data_entrada ? String(orcamento.data_entrada).split('T')[0].split(' ')[0] : dataHojeStr;
 
     setDescontoPerc(formatDecimalPtBr(descPct));
     setDescontoValor(formatDecimalPtBr(descVlr));
@@ -12898,9 +13041,10 @@ function ModalConclusaoProposta({ isOpen, onClose, orcamento, projetos = [], par
 
   const formatarDataPtBr = (dt) => {
     if (!dt) return '-';
-    const parts = dt.split('T')[0].split('-');
-    if (parts.length === 3) return `${parts[2]}/${parts[1]}/${parts[0]}`;
-    return dt;
+    const str = String(dt).split('T')[0].split(' ')[0].trim();
+    const parts = str.split('-');
+    if (parts.length === 3 && parts[0].length === 4) return `${parts[2].padStart(2, '0')}/${parts[1].padStart(2, '0')}/${parts[0]}`;
+    return str || dt;
   };
 
   return (
@@ -14097,6 +14241,7 @@ function ModalConclusaoProposta({ isOpen, onClose, orcamento, projetos = [], par
 function ModalCadastroClienteContrato({ isOpen, onClose, cliente, orcamento, onSalvarEAvancar }) {
   if (!isOpen || !cliente) return null;
 
+  const [tipoPessoa, setTipoPessoa] = useState(cliente.tipo_pessoa || (cliente.documento && cliente.documento.replace(/\D/g, '').length > 11 ? 'Jurídica' : 'Física'));
   const [nome, setNome] = useState(cliente.nome || '');
   const [documento, setDocumento] = useState(cliente.documento || '');
   const [rg, setRg] = useState(cliente.rg || '');
@@ -14127,6 +14272,26 @@ function ModalCadastroClienteContrato({ isOpen, onClose, cliente, orcamento, onS
   const [error, setError] = useState('');
   const [salvando, setSalvando] = useState(false);
 
+  const formatDoc = (val, tipo) => {
+    if (!val) return '';
+    const digits = val.replace(/\D/g, '');
+    if (tipo === 'Jurídica') {
+      const d = digits.slice(0, 14);
+      if (d.length <= 2) return d;
+      if (d.length <= 5) return `${d.slice(0, 2)}.${d.slice(2)}`;
+      if (d.length <= 8) return `${d.slice(0, 2)}.${d.slice(2, 5)}.${d.slice(5)}`;
+      if (d.length <= 12) return `${d.slice(0, 2)}.${d.slice(2, 5)}.${d.slice(5, 8)}/${d.slice(8)}`;
+      return `${d.slice(0, 2)}.${d.slice(2, 5)}.${d.slice(5, 8)}/${d.slice(8, 12)}-${d.slice(12, 14)}`;
+    } else {
+      const d = digits.slice(0, 11);
+      if (d.length <= 3) return d;
+      if (d.length <= 6) return `${d.slice(0, 3)}.${d.slice(3)}`;
+      if (d.length <= 9) return `${d.slice(0, 3)}.${d.slice(3, 6)}.${d.slice(6)}`;
+      return `${d.slice(0, 3)}.${d.slice(3, 6)}.${d.slice(6, 9)}-${d.slice(9, 11)}`;
+    }
+  };
+  const formatarDoc = formatDoc;
+
   // Sincroniza endereço de entrega quando "mesmoEndereco" estiver marcado
   useEffect(() => {
     if (mesmoEndereco) {
@@ -14143,15 +14308,15 @@ function ModalCadastroClienteContrato({ isOpen, onClose, cliente, orcamento, onS
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!nome.trim()) {
-      setError('O Nome Completo do cliente é obrigatório.');
+      setError(tipoPessoa === 'Jurídica' ? 'A Razão Social da empresa é obrigatória.' : 'O Nome Completo do cliente é obrigatório.');
       return;
     }
     if (!documento.trim()) {
-      setError('O CPF do cliente é obrigatório para gerar o contrato.');
+      setError(tipoPessoa === 'Jurídica' ? 'O CNPJ da empresa é obrigatório para gerar o contrato.' : 'O CPF do cliente é obrigatório para gerar o contrato.');
       return;
     }
     if (!endereco.trim() || !cidade.trim() || !uf.trim() || !cep.trim()) {
-      setError('Preencha os campos obrigatórios do Endereço Residencial (Logradouro, Cidade, UF, CEP).');
+      setError('Preencha os campos obrigatórios do Endereço Residencial/Sede (Logradouro, Cidade, UF, CEP).');
       return;
     }
     const finalEntregaEnd = mesmoEndereco ? endereco : entregaEndereco;
@@ -14169,6 +14334,7 @@ function ModalCadastroClienteContrato({ isOpen, onClose, cliente, orcamento, onS
 
     const payload = {
       nome: nome.trim(),
+      tipo_pessoa: tipoPessoa,
       documento: documento.trim(),
       rg: rg.trim() || null,
       telefone: telefone.trim() || null,
@@ -14234,42 +14400,76 @@ function ModalCadastroClienteContrato({ isOpen, onClose, cliente, orcamento, onS
         )}
 
         <form onSubmit={handleSubmit} style={{ overflowY: 'auto', paddingRight: '4px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
-          {/* Seção 1: Dados Pessoais do Contratante */}
+          {/* Seção 1: Dados do Contratante */}
           <div style={{ background: 'rgba(255, 255, 255, 0.02)', border: '1px solid var(--glass-border)', borderRadius: '8px', padding: '14px' }}>
-            <h4 style={{ margin: '0 0 12px 0', fontSize: '0.85rem', color: 'var(--accent-cyan)', display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <User size={15} /> 1. Dados Pessoais do Contratante
-            </h4>
-            <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr', gap: '10px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px', flexWrap: 'wrap', gap: '8px' }}>
+              <h4 style={{ margin: 0, fontSize: '0.85rem', color: 'var(--accent-cyan)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <User size={15} /> 1. Dados do Contratante
+              </h4>
+              <div style={{ display: 'flex', gap: '14px' }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', fontSize: '0.8rem', color: 'var(--text-main)' }}>
+                  <input 
+                    type="radio" 
+                    name="contratoTipoPessoa" 
+                    value="Física" 
+                    checked={tipoPessoa === 'Física'} 
+                    onChange={() => {
+                      setTipoPessoa('Física');
+                      setDocumento(formatDoc(documento, 'Física'));
+                    }}
+                    style={{ accentColor: 'var(--accent-cyan)', cursor: 'pointer' }}
+                  />
+                  <span>Pessoa Física (CPF)</span>
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', fontSize: '0.8rem', color: 'var(--text-main)' }}>
+                  <input 
+                    type="radio" 
+                    name="contratoTipoPessoa" 
+                    value="Jurídica" 
+                    checked={tipoPessoa === 'Jurídica'} 
+                    onChange={() => {
+                      setTipoPessoa('Jurídica');
+                      setDocumento(formatDoc(documento, 'Jurídica'));
+                    }}
+                    style={{ accentColor: 'var(--accent-cyan)', cursor: 'pointer' }}
+                  />
+                  <span>Pessoa Jurídica (CNPJ)</span>
+                </label>
+              </div>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '2fr 1.2fr 1fr', gap: '10px' }}>
               <div className="form-group" style={{ margin: 0 }}>
-                <label style={{ fontSize: '0.78rem', fontWeight: 600 }}>Nome Completo *</label>
+                <label style={{ fontSize: '0.78rem', fontWeight: 600 }}>{tipoPessoa === 'Jurídica' ? 'Razão Social / Nome Fantasia *' : 'Nome Completo *'}</label>
                 <input 
                   type="text" 
                   value={nome} 
                   onChange={(e) => setNome(e.target.value)} 
                   className="form-control" 
-                  placeholder="Nome completo do cliente"
+                  placeholder={tipoPessoa === 'Jurídica' ? "Razão Social da empresa" : "Nome completo do cliente"}
                   required 
                 />
               </div>
               <div className="form-group" style={{ margin: 0 }}>
-                <label style={{ fontSize: '0.78rem', fontWeight: 600 }}>CPF *</label>
+                <label style={{ fontSize: '0.78rem', fontWeight: 600 }}>{tipoPessoa === 'Jurídica' ? 'CNPJ *' : 'CPF *'}</label>
                 <input 
                   type="text" 
                   value={documento} 
-                  onChange={(e) => setDocumento(e.target.value)} 
+                  onChange={(e) => setDocumento(formatDoc(e.target.value, tipoPessoa))} 
                   className="form-control" 
-                  placeholder="000.000.000-00"
+                  placeholder={tipoPessoa === 'Jurídica' ? "00.000.000/0000-00" : "000.000.000-00"}
+                  maxLength={tipoPessoa === 'Jurídica' ? 18 : 14}
                   required 
                 />
               </div>
               <div className="form-group" style={{ margin: 0 }}>
-                <label style={{ fontSize: '0.78rem', fontWeight: 600 }}>RG</label>
+                <label style={{ fontSize: '0.78rem', fontWeight: 600 }}>{tipoPessoa === 'Jurídica' ? 'Inscr. Estadual / RG' : 'RG'}</label>
                 <input 
                   type="text" 
                   value={rg} 
                   onChange={(e) => setRg(e.target.value)} 
                   className="form-control" 
-                  placeholder="Registro Geral"
+                  placeholder={tipoPessoa === 'Jurídica' ? "IE ou RG do Resp." : "Registro Geral"}
                 />
               </div>
             </div>
@@ -14516,10 +14716,16 @@ function ModalCadastroClienteContrato({ isOpen, onClose, cliente, orcamento, onS
 function ModalMinutaContrato({ isOpen, onClose, orcamento, cliente, projetos = [], onEditarCliente }) {
   if (!isOpen || !orcamento || !cliente) return null;
 
+  const { user } = useAuth();
   const [itensPorProjeto, setItensPorProjeto] = useState({});
   const [anexosPorProjeto, setAnexosPorProjeto] = useState({});
   const [carregandoDados, setCarregandoDados] = useState(false);
   const [empresaParams, setEmpresaParams] = useState({});
+  const [dataAssinatura, setDataAssinatura] = useState(orcamento.data_assinatura || null);
+  const [assinaturaResponsavel, setAssinaturaResponsavel] = useState(orcamento.assinatura_responsavel || null);
+  const [usuarioAssinaturaNome, setUsuarioAssinaturaNome] = useState(orcamento.usuario_assinatura_nome || null);
+  const [assinando, setAssinando] = useState(false);
+  const [feedbackAssinatura, setFeedbackAssinatura] = useState('');
 
   useEffect(() => {
     let isMounted = true;
@@ -14527,9 +14733,13 @@ function ModalMinutaContrato({ isOpen, onClose, orcamento, cliente, projetos = [
       getEmpresaParametros().then(params => {
         if (isMounted && params) setEmpresaParams(params);
       });
+      setDataAssinatura(orcamento.data_assinatura || null);
+      setAssinaturaResponsavel(orcamento.assinatura_responsavel || null);
+      setUsuarioAssinaturaNome(orcamento.usuario_assinatura_nome || null);
+      setFeedbackAssinatura('');
     }
     return () => { isMounted = false; };
-  }, [isOpen]);
+  }, [isOpen, orcamento]);
 
   useEffect(() => {
     if (!isOpen || !projetos || projetos.length === 0) return;
@@ -14571,10 +14781,6 @@ function ModalMinutaContrato({ isOpen, onClose, orcamento, cliente, projetos = [
     };
   }, [isOpen, projetos]);
 
-  const getLocalMediaUrl = (imgPath) => {
-    return getMediaUrl(imgPath);
-  };
-
   const isImageAttachment = (a) => {
     if (!a) return false;
     if (a.tipo_mime && a.tipo_mime.startsWith('image/')) return true;
@@ -14604,7 +14810,7 @@ function ModalMinutaContrato({ isOpen, onClose, orcamento, cliente, projetos = [
     materiais: getMateriaisComFoto(p.id)
   })).filter(g => g.anexos.length > 0 || g.materiais.length > 0);
 
-  const dataAprov = orcamento.data_aprovacao ? orcamento.data_aprovacao.split('T')[0] : new Date().toISOString().split('T')[0];
+  const dataAprov = orcamento.data_aprovacao ? String(orcamento.data_aprovacao).split('T')[0].split(' ')[0] : new Date().toISOString().split('T')[0];
   const [anoAprov, mesAprov, diaAprov] = dataAprov.split('-');
   const mesesPt = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'];
   const dataExtenso = `${diaAprov} de ${mesesPt[parseInt(mesAprov, 10) - 1] || 'Junho'} de ${anoAprov}`;
@@ -14623,18 +14829,68 @@ function ModalMinutaContrato({ isOpen, onClose, orcamento, cliente, projetos = [
 
   const formatarDataBr = (dt) => {
     if (!dt) return '-';
-    const p = dt.split('T')[0].split('-');
-    if (p.length === 3) return `${p[2]}/${p[1]}/${p[0]}`;
-    return dt;
+    const str = String(dt).split('T')[0].split(' ')[0].trim();
+    const p = str.split('-');
+    if (p.length === 3 && p[0].length === 4) return `${p[2].padStart(2, '0')}/${p[1].padStart(2, '0')}/${p[0]}`;
+    return str || dt;
   };
 
   const totalVendaFinal = parseFloat(orcamento.total_venda) || 
     projetos.reduce((acc, p) => acc + (parseFloat(p.preco_venda_final) || 0), 0);
 
   const logoUrl = getMediaUrl(empresaParams?.EMP_LOGO || empresaParams?.LOGO_EMP || '');
-  const assUrl = getMediaUrl(empresaParams?.EMP_ASS || '');
   const razaoSocialEmpresa = empresaParams?.RAZAO_SOC || empresaParams?.NOME_FANT || 'EZATTUS PLANEJADOS';
   const cnpjEmpresa = empresaParams?.CNPJ || '15.232.514/0001-40';
+
+  // Imagem de assinatura a ser colocada sobre a linha de assinatura do responsável da empresa:
+  const assinaturaEfetiva = assinaturaResponsavel || (dataAssinatura ? (user?.assinatura || empresaParams?.EMP_ASS || '') : (empresaParams?.EMP_ASS || ''));
+  const assUrl = assinaturaEfetiva ? getMediaUrl(assinaturaEfetiva) : (empresaParams?.EMP_ASS ? getMediaUrl(empresaParams.EMP_ASS) : '');
+
+  const handleAssinarContrato = async () => {
+    if (dataAssinatura) {
+      alert(`Este contrato já foi assinado em ${formatarDataBr(dataAssinatura)} por ${usuarioAssinaturaNome || 'Responsável'}.`);
+      return;
+    }
+
+    if (!window.confirm(`Confirma a assinatura digital do Contrato referente ao Orçamento #${orcamento.numero}?`)) {
+      return;
+    }
+
+    try {
+      setAssinando(true);
+      setFeedbackAssinatura('');
+
+      let userAss = user?.assinatura || '';
+      if (!userAss) {
+        userAss = empresaParams?.EMP_ASS || '';
+      }
+
+      const res = await api.post(`/orcamentos/${orcamento.numero}/assinar-contrato`, {
+        assinatura: userAss
+      });
+
+      const dtAss = res.data?.data_assinatura || new Date().toISOString();
+      const assResp = res.data?.assinatura_responsavel || userAss;
+      const userNome = res.data?.usuario_assinatura_nome || user?.nome || 'Responsável';
+
+      setDataAssinatura(dtAss);
+      setAssinaturaResponsavel(assResp);
+      setUsuarioAssinaturaNome(userNome);
+
+      if (orcamento) {
+        orcamento.data_assinatura = dtAss;
+        orcamento.assinatura_responsavel = assResp;
+        orcamento.usuario_assinatura_nome = userNome;
+      }
+
+      setFeedbackAssinatura(`Contrato assinado digitalmente por ${userNome}!`);
+    } catch (err) {
+      console.error('Erro ao assinar contrato:', err);
+      alert('Erro ao assinar contrato: ' + (err.response?.data?.error || err.message));
+    } finally {
+      setAssinando(false);
+    }
+  };
 
   const handleImprimirContrato = () => {
     const printWindow = window.open('', '_blank', 'width=1000,height=900');
@@ -14850,12 +15106,12 @@ function ModalMinutaContrato({ isOpen, onClose, orcamento, cliente, projetos = [
         <div class="box-party">
           <div class="box-party-title">
             <span>CONTRATANTE</span>
-            <span style="font-weight: normal; font-size: 8.5pt; color: #64748b;">Pessoa Física / Jurídica</span>
+            <span style="font-weight: normal; font-size: 8.5pt; color: #64748b;">${cliente.tipo_pessoa === 'Jurídica' ? 'Pessoa Jurídica' : 'Pessoa Física'}</span>
           </div>
           <div class="party-grid">
-            <div class="party-row"><span class="party-label">Nome / Razão:</span> ${cliente.nome || '-'}</div>
-            <div class="party-row"><span class="party-label">CPF / CNPJ:</span> ${cliente.documento || '-'} &nbsp;&nbsp; <span class="party-label">RG / IE:</span> ${cliente.rg || '-'}</div>
-            <div class="party-row"><span class="party-label">Endereço Residencial:</span> ${cliente.endereco || '-'}, Nº ${cliente.numero || 'S/N'} ${cliente.complemento ? ' - ' + cliente.complemento : ''}</div>
+            <div class="party-row"><span class="party-label">${cliente.tipo_pessoa === 'Jurídica' ? 'Razão Social:' : 'Nome Completo:'}</span> ${cliente.nome || '-'}</div>
+            <div class="party-row"><span class="party-label">${cliente.tipo_pessoa === 'Jurídica' ? 'CNPJ:' : 'CPF:'}</span> ${cliente.documento || '-'} &nbsp;&nbsp; <span class="party-label">${cliente.tipo_pessoa === 'Jurídica' ? 'IE / RG:' : 'RG:'}</span> ${cliente.rg || '-'}</div>
+            <div class="party-row"><span class="party-label">${cliente.tipo_pessoa === 'Jurídica' ? 'Endereço Sede:' : 'Endereço Residencial:'}</span> ${cliente.endereco || '-'}, Nº ${cliente.numero || 'S/N'} ${cliente.complemento ? ' - ' + cliente.complemento : ''}</div>
             <div class="party-row"><span class="party-label">Bairro:</span> ${cliente.bairro || '-'}</div>
             <div class="party-row"><span class="party-label">Cidade/UF:</span> ${cliente.cidade || 'Belém'} - ${cliente.uf || 'PA'}</div>
             <div class="party-row"><span class="party-label">CEP:</span> ${cliente.cep || '-'} &nbsp;&nbsp; <span class="party-label">Tel:</span> ${cliente.telefone || cliente.celular || '-'}</div>
@@ -15007,13 +15263,18 @@ function ModalMinutaContrato({ isOpen, onClose, orcamento, cliente, projetos = [
         <div class="signatures-container">
           <div class="sig-row">
             <div class="sig-box">
-              <div style="height: 48px;"></div>
+              <div style="height: 52px;"></div>
               <strong>${cliente.nome}</strong><br>
               CONTRATANTE
             </div>
             <div class="sig-box">
-              <div style="height: 48px; display: flex; align-items: flex-end; justify-content: center; margin-bottom: 2px;">
-                ${assUrl ? `<img src="${assUrl}" alt="Assinatura" style="max-height: 46px; max-width: 170px; object-fit: contain;" />` : ''}
+              <div style="height: 52px; display: flex; align-items: flex-end; justify-content: center; margin-bottom: 2px;">
+                ${assUrl ? `
+                  <div style="display: flex; flex-direction: column; align-items: center;">
+                    <img src="${assUrl}" alt="Assinatura" style="max-height: 46px; max-width: 170px; object-fit: contain;" />
+                    ${dataAssinatura ? `<span style="font-size: 7.2pt; color: #059669; font-weight: bold;">✓ Assinado digitalmente por ${usuarioAssinaturaNome || user?.nome || 'Responsável'} em ${formatarDataBr(dataAssinatura)}</span>` : ''}
+                  </div>
+                ` : ''}
               </div>
               <strong>${razaoSocialEmpresa}</strong><br>
               CONTRATADA (CNPJ: ${cnpjEmpresa})
@@ -15141,27 +15402,54 @@ function ModalMinutaContrato({ isOpen, onClose, orcamento, cliente, projetos = [
               Cliente: <strong style={{ color: '#0f172a' }}>{cliente.nome}</strong> &bull; Valor: <strong style={{ color: '#059669' }}>R$ {formatDecimalPtBr(totalVendaFinal)}</strong> &bull; Status: <span style={{ color: '#2563eb', fontWeight: 700 }}>Aprovado</span>
             </div>
           </div>
-          <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+            {/* Botão de Assinar Contrato */}
             <button 
               type="button" 
-              onClick={onEditarCliente}
+              onClick={handleAssinarContrato}
+              disabled={assinando}
               style={{ 
                 fontSize: '0.84rem', 
                 padding: '7px 14px', 
+                background: dataAssinatura ? '#059669' : '#2563eb',
+                color: '#ffffff',
+                border: 'none',
+                borderRadius: '6px',
+                cursor: assinando ? 'not-allowed' : 'pointer',
                 display: 'inline-flex', 
                 alignItems: 'center', 
                 gap: '6px',
-                background: '#ffffff',
-                color: '#334155',
-                border: '1px solid #cbd5e1',
-                borderRadius: '6px',
-                cursor: 'pointer',
-                fontWeight: 600
+                fontWeight: 700,
+                boxShadow: dataAssinatura ? '0 2px 4px rgba(5, 150, 105, 0.3)' : '0 2px 4px rgba(37, 99, 235, 0.3)'
               }}
+              title={dataAssinatura ? `Contrato assinado em ${formatarDataBr(dataAssinatura)} por ${usuarioAssinaturaNome || 'Responsável'}` : "Assinar digitalmente o contrato como responsável"}
             >
-              <Edit2 size={14} />
-              <span>Editar Dados do Cliente</span>
+              {assinando ? <RefreshCw size={15} className="animate-spin" /> : dataAssinatura ? <CheckCircle2 size={15} /> : <FileSignature size={15} />}
+              <span>{dataAssinatura ? 'Contrato Assinado' : 'Assinar Contrato'}</span>
             </button>
+
+            {onEditarCliente && (
+              <button 
+                type="button" 
+                onClick={onEditarCliente}
+                style={{ 
+                  fontSize: '0.84rem', 
+                  padding: '7px 12px', 
+                  display: 'inline-flex', 
+                  alignItems: 'center', 
+                  gap: '6px',
+                  background: '#ffffff',
+                  color: '#334155',
+                  border: '1px solid #cbd5e1',
+                  borderRadius: '6px',
+                  cursor: 'pointer',
+                  fontWeight: 600
+                }}
+              >
+                <Edit2 size={14} />
+                <span>Dados do Cliente</span>
+              </button>
+            )}
             <button 
               type="button" 
               onClick={handleImprimirContrato}
@@ -15181,13 +15469,13 @@ function ModalMinutaContrato({ isOpen, onClose, orcamento, cliente, projetos = [
               }}
             >
               <Printer size={16} />
-              <span>Imprimir / Salvar PDF</span>
+              <span>Imprimir Contrato</span>
             </button>
             <button 
               onClick={onClose} 
               type="button" 
               style={{ 
-                marginLeft: '8px',
+                marginLeft: '6px',
                 background: 'transparent',
                 border: 'none',
                 fontSize: '1.6rem',
@@ -15201,6 +15489,24 @@ function ModalMinutaContrato({ isOpen, onClose, orcamento, cliente, projetos = [
             </button>
           </div>
         </div>
+
+        {/* Feedback de Assinatura */}
+        {feedbackAssinatura && (
+          <div style={{ 
+            background: '#ecfdf5', 
+            borderBottom: '1px solid #a7f3d0', 
+            color: '#065f46', 
+            padding: '10px 24px', 
+            fontSize: '0.86rem', 
+            fontWeight: 600,
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px'
+          }}>
+            <CheckCircle2 size={16} color="#059669" />
+            <span>{feedbackAssinatura}</span>
+          </div>
+        )}
 
         {/* Paper Document Preview Container (Único Fundo Branco) */}
         <div style={{ 
@@ -15246,12 +15552,12 @@ function ModalMinutaContrato({ isOpen, onClose, orcamento, cliente, projetos = [
             <div style={{ padding: '4px 0 10px 0', marginBottom: '8px', fontSize: '0.86rem' }}>
               <div style={{ fontWeight: 800, color: '#0f172a', marginBottom: '6px', fontSize: '0.88rem', borderBottom: '1px solid #cbd5e1', paddingBottom: '3px', display: 'flex', justifyContent: 'space-between' }}>
                 <span>CONTRATANTE</span>
-                <span style={{ fontWeight: 'normal', color: '#64748b', fontSize: '0.80rem' }}>Pessoa Física / Jurídica</span>
+                <span style={{ fontWeight: 'normal', color: '#64748b', fontSize: '0.80rem' }}>{cliente.tipo_pessoa === 'Jurídica' ? 'Pessoa Jurídica' : 'Pessoa Física'}</span>
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: '3fr 2fr', gap: '4px 12px' }}>
-                <div><strong style={{ color: '#0f172a' }}>Nome / Razão:</strong> {cliente.nome || '-'}</div>
-                <div><strong style={{ color: '#0f172a' }}>CPF / CNPJ:</strong> {cliente.documento || '-'} &nbsp;|&nbsp; <strong style={{ color: '#0f172a' }}>RG:</strong> {cliente.rg || '-'}</div>
-                <div><strong style={{ color: '#0f172a' }}>Endereço Residencial:</strong> {cliente.endereco || '-'}, Nº {cliente.numero || 'S/N'} {cliente.complemento ? '(' + cliente.complemento + ')' : ''}</div>
+                <div><strong style={{ color: '#0f172a' }}>{cliente.tipo_pessoa === 'Jurídica' ? 'Razão Social:' : 'Nome Completo:'}</strong> {cliente.nome || '-'}</div>
+                <div><strong style={{ color: '#0f172a' }}>{cliente.tipo_pessoa === 'Jurídica' ? 'CNPJ:' : 'CPF:'}</strong> {cliente.documento || '-'} &nbsp;|&nbsp; <strong style={{ color: '#0f172a' }}>{cliente.tipo_pessoa === 'Jurídica' ? 'IE / RG:' : 'RG:'}</strong> {cliente.rg || '-'}</div>
+                <div><strong style={{ color: '#0f172a' }}>{cliente.tipo_pessoa === 'Jurídica' ? 'Endereço Sede:' : 'Endereço Residencial:'}</strong> {cliente.endereco || '-'}, Nº {cliente.numero || 'S/N'} {cliente.complemento ? '(' + cliente.complemento + ')' : ''}</div>
                 <div><strong style={{ color: '#0f172a' }}>Bairro:</strong> {cliente.bairro || '-'}</div>
                 <div><strong style={{ color: '#0f172a' }}>Cidade/UF:</strong> {cliente.cidade || 'Belém'}/{cliente.uf || 'PA'}</div>
                 <div><strong style={{ color: '#0f172a' }}>CEP:</strong> {cliente.cep || '-'} &nbsp;|&nbsp; <strong style={{ color: '#0f172a' }}>Tel:</strong> {cliente.telefone || cliente.celular || '-'}</div>
@@ -15423,15 +15729,20 @@ function ModalMinutaContrato({ isOpen, onClose, orcamento, cliente, projetos = [
             {/* Linhas de Assinatura */}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '36px', marginTop: '36px', textAlign: 'center' }}>
               <div style={{ borderTop: '1.5px solid #0f172a', paddingTop: '6px' }}>
-                <div style={{ height: '48px' }}></div>
+                <div style={{ height: '52px' }}></div>
                 <strong style={{ color: '#0f172a' }}>{cliente.nome}</strong>
                 <div style={{ fontSize: '0.80rem', color: '#475569' }}>CONTRATANTE</div>
               </div>
               <div style={{ borderTop: '1.5px solid #0f172a', paddingTop: '6px' }}>
-                <div style={{ height: '48px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  {assUrl ? (
+                <div style={{ minHeight: '52px', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-end', marginBottom: '2px' }}>
+                  {assUrl && (
                     <img src={assUrl} alt="Assinatura" style={{ maxHeight: '46px', maxWidth: '170px', objectFit: 'contain' }} />
-                  ) : null}
+                  )}
+                  {dataAssinatura && (
+                    <span style={{ fontSize: '0.72rem', color: '#059669', fontWeight: 700, marginTop: '2px' }}>
+                      ✓ Assinado digitalmente por {usuarioAssinaturaNome || user?.nome || 'Responsável'} em {formatarDataBr(dataAssinatura)}
+                    </span>
+                  )}
                 </div>
                 <strong style={{ color: '#0f172a' }}>{razaoSocialEmpresa}</strong>
                 <div style={{ fontSize: '0.80rem', color: '#475569' }}>CONTRATADO (CNPJ: {cnpjEmpresa})</div>
@@ -15510,15 +15821,60 @@ function ModalMinutaContrato({ isOpen, onClose, orcamento, cliente, projetos = [
           padding: '12px 22px' 
         }}>
           <div style={{ fontSize: '0.82rem', color: '#64748b' }}>
-            {carregandoDados ? (
+            {dataAssinatura ? (
+              <span style={{ color: '#059669', fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                <CheckCircle2 size={16} /> Contrato assinado por {usuarioAssinaturaNome || user?.nome || 'Responsável'} em {formatarDataBr(dataAssinatura)}
+              </span>
+            ) : carregandoDados ? (
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
                 <RefreshCw size={14} className="spin" /> Carregando imagens e anexos dos projetos...
               </span>
             ) : (
-              <span>Documento pronto para impressão e assinatura</span>
+              <span>Documento pronto para assinatura e impressão</span>
             )}
           </div>
           <div style={{ display: 'flex', gap: '10px' }}>
+            <button 
+              type="button" 
+              onClick={handleAssinarContrato}
+              disabled={assinando}
+              style={{ 
+                fontSize: '0.85rem', 
+                padding: '7px 18px', 
+                background: dataAssinatura ? '#059669' : '#2563eb',
+                color: '#ffffff',
+                border: 'none',
+                borderRadius: '6px',
+                cursor: assinando ? 'not-allowed' : 'pointer',
+                display: 'inline-flex', 
+                alignItems: 'center', 
+                gap: '6px',
+                fontWeight: 700
+              }}
+            >
+              {assinando ? <RefreshCw size={15} className="animate-spin" /> : <FileSignature size={15} />}
+              <span>{dataAssinatura ? 'Contrato Assinado' : 'Assinar Contrato'}</span>
+            </button>
+            <button 
+              type="button" 
+              onClick={handleImprimirContrato} 
+              style={{ 
+                fontSize: '0.85rem', 
+                padding: '7px 20px', 
+                background: '#0f172a',
+                color: '#ffffff',
+                border: 'none',
+                borderRadius: '6px',
+                cursor: 'pointer',
+                display: 'inline-flex', 
+                alignItems: 'center', 
+                gap: '6px',
+                fontWeight: 700
+              }}
+            >
+              <Printer size={16} />
+              <span>Imprimir Contrato</span>
+            </button>
             <button 
               type="button" 
               onClick={onClose} 
@@ -15535,27 +15891,6 @@ function ModalMinutaContrato({ isOpen, onClose, orcamento, cliente, projetos = [
             >
               Fechar
             </button>
-            <button 
-              type="button" 
-              onClick={handleImprimirContrato} 
-              style={{ 
-                fontSize: '0.85rem', 
-                padding: '7px 20px', 
-                background: '#059669',
-                color: '#ffffff',
-                border: 'none',
-                borderRadius: '6px',
-                cursor: 'pointer',
-                display: 'inline-flex', 
-                alignItems: 'center', 
-                gap: '6px',
-                fontWeight: 700,
-                boxShadow: '0 2px 6px rgba(5, 150, 105, 0.35)'
-              }}
-            >
-              <Printer size={16} />
-              <span>Imprimir Contrato</span>
-            </button>
           </div>
         </div>
       </div>
@@ -15564,11 +15899,16 @@ function ModalMinutaContrato({ isOpen, onClose, orcamento, cliente, projetos = [
 }
 
 // Modal de Visualização do Fluxo Financeiro do Orçamento Aprovado
-function ModalVisualizarFluxoFinanceiro({ isOpen, onClose, orcamento, projetos = [] }) {
+function ModalVisualizarFluxoFinanceiro({ isOpen, onClose, orcamento, projetos = [], onEfetivado }) {
   if (!isOpen || !orcamento) return null;
 
   const [clienteCompleto, setClienteCompleto] = useState(null);
   const [empresaParams, setEmpresaParams] = useState(null);
+  const [efetivando, setEfetivando] = useState(false);
+  const [efetivado, setEfetivado] = useState(orcamento.fluxo_efetivado === 1 || orcamento.status === 'Efetivado');
+  const [feedback, setFeedback] = useState('');
+  const [parcelasFluxoState, setParcelasFluxoState] = useState(null);
+  const [showModalEditarFluxo, setShowModalEditarFluxo] = useState(false);
 
   useEffect(() => {
     getEmpresaParametros().then(p => setEmpresaParams(p)).catch(() => {});
@@ -15580,37 +15920,45 @@ function ModalVisualizarFluxoFinanceiro({ isOpen, onClose, orcamento, projetos =
         .then(res => setClienteCompleto(res.data))
         .catch(() => setClienteCompleto(null));
     }
+    setEfetivado(orcamento?.fluxo_efetivado === 1 || orcamento?.status === 'Efetivado');
+    setFeedback('');
+    setParcelasFluxoState(null);
   }, [orcamento]);
 
-  let parcelasFluxo = [];
-  try {
-    if (orcamento.fluxo_financeiro) {
-      parcelasFluxo = typeof orcamento.fluxo_financeiro === 'string'
-        ? JSON.parse(orcamento.fluxo_financeiro)
-        : orcamento.fluxo_financeiro;
-    }
-  } catch (e) {
-    parcelasFluxo = [];
-  }
-
-  const formatarDataBr = (dt) => {
-    if (!dt) return '-';
-    const p = dt.split('T')[0].split('-');
-    if (p.length === 3) return `${p[2]}/${p[1]}/${p[0]}`;
-    return dt;
-  };
+  const isContratoAssinado = !!orcamento?.data_assinatura;
 
   const totalVendaFinal = parseFloat(orcamento.total_venda) || 
     projetos.reduce((acc, p) => acc + (parseFloat(p.preco_venda_final) || 0), 0);
 
+  let parcelasFluxo = parcelasFluxoState;
+  if (!parcelasFluxo) {
+    try {
+      if (orcamento.fluxo_financeiro) {
+        parcelasFluxo = typeof orcamento.fluxo_financeiro === 'string'
+          ? JSON.parse(orcamento.fluxo_financeiro)
+          : orcamento.fluxo_financeiro;
+      }
+    } catch (e) {
+      parcelasFluxo = [];
+    }
+  }
+
+  const formatarDataBr = (dt) => {
+    if (!dt) return '-';
+    const str = String(dt).split('T')[0].split(' ')[0].trim();
+    const p = str.split('-');
+    if (p.length === 3 && p[0].length === 4) return `${p[2].padStart(2, '0')}/${p[1].padStart(2, '0')}/${p[0]}`;
+    return str || dt;
+  };
+
   // Se não houver fluxo salvo, cria um padrão à vista
-  if (parcelasFluxo.length === 0) {
+  if (!Array.isArray(parcelasFluxo) || parcelasFluxo.length === 0) {
     parcelasFluxo = [
       {
         id: 1,
         tipo: 'À Vista',
         descricao: 'Pagamento Integral',
-        data: orcamento.data_aprovacao ? orcamento.data_aprovacao.split('T')[0] : new Date().toISOString().split('T')[0],
+        data: orcamento.data_aprovacao ? String(orcamento.data_aprovacao).split('T')[0].split(' ')[0] : new Date().toISOString().split('T')[0],
         percentual: 100,
         valor: totalVendaFinal,
         meio_pagamento: orcamento.forma_pagamento_selecionada || 'PIX'
@@ -15620,6 +15968,42 @@ function ModalVisualizarFluxoFinanceiro({ isOpen, onClose, orcamento, projetos =
 
   const totalPercentual = parcelasFluxo.reduce((acc, p) => acc + (parseFloat(p.percentual) || 0), 0);
   const totalSomaParcelas = parcelasFluxo.reduce((acc, p) => acc + (typeof p.valor === 'number' ? p.valor : parsePtBrToFloat(p.valor) || 0), 0);
+
+  const handleEfetivarFluxo = async () => {
+    try {
+      setEfetivando(true);
+      setFeedback('');
+      const payloadParcelas = parcelasFluxo.map((p, idx) => ({
+        numero_parcela: idx + 1,
+        descricao: p.descricao || p.tipo || `Parcela ${idx + 1}/${parcelasFluxo.length}`,
+        tipo: p.tipo || 'PARCELA',
+        percentual: p.percentual,
+        valor: typeof p.valor === 'number' ? p.valor : parsePtBrToFloat(p.valor),
+        data_vencimento: p.data,
+        meio_pagamento: p.meio_pagamento || orcamento.forma_pagamento_selecionada || 'PIX'
+      }));
+
+      const res = await api.post(`/orcamentos/${orcamento.numero}/efetivar-fluxo`, {
+        parcelas: payloadParcelas
+      });
+
+      setEfetivado(true);
+      setFeedback(res.data?.message || 'Fluxo efetivado com sucesso!');
+      if (orcamento) {
+        orcamento.fluxo_efetivado = 1;
+        orcamento.status = 'Efetivado';
+        orcamento.situacao = 'Efetivado';
+      }
+      if (onEfetivado) {
+        onEfetivado();
+      }
+    } catch (err) {
+      console.error('Erro ao efetivar fluxo:', err);
+      alert(err.response?.data?.error || 'Erro ao efetivar fluxo financeiro.');
+    } finally {
+      setEfetivando(false);
+    }
+  };
 
   const handleImprimirRelatorio = async () => {
     const printWindow = window.open('', '_blank', 'width=900,height=700');
@@ -15713,36 +16097,12 @@ function ModalVisualizarFluxoFinanceiro({ isOpen, onClose, orcamento, projetos =
     }, 400);
   };
 
-  const handleGerarRecibo = async ({ parcela = null, index = null, isTotal = false }) => {
-    const printWindow = window.open('', '_blank', 'width=950,height=850');
-    if (!printWindow) {
-      alert('Permita popups no navegador para visualizar e imprimir o recibo.');
-      return;
-    }
-
-    const p = empresaParams || await getEmpresaParametros();
-
-    const html = gerarDocumentoReciboHtml({
-      orcamento,
-      cliente: clienteCompleto,
-      parcela,
-      index: index !== null ? index : 0,
-      totalParcelas: parcelasFluxo.length,
-      isTotal,
-      projetos,
-      empresaParams: p
-    });
-
-    printWindow.document.write(html);
-    printWindow.document.close();
-  };
-
   return (
     <div className="modal-overlay" style={{ zIndex: 1200, backgroundColor: 'rgba(0, 0, 0, 0.65)', backdropFilter: 'blur(4px)' }}>
       <div 
         className="modal-content" 
         style={{ 
-          maxWidth: '920px', 
+          maxWidth: '940px', 
           width: '95%', 
           maxHeight: '92vh', 
           display: 'flex', 
@@ -15770,33 +16130,94 @@ function ModalVisualizarFluxoFinanceiro({ isOpen, onClose, orcamento, projetos =
               <DollarSign size={22} style={{ color: '#059669', background: '#d1fae5', borderRadius: '50%', padding: '2px' }} />
               Fluxo Financeiro do Projeto #{orcamento.numero}
             </h3>
-            <div style={{ fontSize: '0.84rem', color: '#64748b', marginTop: '3px' }}>
-              Cliente: <strong style={{ color: '#0f172a' }}>{orcamento.cliente_nome}</strong> &bull; Status: <span style={{ color: '#059669', fontWeight: 700 }}>Aprovado</span>
+            <div style={{ fontSize: '0.84rem', color: '#64748b', marginTop: '3px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span>Cliente: <strong style={{ color: '#0f172a' }}>{orcamento.cliente_nome}</strong></span>
+              <span>&bull;</span>
+              <span>Status: <span style={{ color: '#059669', fontWeight: 700 }}>{efetivado || orcamento.status === 'Efetivado' ? 'Efetivado' : (orcamento.status || 'Aprovado')}</span></span>
+              {isContratoAssinado && (
+                <>
+                  <span>&bull;</span>
+                  <span style={{ color: '#0284c7', fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                    <FileSignature size={13} /> Contrato Assinado
+                  </span>
+                </>
+              )}
             </div>
           </div>
           <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+            {/* Botão Editar Fluxo (bloqueado se contrato estiver assinado) */}
+            {!isContratoAssinado ? (
+              <button 
+                type="button" 
+                onClick={() => setShowModalEditarFluxo(true)}
+                style={{ 
+                  fontSize: '0.84rem', 
+                  padding: '6px 14px', 
+                  background: '#f0f9ff',
+                  color: '#0284c7',
+                  border: '1px solid #bae6fd',
+                  borderRadius: '6px',
+                  cursor: 'pointer',
+                  display: 'inline-flex', 
+                  alignItems: 'center', 
+                  gap: '6px',
+                  fontWeight: 700
+                }}
+                title="Editar Parcelas, Datas e Meios de Pagamento do Fluxo Financeiro"
+              >
+                <Edit2 size={15} />
+                <span>Editar Fluxo</span>
+              </button>
+            ) : (
+              <button 
+                type="button" 
+                disabled={true}
+                style={{ 
+                  fontSize: '0.84rem', 
+                  padding: '6px 14px', 
+                  background: '#f1f5f9',
+                  color: '#94a3b8',
+                  border: '1px solid #cbd5e1',
+                  borderRadius: '6px',
+                  cursor: 'not-allowed',
+                  display: 'inline-flex', 
+                  alignItems: 'center', 
+                  gap: '6px',
+                  fontWeight: 600
+                }}
+                title={`Contrato assinado em ${formatarDataBr(orcamento.data_assinatura)}. Edição do fluxo bloqueada (somente efetivação permitida).`}
+              >
+                <FileSignature size={15} />
+                <span>Fluxo Bloqueado</span>
+              </button>
+            )}
+
+            {/* Botão Efetivar Fluxo */}
             <button 
               type="button" 
-              onClick={() => handleGerarRecibo({ isTotal: true })}
+              onClick={handleEfetivarFluxo}
+              disabled={efetivando}
               style={{ 
                 fontSize: '0.84rem', 
                 padding: '6px 14px', 
-                background: '#059669',
+                background: efetivado ? '#059669' : '#2563eb',
                 color: '#ffffff',
                 border: 'none',
                 borderRadius: '6px',
-                cursor: 'pointer',
+                cursor: efetivando ? 'not-allowed' : 'pointer',
                 display: 'inline-flex', 
                 alignItems: 'center', 
                 gap: '6px',
                 fontWeight: 700,
-                boxShadow: '0 2px 4px rgba(5, 150, 105, 0.2)'
+                boxShadow: efetivado ? '0 2px 4px rgba(5, 150, 105, 0.3)' : '0 2px 4px rgba(37, 99, 235, 0.3)'
               }}
-              title="Gerar e imprimir recibo do valor total da proposta"
+              title="Gravar as parcelas no Fluxo de Recebimento"
             >
-              <Receipt size={15} />
-              <span>Recibo do Total</span>
+              {efetivando ? <RefreshCw size={15} className="animate-spin" /> : <CheckCircle2 size={15} />}
+              <span>{efetivado ? 'Fluxo Efetivado' : 'Efetivar Fluxo'}</span>
             </button>
+
+            {/* Botão Imprimir */}
             <button 
               type="button" 
               onClick={handleImprimirRelatorio}
@@ -15817,6 +16238,8 @@ function ModalVisualizarFluxoFinanceiro({ isOpen, onClose, orcamento, projetos =
               <Printer size={15} />
               <span>Imprimir Fluxo</span>
             </button>
+
+            {/* Botão Fechar */}
             <button 
               onClick={onClose} 
               type="button" 
@@ -15837,38 +16260,60 @@ function ModalVisualizarFluxoFinanceiro({ isOpen, onClose, orcamento, projetos =
 
         {/* Body Content */}
         <div style={{ overflowY: 'auto', padding: '20px 24px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
-          {/* Summary Cards */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '12px' }}>
-            <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '12px 16px', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
-              <div>
-                <div style={{ fontSize: '0.75rem', fontWeight: 700, color: '#64748b', textTransform: 'uppercase' }}>Valor Total Aprovado</div>
-                <div style={{ fontSize: '1.25rem', fontWeight: 800, color: '#059669', marginTop: '4px' }}>
-                  R$ {formatDecimalPtBr(totalVendaFinal)}
+          {/* Banner de Contrato Assinado */}
+          {isContratoAssinado && (
+            <div style={{ 
+              background: '#eff6ff', 
+              border: '1px solid #bfdbfe', 
+              color: '#1e40af', 
+              padding: '10px 16px', 
+              borderRadius: '8px', 
+              fontSize: '0.86rem', 
+              display: 'flex', 
+              alignItems: 'center', 
+              justifyContent: 'space-between',
+              gap: '12px'
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <FileSignature size={20} color="#2563eb" style={{ flexShrink: 0 }} />
+                <div>
+                  <strong>Contrato Assinado Digitalmente:</strong> Assinatura registrada em <strong>{formatarDataBr(orcamento.data_assinatura)}</strong> por <strong>{orcamento.usuario_assinatura_nome || 'Responsável'}</strong>.
+                  <div style={{ fontSize: '0.80rem', color: '#3b82f6', marginTop: '1px' }}>
+                    O fluxo financeiro está bloqueado para alterações e pronto para ser efetivado.
+                  </div>
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={() => handleGerarRecibo({ isTotal: true })}
-                style={{
-                  marginTop: '8px',
-                  fontSize: '0.72rem',
-                  background: 'rgba(5, 150, 105, 0.1)',
-                  border: '1px solid rgba(5, 150, 105, 0.3)',
-                  color: '#059669',
-                  borderRadius: '4px',
-                  padding: '3px 8px',
-                  cursor: 'pointer',
-                  fontWeight: 700,
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: '4px',
-                  width: 'fit-content'
-                }}
-                title="Gerar e imprimir recibo do valor total da proposta"
-              >
-                <Receipt size={12} />
-                <span>Gerar Recibo do Total</span>
-              </button>
+              <span style={{ fontSize: '0.78rem', background: '#dbeafe', color: '#1e40af', padding: '3px 10px', borderRadius: '4px', fontWeight: 700, whiteSpace: 'nowrap' }}>
+                Somente Efetivação
+              </span>
+            </div>
+          )}
+
+          {feedback && (
+            <div style={{ 
+              background: '#ecfdf5', 
+              border: '1px solid #a7f3d0', 
+              color: '#065f46', 
+              padding: '10px 14px', 
+              borderRadius: '6px', 
+              fontSize: '0.88rem', 
+              fontWeight: 600,
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px'
+            }}>
+              <CheckCircle2 size={18} color="#059669" />
+              <span>{feedback}</span>
+            </div>
+          )}
+
+          {/* Summary Cards */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '12px' }}>
+            <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '12px 16px' }}>
+              <div style={{ fontSize: '0.75rem', fontWeight: 700, color: '#64748b', textTransform: 'uppercase' }}>Valor Total Aprovado</div>
+              <div style={{ fontSize: '1.25rem', fontWeight: 800, color: '#059669', marginTop: '4px' }}>
+                R$ {formatDecimalPtBr(totalVendaFinal)}
+              </div>
             </div>
             <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '12px 16px' }}>
               <div style={{ fontSize: '0.75rem', fontWeight: 700, color: '#64748b', textTransform: 'uppercase' }}>Qtd. de Parcelas</div>
@@ -15896,9 +16341,30 @@ function ModalVisualizarFluxoFinanceiro({ isOpen, onClose, orcamento, projetos =
               <h4 style={{ margin: 0, fontSize: '0.95rem', fontWeight: 700, color: '#0f172a' }}>
                 Cronograma de Parcelas e Vencimentos
               </h4>
-              <span style={{ fontSize: '0.8rem', color: '#64748b' }}>
-                Total: <strong>{parcelasFluxo.length} {parcelasFluxo.length === 1 ? 'registro' : 'registros'}</strong>
-              </span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                {!isContratoAssinado && (
+                  <button
+                    type="button"
+                    onClick={() => setShowModalEditarFluxo(true)}
+                    style={{
+                      background: 'transparent',
+                      border: 'none',
+                      color: '#0284c7',
+                      fontSize: '0.82rem',
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '4px'
+                    }}
+                  >
+                    <Edit2 size={13} /> Editar Parcelas
+                  </button>
+                )}
+                <span style={{ fontSize: '0.8rem', color: '#64748b' }}>
+                  Total: <strong>{parcelasFluxo.length} {parcelasFluxo.length === 1 ? 'registro' : 'registros'}</strong>
+                </span>
+              </div>
             </div>
 
             <div style={{ border: '1px solid #cbd5e1', borderRadius: '8px', overflow: 'hidden' }}>
@@ -15907,11 +16373,10 @@ function ModalVisualizarFluxoFinanceiro({ isOpen, onClose, orcamento, projetos =
                   <tr style={{ background: '#f1f5f9', borderBottom: '1px solid #cbd5e1', color: '#0f172a' }}>
                     <th style={{ padding: '9px 12px', textAlign: 'center', width: '40px' }}>#</th>
                     <th style={{ padding: '9px 12px', textAlign: 'left' }}>Descrição / Parcela</th>
-                    <th style={{ padding: '9px 12px', textAlign: 'left', width: '120px' }}>Meio de Pagto</th>
-                    <th style={{ padding: '9px 12px', textAlign: 'center', width: '70px' }}>%</th>
-                    <th style={{ padding: '9px 12px', textAlign: 'center', width: '110px' }}>Vencimento</th>
-                    <th style={{ padding: '9px 12px', textAlign: 'right', width: '130px' }}>Valor (R$)</th>
-                    <th style={{ padding: '9px 12px', textAlign: 'center', width: '110px' }}>Recibo</th>
+                    <th style={{ padding: '9px 12px', textAlign: 'left', width: '140px' }}>Meio de Pagto</th>
+                    <th style={{ padding: '9px 12px', textAlign: 'center', width: '80px' }}>%</th>
+                    <th style={{ padding: '9px 12px', textAlign: 'center', width: '120px' }}>Vencimento</th>
+                    <th style={{ padding: '9px 12px', textAlign: 'right', width: '140px' }}>Valor (R$)</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -15937,30 +16402,6 @@ function ModalVisualizarFluxoFinanceiro({ isOpen, onClose, orcamento, projetos =
                       <td style={{ padding: '8px 12px', textAlign: 'right', fontWeight: 800, color: '#0f172a' }}>
                         R$ {formatDecimalPtBr(typeof p.valor === 'number' ? p.valor : parsePtBrToFloat(p.valor))}
                       </td>
-                      <td style={{ padding: '8px 12px', textAlign: 'center' }}>
-                        <button
-                          type="button"
-                          onClick={() => handleGerarRecibo({ parcela: p, index: idx })}
-                          style={{
-                            fontSize: '0.76rem',
-                            padding: '4px 10px',
-                            background: '#ecfdf5',
-                            color: '#059669',
-                            border: '1px solid #a7f3d0',
-                            borderRadius: '5px',
-                            cursor: 'pointer',
-                            fontWeight: 700,
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            gap: '4px',
-                            transition: 'all 0.15s ease'
-                          }}
-                          title={`Gerar e imprimir recibo da Parcela ${idx + 1}`}
-                        >
-                          <Receipt size={13} />
-                          <span>Recibo</span>
-                        </button>
-                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -15975,29 +16416,6 @@ function ModalVisualizarFluxoFinanceiro({ isOpen, onClose, orcamento, projetos =
                     <td></td>
                     <td style={{ padding: '10px 12px', textAlign: 'right', color: '#059669', fontSize: '1rem' }}>
                       R$ {formatDecimalPtBr(totalSomaParcelas || totalVendaFinal)}
-                    </td>
-                    <td style={{ padding: '10px 12px', textAlign: 'center' }}>
-                      <button
-                        type="button"
-                        onClick={() => handleGerarRecibo({ isTotal: true })}
-                        style={{
-                          fontSize: '0.76rem',
-                          padding: '4px 10px',
-                          background: '#059669',
-                          color: '#ffffff',
-                          border: 'none',
-                          borderRadius: '5px',
-                          cursor: 'pointer',
-                          fontWeight: 700,
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: '4px'
-                        }}
-                        title="Gerar recibo do valor total"
-                      >
-                        <Receipt size={13} />
-                        <span>Recibo Total</span>
-                      </button>
                     </td>
                   </tr>
                 </tfoot>
@@ -16053,6 +16471,30 @@ function ModalVisualizarFluxoFinanceiro({ isOpen, onClose, orcamento, projetos =
           </button>
         </div>
       </div>
+
+      {/* Modal de Edição Manual do Fluxo Financeiro */}
+      {showModalEditarFluxo && !isContratoAssinado && (
+        <ModalEditarFluxoFinanceiro
+          isOpen={showModalEditarFluxo}
+          onClose={() => setShowModalEditarFluxo(false)}
+          fluxoInicial={parcelasFluxo}
+          valorAprovado={totalVendaFinal}
+          onSalvarFluxo={async (novoFluxo) => {
+            try {
+              await api.put(`/orcamentos/${orcamento.numero}`, {
+                fluxo_financeiro: JSON.stringify(novoFluxo)
+              });
+              orcamento.fluxo_financeiro = JSON.stringify(novoFluxo);
+              setParcelasFluxoState(novoFluxo);
+              setFeedback('Fluxo financeiro da proposta atualizado e salvo com sucesso!');
+              if (onEfetivado) onEfetivado();
+            } catch (err) {
+              console.error('Erro ao salvar fluxo financeiro:', err);
+              alert('Erro ao salvar alterações no fluxo financeiro: ' + (err.response?.data?.error || err.message));
+            }
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -16066,8 +16508,38 @@ function Orcamentos() {
   const [showDreModal, setShowDreModal] = useState(false);
   const [showShareModal, setShowShareModal] = useState(false);
   const [showConclusaoModal, setShowConclusaoModal] = useState(false);
+  const [showPropostasModal, setShowPropostasModal] = useState(false);
+  const [propostasOrcamento, setPropostasOrcamento] = useState(null);
+  const [loadingPropostaAction, setLoadingPropostaAction] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+
+  // Handler para o botão Proposta: se for primeira vez, gera v1; se já houver, abre lista
+  const handleCliqueProposta = async (orc) => {
+    if (!orc) return;
+    const num = orc.numero;
+    if (!num) return;
+
+    setLoadingPropostaAction(true);
+    try {
+      const res = await api.get(`/orcamentos/${num}/propostas`);
+      const list = Array.isArray(res.data) ? res.data : [];
+
+      if (list.length === 0) {
+        // Primeira vez! Gera automaticamente a primeira versão e associa ao orçamento
+        await api.post(`/orcamentos/${num}/propostas`, {
+          titulo: `Proposta Comercial #${num} (v1)`
+        });
+      }
+      setPropostasOrcamento({ ...orc });
+      setShowPropostasModal(true);
+    } catch (err) {
+      console.error('Erro ao abrir propostas:', err);
+      alert('Erro ao carregar ou gerar propostas do orçamento: ' + (err.response?.data?.error || err.message));
+    } finally {
+      setLoadingPropostaAction(false);
+    }
+  };
 
   // States para Fluxo Financeiro da Proposta Aprovada
   const [showFluxoModal, setShowFluxoModal] = useState(false);
@@ -16157,7 +16629,7 @@ function Orcamentos() {
         await api.put(`/orcamentos/${numero}`, { status: 'Em Aberto' });
         await fetchOrcamentosAndClientes();
         if (selectedOrcamento && selectedOrcamento.numero === numero) {
-          setSelectedOrcamento(prev => ({ ...prev, status: 'Em Aberto', situacao: 'Em Aberto' }));
+          setSelectedOrcamento(prev => ({ ...prev, status: 'Em Aberto', situacao: 'Em Aberto', fluxo_efetivado: 0 }));
         }
       } catch (err) {
         console.error('Erro ao desfazer aprovação:', err);
@@ -16166,9 +16638,25 @@ function Orcamentos() {
     }
   };
 
+  const handleDesfazerEfetivacao = async (numero) => {
+    if (window.confirm(`Deseja realmente desfazer a efetivação do Orçamento #${numero} e retorná-lo para a situação 'Em Aberto'? Isso também excluirá o fluxo financeiro gerado ao ser efetivado.`)) {
+      try {
+        await api.post(`/orcamentos/${numero}/desfazer-efetivacao`);
+        await fetchOrcamentosAndClientes();
+        if (selectedOrcamento && selectedOrcamento.numero === numero) {
+          setSelectedOrcamento(prev => ({ ...prev, status: 'Em Aberto', situacao: 'Em Aberto', fluxo_efetivado: 0 }));
+        }
+      } catch (err) {
+        console.error('Erro ao desfazer efetivação:', err);
+        setError(err.response?.data?.error || 'Erro ao desfazer efetivação do orçamento.');
+      }
+    }
+  };
+
   // Form State - Orçamento
   const [orcamentoEditMode, setOrcamentoEditMode] = useState(false);
   const [orcamentoNumeroToEdit, setOrcamentoNumeroToEdit] = useState(null);
+  const [orcamentoStatusToEdit, setOrcamentoStatusToEdit] = useState('Em Aberto');
   const [clienteSearch, setClienteSearch] = useState('');
   const [selectedCliente, setSelectedCliente] = useState(null);
   const [descricao, setDescricao] = useState('');
@@ -16442,6 +16930,7 @@ function Orcamentos() {
   const handleOpenAddModal = () => {
     setOrcamentoEditMode(false);
     setOrcamentoNumeroToEdit(null);
+    setOrcamentoStatusToEdit('Em Aberto');
     setClienteSearch('');
     setSelectedCliente(null);
     setDescricao('');
@@ -16456,6 +16945,7 @@ function Orcamentos() {
     if (!orc) return;
     setOrcamentoEditMode(true);
     setOrcamentoNumeroToEdit(orc.numero);
+    setOrcamentoStatusToEdit(orc.status || 'Em Aberto');
     const client = clientes.find(c => c.id === orc.cliente_id) || { id: orc.cliente_id, nome: orc.cliente_nome };
     setSelectedCliente(client);
     setClienteSearch(client.nome || orc.cliente_nome || '');
@@ -17105,18 +17595,21 @@ function Orcamentos() {
   const [activeTabOrcamento, setActiveTabOrcamento] = useState('Em aberto');
 
   const isEmAberto = (o) => !o.status || o.status === 'Em Aberto' || o.status === 'Em Negociação' || o.status === 'Pendente';
-  const isAprovadoStatus = (o) => o.status === 'Aprovado' || o.status === 'Aprovada';
+  const isAprovadoStatus = (o) => (o.status === 'Aprovado' || o.status === 'Aprovada') && o.status !== 'Efetivado';
+  const isEfetivadoStatus = (o) => o.status === 'Efetivado' || o.status === 'Efetivada';
   const isRecusadoStatus = (o) => o.status === 'Recusado' || o.status === 'Cancelado' || o.status === 'Rejeitado';
   const isConcluidoStatus = (o) => o.status === 'Concluido' || o.status === 'Concluído' || o.status === 'Finalizado';
 
   const countEmAberto = orcamentos.filter(isEmAberto).length;
   const countAprovado = orcamentos.filter(isAprovadoStatus).length;
+  const countEfetivado = orcamentos.filter(isEfetivadoStatus).length;
   const countRecusado = orcamentos.filter(isRecusadoStatus).length;
   const countConcluido = orcamentos.filter(isConcluidoStatus).length;
 
   const filteredOrcamentos = orcamentos.filter((o) => {
     if (activeTabOrcamento === 'Em aberto') return isEmAberto(o);
     if (activeTabOrcamento === 'Aprovado') return isAprovadoStatus(o);
+    if (activeTabOrcamento === 'Efetivados') return isEfetivadoStatus(o);
     if (activeTabOrcamento === 'Recusado') return isRecusadoStatus(o);
     if (activeTabOrcamento === 'Concluido') return isConcluidoStatus(o);
     return true;
@@ -17124,6 +17617,25 @@ function Orcamentos() {
 
   const renderStatusBadge = (status) => {
     const st = status || 'Em Aberto';
+    if (st === 'Efetivado' || st === 'Efetivada') {
+      return (
+        <span
+          className="badge"
+          style={{ 
+            padding: '4px 8px',
+            fontSize: '0.75rem',
+            fontWeight: 600,
+            background: 'rgba(6, 182, 212, 0.15)',
+            color: '#06B6D4',
+            border: '1px solid rgba(6, 182, 212, 0.3)',
+            borderRadius: '4px',
+            display: 'inline-block'
+          }}
+        >
+          ✓ Efetivado
+        </span>
+      );
+    }
     if (st === 'Aprovado' || st === 'Aprovada') {
       return (
         <span
@@ -17244,6 +17756,7 @@ function Orcamentos() {
             {[
               { key: 'Em aberto', label: 'Em aberto', count: countEmAberto, color: 'var(--accent-cyan)' },
               { key: 'Aprovado', label: 'Aprovado', count: countAprovado, color: '#10B981' },
+              { key: 'Efetivados', label: 'Efetivados', count: countEfetivado, color: '#06B6D4' },
               { key: 'Recusado', label: 'Recusado', count: countRecusado, color: '#EF4444' },
               { key: 'Concluido', label: 'Concluído', count: countConcluido, color: '#A855F7' }
             ].map((tab) => {
@@ -17313,9 +17826,17 @@ function Orcamentos() {
                         </td>
                         <td style={{ textAlign: 'right' }}>
                           <div className="flex-gap-2" style={{ justifyContent: 'flex-end' }}>
-                            {/* Na aba Aprovado, inclui os ícones de Fluxo Financeiro e Contrato */}
-                            {(activeTabOrcamento === 'Aprovado' || o.status === 'Aprovado') && (
+                            {/* Na aba Efetivados, inclui: Proposta, Fluxo Financeiro, Contrato, Projeto e Desfazer */}
+                            {(activeTabOrcamento === 'Efetivados' || isEfetivadoStatus(o)) ? (
                               <>
+                                <button 
+                                  onClick={() => handleCliqueProposta(o)} 
+                                  className="btn btn-secondary" 
+                                  style={{ padding: '6px', color: 'var(--accent-cyan)', borderColor: 'rgba(6, 182, 212, 0.4)' }} 
+                                  title="Visualizar Proposta Comercial"
+                                >
+                                  <FileText size={14} />
+                                </button>
                                 <button 
                                   onClick={() => handleAbrirFluxoFinanceiro(o)} 
                                   className="btn btn-secondary" 
@@ -17332,38 +17853,80 @@ function Orcamentos() {
                                 >
                                   <FileSignature size={14} />
                                 </button>
+                                <button 
+                                  onClick={() => setSelectedOrcamento(o)} 
+                                  className={`btn ${isSelected ? 'btn-primary' : 'btn-secondary'}`} 
+                                  style={{ padding: '6px' }} 
+                                  title="Projeto"
+                                >
+                                  <Briefcase size={14} />
+                                </button>
+                                <button 
+                                  onClick={() => handleDesfazerEfetivacao(o.numero)} 
+                                  className="btn btn-secondary" 
+                                  style={{ padding: '6px', color: '#F59E0B' }} 
+                                  title="Desfazer Efetivação (Exclui Fluxo e volta para Em Aberto)"
+                                >
+                                  <RotateCcw size={14} />
+                                </button>
                               </>
-                            )}
-                            <button 
-                              onClick={() => setSelectedOrcamento(o)} 
-                              className={`btn ${isSelected ? 'btn-primary' : 'btn-secondary'}`} 
-                              style={{ padding: '6px' }} 
-                              title="Projeto"
-                            >
-                              <Briefcase size={14} />
-                            </button>
-                            <button 
-                              onClick={() => handleOpenEditOrcamentoModal(o)} 
-                              className="btn btn-secondary" 
-                              style={{ padding: '6px' }} 
-                              title="Editar dados deste Orçamento"
-                            >
-                              <Edit2 size={14} />
-                            </button>
-                            {/* Na aba Aprovado, o ícone de exclusão é substituído por Desfazer Aprovação */}
-                            {activeTabOrcamento === 'Aprovado' || o.status === 'Aprovado' ? (
-                              <button 
-                                onClick={() => handleDesfazerAprovacao(o.numero)} 
-                                className="btn btn-secondary" 
-                                style={{ padding: '6px', color: '#F59E0B' }} 
-                                title="Desfazer Aprovação (Voltar para Em Aberto)"
-                              >
-                                <RotateCcw size={14} />
-                              </button>
                             ) : (
-                              <button onClick={() => handleDelete(o.numero)} className="btn btn-danger" style={{ padding: '6px' }} title="Excluir Orçamento">
-                                <Trash2 size={14} />
-                              </button>
+                              <>
+                                {/* Na aba Aprovado, inclui os ícones de Fluxo Financeiro e Contrato */}
+                                {(activeTabOrcamento === 'Aprovado' || isAprovadoStatus(o)) && (
+                                  <>
+                                    <button 
+                                      onClick={() => handleAbrirFluxoFinanceiro(o)} 
+                                      className="btn btn-secondary" 
+                                      style={{ padding: '6px', color: '#10B981', borderColor: 'rgba(16, 185, 129, 0.4)' }} 
+                                      title="Fluxo Financeiro (Visualizar Cronograma de Parcelas)"
+                                    >
+                                      <DollarSign size={14} />
+                                    </button>
+                                    <button 
+                                      onClick={() => handleAbrirContrato(o)} 
+                                      className="btn btn-primary" 
+                                      style={{ padding: '6px', background: 'linear-gradient(135deg, #3B82F6, #1D4ED8)', borderColor: '#3B82F6' }} 
+                                      title="Contrato (Gerar Minuta do Contrato)"
+                                    >
+                                      <FileSignature size={14} />
+                                    </button>
+                                  </>
+                                )}
+                                <button 
+                                  onClick={() => setSelectedOrcamento(o)} 
+                                  className={`btn ${isSelected ? 'btn-primary' : 'btn-secondary'}`} 
+                                  style={{ padding: '6px' }} 
+                                  title="Projeto"
+                                >
+                                  <Briefcase size={14} />
+                                </button>
+                                {isSituacaoEmAberto(o.status) && (
+                                  <button 
+                                    onClick={() => handleOpenEditOrcamentoModal(o)} 
+                                    className="btn btn-secondary" 
+                                    style={{ padding: '6px' }} 
+                                    title="Editar dados deste Orçamento"
+                                  >
+                                    <Edit2 size={14} />
+                                  </button>
+                                )}
+                                {/* Na aba Aprovado, o ícone de exclusão é substituído por Desfazer Aprovação */}
+                                {(activeTabOrcamento === 'Aprovado' || isAprovadoStatus(o)) ? (
+                                  <button 
+                                    onClick={() => handleDesfazerAprovacao(o.numero)} 
+                                    className="btn btn-secondary" 
+                                    style={{ padding: '6px', color: '#F59E0B' }} 
+                                    title="Desfazer Aprovação (Voltar para Em Aberto)"
+                                  >
+                                    <RotateCcw size={14} />
+                                  </button>
+                                ) : (
+                                  <button onClick={() => handleDelete(o.numero)} className="btn btn-danger" style={{ padding: '6px' }} title="Excluir Orçamento">
+                                    <Trash2 size={14} />
+                                  </button>
+                                )}
+                              </>
                             )}
                           </div>
                         </td>
@@ -17609,7 +18172,8 @@ function Orcamentos() {
                     <span>Materiais</span>
                   </button>
                   <button 
-                    onClick={() => handleGerarOrcamentoImpresso(selectedOrcamento, projetos)} 
+                    onClick={() => handleCliqueProposta(selectedOrcamento)} 
+                    disabled={loadingPropostaAction}
                     className="btn btn-secondary" 
                     style={{ 
                       display: 'inline-flex', 
@@ -17622,9 +18186,9 @@ function Orcamentos() {
                       border: '1px solid rgba(6, 182, 212, 0.4)',
                       color: 'var(--accent-cyan)'
                     }} 
-                    title="Gerar e Imprimir Proposta Comercial do Orçamento"
+                    title="Visualizar e Gerenciar Propostas Salvas deste Orçamento"
                   >
-                    <Printer size={16} />
+                    <FileText size={16} />
                     <span>Proposta</span>
                   </button>
                   <div style={{ display: 'inline-flex', alignItems: 'stretch' }}>
@@ -17835,6 +18399,8 @@ function Orcamentos() {
                   className="form-control"
                   value={parametroFinanceiroId}
                   onChange={(e) => setParametroFinanceiroId(e.target.value)}
+                  disabled={orcamentoEditMode && !isSituacaoEmAberto(orcamentoStatusToEdit)}
+                  style={orcamentoEditMode && !isSituacaoEmAberto(orcamentoStatusToEdit) ? { opacity: 0.6, cursor: 'not-allowed', backgroundColor: 'rgba(255,255,255,0.05)' } : {}}
                 >
                   {parametrosFinanceiros
                     .filter(pf => pf.situacao === 'Ativado' || pf.id === parseInt(parametroFinanceiroId, 10))
@@ -17845,7 +18411,9 @@ function Orcamentos() {
                     ))}
                 </select>
                 <small style={{ color: 'var(--text-muted)', fontSize: '0.75rem', marginTop: '2px', display: 'block' }}>
-                  Define as alíquotas e margens padrão para formação do preço de todos os projetos deste orçamento.
+                  {orcamentoEditMode && !isSituacaoEmAberto(orcamentoStatusToEdit)
+                    ? 'O parâmetro financeiro não pode ser alterado pois o orçamento não está Em Aberto.'
+                    : 'Define as alíquotas e margens padrão para formação do preço de todos os projetos deste orçamento.'}
                 </small>
               </div>
 
@@ -19287,10 +19855,20 @@ function Orcamentos() {
         financeiroConsolidado={financeiroConsolidado}
       />
 
+      {/* Modal de Histórico de Propostas Salvas */}
+      {showPropostasModal && propostasOrcamento && (
+        <ModalHistoricoPropostas 
+          orcamento={propostasOrcamento}
+          onClose={() => { setShowPropostasModal(false); setPropostasOrcamento(null); }}
+          onOpenShare={() => setShowShareModal(true)}
+          onOpenVirtual={(orc) => handleAbrirPropostaVirtual(orc || propostasOrcamento)}
+        />
+      )}
+
       {/* Modal de Compartilhamento da Proposta */}
       {showShareModal && (
         <ModalCompartilharProposta 
-          orcamento={selectedOrcamento} 
+          orcamento={selectedOrcamento || propostasOrcamento} 
           onClose={() => setShowShareModal(false)} 
         />
       )}
@@ -19362,6 +19940,718 @@ function Orcamentos() {
           onClose={() => setShowFluxoModal(false)}
           orcamento={fluxoOrcamento}
           projetos={fluxoProjetos}
+          onEfetivado={async () => {
+            await fetchOrcamentosAndClientes();
+            if (selectedOrcamento && selectedOrcamento.numero === fluxoOrcamento.numero) {
+              setSelectedOrcamento(prev => ({ ...prev, status: 'Efetivado', situacao: 'Efetivado', fluxo_efetivado: 1 }));
+            }
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+// 4.10.1. Tela de Orçamentos Efetivados e Concluídos
+function OrcamentosEfetivados() {
+  const navigate = useNavigate();
+  const [orcamentos, setOrcamentos] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  // Filtros
+  const [dataInicio, setDataInicio] = useState('');
+  const [dataFim, setDataFim] = useState('');
+  const [situacaoFiltro, setSituacaoFiltro] = useState('TODOS'); // 'TODOS', 'EFETIVADOS', 'CONCLUIDOS'
+  const [buscaCliente, setBuscaCliente] = useState('');
+
+  // Modais de apoio
+  const [showFluxoModal, setShowFluxoModal] = useState(false);
+  const [fluxoOrcamento, setFluxoOrcamento] = useState(null);
+  const [fluxoProjetos, setFluxoProjetos] = useState([]);
+
+  const [showPropostasModal, setShowPropostasModal] = useState(false);
+  const [propostasOrcamento, setPropostasOrcamento] = useState(null);
+  const [showShareModal, setShowShareModal] = useState(false);
+
+  // States para Contrato
+  const [showClienteContratoModal, setShowClienteContratoModal] = useState(false);
+  const [showMinutaContratoModal, setShowMinutaContratoModal] = useState(false);
+  const [contratoOrcamento, setContratoOrcamento] = useState(null);
+  const [contratoProjetos, setContratoProjetos] = useState([]);
+  const [contratoCliente, setContratoCliente] = useState(null);
+
+  const fetchOrcamentos = async () => {
+    try {
+      setLoading(true);
+      setError('');
+      const res = await api.get('/orcamentos');
+      const list = Array.isArray(res.data) ? res.data : [];
+      // Filtra apenas efetivados e concluídos
+      const filtrados = list.filter(o => {
+        const st = (o.status || '').toLowerCase();
+        return st === 'efetivado' || st === 'efetivada' || st === 'concluido' || st === 'concluído' || st === 'finalizado';
+      });
+      setOrcamentos(filtrados);
+    } catch (err) {
+      console.error('Erro ao buscar orçamentos efetivados/concluídos:', err);
+      setError('Erro ao carregar orçamentos.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchOrcamentos();
+  }, []);
+
+  const handleAbrirFluxo = async (orc) => {
+    try {
+      setFluxoOrcamento(orc);
+      let projs = [];
+      try {
+        const projRes = await api.get(`/projetos?orcamento_numero=${orc.numero}`);
+        projs = projRes.data || [];
+      } catch (e) {
+        projs = [];
+      }
+      setFluxoProjetos(projs);
+      setShowFluxoModal(true);
+    } catch (err) {
+      console.error('Erro ao abrir fluxo:', err);
+    }
+  };
+
+  const handleAbrirProposta = async (orc) => {
+    if (!orc) return;
+    const num = orc.numero;
+    if (!num) return;
+
+    try {
+      const res = await api.get(`/orcamentos/${num}/propostas`);
+      const list = Array.isArray(res.data) ? res.data : [];
+
+      if (list.length === 0) {
+        await api.post(`/orcamentos/${num}/propostas`, {
+          titulo: `Proposta Comercial #${num} (v1)`
+        });
+      }
+      setPropostasOrcamento({ ...orc });
+      setShowPropostasModal(true);
+    } catch (err) {
+      console.error('Erro ao abrir propostas:', err);
+      alert('Erro ao carregar propostas: ' + (err.response?.data?.error || err.message));
+    }
+  };
+
+  const handleAbrirPropostaVirtual = async (orc) => {
+    if (!orc) return;
+    try {
+      const res = await api.get(`/orcamentos/${orc.numero}/compartilhar`);
+      if (res.data && res.data.token) {
+        window.open(`/proposta-publica/${res.data.token}`, '_blank');
+      } else {
+        window.open(`/proposta/${orc.numero}`, '_blank');
+      }
+    } catch (err) {
+      console.error('Erro ao abrir proposta virtual:', err);
+      window.open(`/proposta-publica/${orc.numero}`, '_blank');
+    }
+  };
+
+  const handleAbrirContrato = async (orc) => {
+    try {
+      setContratoOrcamento(orc);
+      
+      let clientData = null;
+      try {
+        const cliRes = await api.get(`/clientes/${orc.cliente_id}`);
+        clientData = cliRes.data;
+      } catch (e) {
+        clientData = null;
+      }
+
+      setContratoCliente({
+        id: orc.cliente_id,
+        nome: clientData?.nome || orc.cliente_nome || '',
+        documento: clientData?.documento || orc.cliente_documento || '',
+        telefone: clientData?.telefone || orc.cliente_telefone || '',
+        email: clientData?.email || orc.cliente_email || '',
+        rg: clientData?.rg || orc.cliente_rg || '',
+        endereco: clientData?.endereco || orc.cliente_endereco || '',
+        numero: clientData?.numero || orc.cliente_numero || '',
+        complemento: clientData?.complemento || orc.cliente_complemento || '',
+        bairro: clientData?.bairro || orc.cliente_bairro || '',
+        cidade: clientData?.cidade || orc.cliente_cidade || 'Belém',
+        uf: clientData?.uf || orc.cliente_uf || 'PA',
+        cep: clientData?.cep || orc.cliente_cep || '',
+        entrega_endereco: clientData?.entrega_endereco || orc.cliente_entrega_endereco || '',
+        entrega_numero: clientData?.entrega_numero || orc.cliente_entrega_numero || '',
+        entrega_complemento: clientData?.entrega_complemento || orc.cliente_entrega_complemento || '',
+        entrega_bairro: clientData?.entrega_bairro || orc.cliente_entrega_bairro || '',
+        entrega_cidade: clientData?.entrega_cidade || orc.cliente_entrega_cidade || '',
+        entrega_uf: clientData?.entrega_uf || orc.cliente_entrega_uf || '',
+        entrega_cep: clientData?.entrega_cep || orc.cliente_entrega_cep || ''
+      });
+
+      let projs = [];
+      try {
+        const projRes = await api.get(`/projetos?orcamento_numero=${orc.numero}`);
+        projs = projRes.data || [];
+      } catch (e) {
+        projs = [];
+      }
+      setContratoProjetos(projs);
+
+      setShowMinutaContratoModal(true);
+    } catch (err) {
+      console.error('Erro ao carregar dados para o contrato:', err);
+      setError('Erro ao carregar dados do contrato.');
+    }
+  };
+
+  // Funções de formatação
+  const formatarDataBr = (dt) => {
+    if (!dt) return '-';
+    const str = String(dt).split('T')[0].split(' ')[0].trim();
+    const p = str.split('-');
+    if (p.length === 3 && p[0].length === 4) return `${p[2].padStart(2, '0')}/${p[1].padStart(2, '0')}/${p[0]}`;
+    return str || dt;
+  };
+
+  // Cálculo individual de cada orçamento
+  const calcularMetricasOrcamento = (o) => {
+    const valorAprovado = parseFloat(o.total_venda) || 0;
+    const custoTotal = parseFloat(o.CustoTotal) || ((parseFloat(o.CustoMaterial) || 0) + (parseFloat(o.CustoProducao) || 0));
+    
+    // Deduções percentuais configuradas no parâmetro financeiro
+    const percImposto = parseFloat(o.perc_imposto) || 0;
+    const percComissao = parseFloat(o.perc_comissao) || 0;
+    const percFinanceiro = parseFloat(o.perc_custo_financeiro) || 0;
+    const percDeducoes = percImposto + percComissao + percFinanceiro;
+    const deducoes = valorAprovado * (percDeducoes / 100);
+
+    const lucroLiquido = valorAprovado - custoTotal - deducoes;
+    const margem = valorAprovado > 0 ? (lucroLiquido / valorAprovado) * 100 : 0;
+
+    return {
+      valorAprovado,
+      custoTotal,
+      deducoes,
+      lucroLiquido,
+      margem
+    };
+  };
+
+  // Filtro dos registros
+  const orcamentosFiltrados = orcamentos.filter(o => {
+    // Filtro por Situação
+    const st = (o.status || '').toLowerCase();
+    const isEfetivado = st === 'efetivado' || st === 'efetivada';
+    const isConcluido = st === 'concluido' || st === 'concluído' || st === 'finalizado';
+
+    if (situacaoFiltro === 'EFETIVADOS' && !isEfetivado) return false;
+    if (situacaoFiltro === 'CONCLUIDOS' && !isConcluido) return false;
+
+    // Filtro por Cliente ou Número
+    if (buscaCliente && buscaCliente.trim() !== '') {
+      const termo = buscaCliente.toLowerCase().trim();
+      const nomeMatch = (o.cliente_nome || '').toLowerCase().includes(termo);
+      const numMatch = String(o.numero || '').includes(termo);
+      if (!nomeMatch && !numMatch) return false;
+    }
+
+    // Filtro por Período da Data de Aprovação (ou data de criação como fallback)
+    const dtReferencia = o.data_aprovacao ? String(o.data_aprovacao).split('T')[0].split(' ')[0] : (o.data_criacao ? String(o.data_criacao).split('T')[0].split(' ')[0] : '');
+    if (dataInicio && dtReferencia && dtReferencia < dataInicio) return false;
+    if (dataFim && dtReferencia && dtReferencia > dataFim) return false;
+
+    return true;
+  });
+
+  // Totais consolidados
+  const totaisConsolidados = orcamentosFiltrados.reduce((acc, o) => {
+    const m = calcularMetricasOrcamento(o);
+    acc.custoTotal += m.custoTotal;
+    acc.valorAprovado += m.valorAprovado;
+    acc.lucroLiquido += m.lucroLiquido;
+    return acc;
+  }, { custoTotal: 0, valorAprovado: 0, lucroLiquido: 0 });
+
+  const margemGeralPonderada = totaisConsolidados.valorAprovado > 0
+    ? (totaisConsolidados.lucroLiquido / totaisConsolidados.valorAprovado) * 100
+    : 0;
+
+  // Atalhos de Período
+  const setPeriodoMesAtual = () => {
+    const hoje = new Date();
+    const ano = hoje.getFullYear();
+    const mes = String(hoje.getMonth() + 1).padStart(2, '0');
+    const ultimoDia = new Date(ano, hoje.getMonth() + 1, 0).getDate();
+    setDataInicio(`${ano}-${mes}-01`);
+    setDataFim(`${ano}-${mes}-${String(ultimoDia).padStart(2, '0')}`);
+  };
+
+  const setPeriodoUltimos30Dias = () => {
+    const hoje = new Date();
+    const passado = new Date();
+    passado.setDate(hoje.getDate() - 30);
+    setDataInicio(passado.toISOString().split('T')[0]);
+    setDataFim(hoje.toISOString().split('T')[0]);
+  };
+
+  const setPeriodoAnoAtual = () => {
+    const ano = new Date().getFullYear();
+    setDataInicio(`${ano}-01-01`);
+    setDataFim(`${ano}-12-31`);
+  };
+
+  const limparFiltros = () => {
+    setDataInicio('');
+    setDataFim('');
+    setSituacaoFiltro('TODOS');
+    setBuscaCliente('');
+  };
+
+  return (
+    <div>
+      {/* Header */}
+      <div className="content-header">
+        <div>
+          <h1 className="page-title" style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <TrendingUp size={26} style={{ color: 'var(--accent-cyan)' }} />
+            Orçamentos Efetivados & Concluídos
+          </h1>
+          <div style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginTop: '4px' }}>
+            Acompanhamento gerencial de orçamentos com fluxo financeiro efetivado e pedidos concluídos
+          </div>
+        </div>
+        <div style={{ display: 'flex', gap: '8px' }}>
+          <button 
+            type="button" 
+            onClick={fetchOrcamentos} 
+            className="btn btn-secondary" 
+            style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+            title="Atualizar lista"
+          >
+            <RefreshCw size={15} className={loading ? 'animate-spin' : ''} />
+            <span>Atualizar</span>
+          </button>
+        </div>
+      </div>
+
+      {error && <div className="alert alert-danger">{error}</div>}
+
+      {/* Cards de Métricas Consolidadas no Topo */}
+      <div style={{ 
+        display: 'grid', 
+        gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', 
+        gap: '14px', 
+        marginBottom: '20px' 
+      }}>
+        <div className="glass-card" style={{ padding: '16px' }}>
+          <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', fontWeight: 700, textTransform: 'uppercase' }}>
+            Orçamentos
+          </div>
+          <div style={{ fontSize: '1.6rem', fontWeight: 800, color: 'var(--accent-cyan)', marginTop: '4px' }}>
+            {orcamentosFiltrados.length}
+          </div>
+          <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '2px' }}>
+            {orcamentos.length} no total cadastrado
+          </div>
+        </div>
+
+        <div className="glass-card" style={{ padding: '16px' }}>
+          <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', fontWeight: 700, textTransform: 'uppercase' }}>
+            Total Custo Direto
+          </div>
+          <div style={{ fontSize: '1.5rem', fontWeight: 800, color: '#F87171', marginTop: '4px' }}>
+            R$ {formatDecimalPtBr(totaisConsolidados.custoTotal)}
+          </div>
+          <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '2px' }}>
+            Materiais + Serviços
+          </div>
+        </div>
+
+        <div className="glass-card" style={{ padding: '16px' }}>
+          <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', fontWeight: 700, textTransform: 'uppercase' }}>
+            Valor Total Aprovado
+          </div>
+          <div style={{ fontSize: '1.5rem', fontWeight: 800, color: '#38BDF8', marginTop: '4px' }}>
+            R$ {formatDecimalPtBr(totaisConsolidados.valorAprovado)}
+          </div>
+          <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '2px' }}>
+            Faturamento contratado
+          </div>
+        </div>
+
+        <div className="glass-card" style={{ padding: '16px' }}>
+          <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', fontWeight: 700, textTransform: 'uppercase' }}>
+            Lucro Líquido Previsto
+          </div>
+          <div style={{ fontSize: '1.5rem', fontWeight: 800, color: totaisConsolidados.lucroLiquido >= 0 ? '#10B981' : '#EF4444', marginTop: '4px' }}>
+            R$ {formatDecimalPtBr(totaisConsolidados.lucroLiquido)}
+          </div>
+          <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '2px' }}>
+            Após deduções fiscais e comerciais
+          </div>
+        </div>
+
+        <div className="glass-card" style={{ padding: '16px' }}>
+          <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', fontWeight: 700, textTransform: 'uppercase' }}>
+            Margem Líquida Ponderada
+          </div>
+          <div style={{ fontSize: '1.5rem', fontWeight: 800, color: margemGeralPonderada >= 10 ? '#10B981' : (margemGeralPonderada > 0 ? '#FBBF24' : '#EF4444'), marginTop: '4px' }}>
+            {margemGeralPonderada.toFixed(2)}%
+          </div>
+          <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '2px' }}>
+            Rentabilidade global
+          </div>
+        </div>
+      </div>
+
+      {/* Caixa de Filtros */}
+      <div className="glass-card" style={{ padding: '16px 20px', marginBottom: '20px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px', flexWrap: 'wrap', gap: '8px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 700, fontSize: '0.92rem', color: 'var(--text-main)' }}>
+            <Search size={16} style={{ color: 'var(--accent-cyan)' }} />
+            <span>Filtros de Pesquisa</span>
+          </div>
+          <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+            <button 
+              type="button" 
+              onClick={setPeriodoMesAtual}
+              className="btn btn-secondary" 
+              style={{ fontSize: '0.75rem', padding: '4px 8px' }}
+            >
+              Este Mês
+            </button>
+            <button 
+              type="button" 
+              onClick={setPeriodoUltimos30Dias}
+              className="btn btn-secondary" 
+              style={{ fontSize: '0.75rem', padding: '4px 8px' }}
+            >
+              Últimos 30 Dias
+            </button>
+            <button 
+              type="button" 
+              onClick={setPeriodoAnoAtual}
+              className="btn btn-secondary" 
+              style={{ fontSize: '0.75rem', padding: '4px 8px' }}
+            >
+              Este Ano
+            </button>
+            <button 
+              type="button" 
+              onClick={limparFiltros}
+              className="btn btn-secondary" 
+              style={{ fontSize: '0.75rem', padding: '4px 8px', color: '#F87171' }}
+            >
+              Limpar Filtros
+            </button>
+          </div>
+        </div>
+
+        <div style={{ 
+          display: 'grid', 
+          gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', 
+          gap: '14px',
+          alignItems: 'flex-end'
+        }}>
+          {/* Filtro: Cliente */}
+          <div className="form-group" style={{ margin: 0 }}>
+            <label className="form-label" style={{ fontSize: '0.8rem' }}>Nome do Cliente ou Nº</label>
+            <div style={{ position: 'relative' }}>
+              <input 
+                type="text" 
+                className="form-control" 
+                placeholder="Buscar por cliente ou número..."
+                value={buscaCliente}
+                onChange={(e) => setBuscaCliente(e.target.value)}
+                style={{ paddingLeft: '30px' }}
+              />
+              <User size={14} style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} />
+            </div>
+          </div>
+
+          {/* Filtro: Situação */}
+          <div className="form-group" style={{ margin: 0 }}>
+            <label className="form-label" style={{ fontSize: '0.8rem' }}>Situação do Orçamento</label>
+            <select 
+              className="form-control" 
+              value={situacaoFiltro}
+              onChange={(e) => setSituacaoFiltro(e.target.value)}
+            >
+              <option value="TODOS">Todos (Efetivados e Concluídos)</option>
+              <option value="EFETIVADOS">Apenas Efetivados</option>
+              <option value="CONCLUIDOS">Apenas Concluídos</option>
+            </select>
+          </div>
+
+          {/* Filtro: Data Início */}
+          <div className="form-group" style={{ margin: 0 }}>
+            <label className="form-label" style={{ fontSize: '0.8rem' }}>Data Inicial (Aprovação)</label>
+            <input 
+              type="date" 
+              className="form-control" 
+              value={dataInicio}
+              onChange={(e) => setDataInicio(e.target.value)}
+            />
+          </div>
+
+          {/* Filtro: Data Fim */}
+          <div className="form-group" style={{ margin: 0 }}>
+            <label className="form-label" style={{ fontSize: '0.8rem' }}>Data Final (Aprovação)</label>
+            <input 
+              type="date" 
+              className="form-control" 
+              value={dataFim}
+              onChange={(e) => setDataFim(e.target.value)}
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* Grid Principal */}
+      <div className="glass-card" style={{ padding: '0', overflow: 'hidden' }}>
+        <div className="table-container" style={{ margin: 0 }}>
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th style={{ width: '90px' }}># Orç.</th>
+                <th>Cliente</th>
+                <th style={{ width: '130px', textAlign: 'center' }}>Situação</th>
+                <th style={{ width: '120px', textAlign: 'center' }}>Data Aprovação</th>
+                <th style={{ width: '140px', textAlign: 'right' }}>Custo Total</th>
+                <th style={{ width: '140px', textAlign: 'right' }}>Valor Aprovado</th>
+                <th style={{ width: '140px', textAlign: 'right' }}>Lucro Líquido</th>
+                <th style={{ width: '110px', textAlign: 'center' }}>Margem</th>
+                <th style={{ width: '100px', textAlign: 'center' }}>Ações</th>
+              </tr>
+            </thead>
+            <tbody>
+              {loading ? (
+                <tr>
+                  <td colSpan="9" style={{ textAlign: 'center', padding: '30px', color: 'var(--text-muted)' }}>
+                    Carregando registros...
+                  </td>
+                </tr>
+              ) : orcamentosFiltrados.length === 0 ? (
+                <tr>
+                  <td colSpan="9" style={{ textAlign: 'center', padding: '36px 16px', color: 'var(--text-muted)' }}>
+                    Nenhum orçamento encontrado com os filtros selecionados.
+                  </td>
+                </tr>
+              ) : (
+                orcamentosFiltrados.map((o) => {
+                  const m = calcularMetricasOrcamento(o);
+                  const st = (o.status || '').toLowerCase();
+                  const isEfetivado = st === 'efetivado' || st === 'efetivada';
+
+                  return (
+                    <tr key={o.numero}>
+                      <td style={{ fontWeight: 700, color: 'var(--accent-cyan)' }}>
+                        #{o.numero}
+                      </td>
+                      <td style={{ fontWeight: 600 }}>
+                        {o.cliente_nome}
+                        {o.descricao && (
+                          <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 400 }}>
+                            {o.descricao}
+                          </div>
+                        )}
+                      </td>
+                      <td style={{ textAlign: 'center' }}>
+                        {isEfetivado ? (
+                          <span
+                            className="badge"
+                            style={{ 
+                              padding: '3px 8px',
+                              fontSize: '0.72rem',
+                              fontWeight: 600,
+                              background: 'rgba(6, 182, 212, 0.15)',
+                              color: '#06B6D4',
+                              border: '1px solid rgba(6, 182, 212, 0.3)',
+                              borderRadius: '4px',
+                              display: 'inline-block'
+                            }}
+                          >
+                            ✓ Efetivado
+                          </span>
+                        ) : (
+                          <span
+                            className="badge"
+                            style={{ 
+                              padding: '3px 8px',
+                              fontSize: '0.72rem',
+                              fontWeight: 600,
+                              background: 'rgba(168, 85, 247, 0.15)',
+                              color: '#C084FC',
+                              border: '1px solid rgba(168, 85, 247, 0.3)',
+                              borderRadius: '4px',
+                              display: 'inline-block'
+                            }}
+                          >
+                            ✓ Concluído
+                          </span>
+                        )}
+                      </td>
+                      <td style={{ textAlign: 'center', color: 'var(--text-muted)' }}>
+                        {formatarDataBr(o.data_aprovacao || o.data_criacao)}
+                      </td>
+                      <td style={{ textAlign: 'right', fontWeight: 600, color: '#F87171' }}>
+                        R$ {formatDecimalPtBr(m.custoTotal)}
+                      </td>
+                      <td style={{ textAlign: 'right', fontWeight: 700, color: '#38BDF8' }}>
+                        R$ {formatDecimalPtBr(m.valorAprovado)}
+                      </td>
+                      <td style={{ textAlign: 'right', fontWeight: 800, color: m.lucroLiquido >= 0 ? '#10B981' : '#EF4444' }}>
+                        R$ {formatDecimalPtBr(m.lucroLiquido)}
+                      </td>
+                      <td style={{ textAlign: 'center' }}>
+                        <span style={{
+                          fontSize: '0.78rem',
+                          fontWeight: 700,
+                          padding: '2px 8px',
+                          borderRadius: '12px',
+                          background: m.margem >= 10 ? 'rgba(16, 185, 129, 0.12)' : (m.margem > 0 ? 'rgba(251, 191, 36, 0.12)' : 'rgba(239, 68, 68, 0.12)'),
+                          color: m.margem >= 10 ? '#34D399' : (m.margem > 0 ? '#FBBF24' : '#F87171'),
+                          border: `1px solid ${m.margem >= 10 ? 'rgba(16, 185, 129, 0.3)' : (m.margem > 0 ? 'rgba(251, 191, 36, 0.3)' : 'rgba(239, 68, 68, 0.3)')}`
+                        }}>
+                          {m.margem.toFixed(1)}%
+                        </span>
+                      </td>
+                      <td style={{ textAlign: 'center' }}>
+                        <div className="flex-gap-2" style={{ justifyContent: 'center' }}>
+                          <button
+                            type="button"
+                            onClick={() => handleAbrirFluxo(o)}
+                            className="btn btn-secondary"
+                            style={{ padding: '4px 6px', color: '#10B981', borderColor: 'rgba(16, 185, 129, 0.3)' }}
+                            title="Visualizar Fluxo Financeiro"
+                          >
+                            <DollarSign size={13} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleAbrirContrato(o)}
+                            className="btn btn-secondary"
+                            style={{ 
+                              padding: '4px 6px', 
+                              color: '#3B82F6', 
+                              borderColor: 'rgba(59, 130, 246, 0.3)',
+                              background: o.data_assinatura ? 'rgba(5, 150, 105, 0.12)' : 'rgba(59, 130, 246, 0.1)'
+                            }}
+                            title={o.data_assinatura ? `Contrato Assinado em ${formatarDataBr(o.data_assinatura)} (Clique para visualizar / imprimir)` : "Visualizar e Imprimir Contrato"}
+                          >
+                            <FileSignature size={13} style={{ color: o.data_assinatura ? '#059669' : '#3B82F6' }} />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+            {/* Rodapé da Página com Totais */}
+            <tfoot>
+              <tr style={{ 
+                background: 'rgba(0, 0, 0, 0.35)', 
+                borderTop: '2px solid var(--accent-cyan)', 
+                fontWeight: 800 
+              }}>
+                <td colSpan="4" style={{ padding: '14px 16px', color: 'var(--text-main)', fontSize: '0.9rem' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <CheckCircle2 size={16} style={{ color: 'var(--accent-cyan)' }} />
+                    <span>TOTAIS GERAIS ({orcamentosFiltrados.length} {orcamentosFiltrados.length === 1 ? 'orçamento' : 'orçamentos'} listados)</span>
+                  </div>
+                </td>
+                <td style={{ textAlign: 'right', padding: '14px 16px', color: '#F87171', fontSize: '0.98rem' }}>
+                  R$ {formatDecimalPtBr(totaisConsolidados.custoTotal)}
+                </td>
+                <td style={{ textAlign: 'right', padding: '14px 16px', color: '#38BDF8', fontSize: '0.98rem' }}>
+                  R$ {formatDecimalPtBr(totaisConsolidados.valorAprovado)}
+                </td>
+                <td style={{ textAlign: 'right', padding: '14px 16px', color: totaisConsolidados.lucroLiquido >= 0 ? '#10B981' : '#EF4444', fontSize: '1.02rem' }}>
+                  R$ {formatDecimalPtBr(totaisConsolidados.lucroLiquido)}
+                </td>
+                <td style={{ textAlign: 'center', padding: '14px 16px' }}>
+                  <span style={{
+                    fontSize: '0.82rem',
+                    fontWeight: 800,
+                    padding: '3px 10px',
+                    borderRadius: '12px',
+                    background: margemGeralPonderada >= 10 ? 'rgba(16, 185, 129, 0.2)' : (margemGeralPonderada > 0 ? 'rgba(251, 191, 36, 0.2)' : 'rgba(239, 68, 68, 0.2)'),
+                    color: margemGeralPonderada >= 10 ? '#34D399' : (margemGeralPonderada > 0 ? '#FBBF24' : '#F87171'),
+                    border: `1.5px solid ${margemGeralPonderada >= 10 ? '#10B981' : (margemGeralPonderada > 0 ? '#FBBF24' : '#EF4444')}`
+                  }}>
+                    {margemGeralPonderada.toFixed(2)}%
+                  </span>
+                </td>
+                <td></td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      </div>
+
+      {/* Modal de Visualização do Fluxo Financeiro */}
+      {showFluxoModal && fluxoOrcamento && (
+        <ModalVisualizarFluxoFinanceiro
+          isOpen={showFluxoModal}
+          onClose={() => setShowFluxoModal(false)}
+          orcamento={fluxoOrcamento}
+          projetos={fluxoProjetos}
+        />
+      )}
+
+      {/* Modal de Histórico de Propostas Salvas */}
+      {showPropostasModal && propostasOrcamento && (
+        <ModalHistoricoPropostas 
+          orcamento={propostasOrcamento}
+          onClose={() => { setShowPropostasModal(false); setPropostasOrcamento(null); }}
+          onOpenShare={() => setShowShareModal(true)}
+          onOpenVirtual={(orc) => handleAbrirPropostaVirtual(orc || propostasOrcamento)}
+        />
+      )}
+
+      {/* Modal de Compartilhamento */}
+      {showShareModal && propostasOrcamento && (
+        <ModalCompartilharProposta 
+          orcamento={propostasOrcamento} 
+          onClose={() => setShowShareModal(false)} 
+        />
+      )}
+
+      {/* Modal de Cadastro / Dados Complementares do Cliente para Contrato */}
+      {showClienteContratoModal && contratoCliente && contratoOrcamento && (
+        <ModalCadastroClienteContrato
+          isOpen={showClienteContratoModal}
+          onClose={() => setShowClienteContratoModal(false)}
+          cliente={contratoCliente}
+          orcamento={contratoOrcamento}
+          onSalvarEAvancar={(updatedCliente) => {
+            setContratoCliente(updatedCliente);
+            setShowClienteContratoModal(false);
+            setShowMinutaContratoModal(true);
+            fetchOrcamentos();
+          }}
+        />
+      )}
+
+      {/* Modal de Apresentação e Impressão da Minuta do Contrato */}
+      {showMinutaContratoModal && contratoOrcamento && contratoCliente && (
+        <ModalMinutaContrato
+          isOpen={showMinutaContratoModal}
+          onClose={() => setShowMinutaContratoModal(false)}
+          orcamento={contratoOrcamento}
+          cliente={contratoCliente}
+          projetos={contratoProjetos}
+          onEditarCliente={() => {
+            setShowMinutaContratoModal(false);
+            setShowClienteContratoModal(true);
+          }}
         />
       )}
     </div>
@@ -19378,12 +20668,39 @@ function Projetos() {
   const [showDreModal, setShowDreModal] = useState(false);
   const [showShareModal, setShowShareModal] = useState(false);
   const [showConclusaoModal, setShowConclusaoModal] = useState(false);
+  const [showPropostasModal, setShowPropostasModal] = useState(false);
+  const [loadingPropostaAction, setLoadingPropostaAction] = useState(false);
   const [showUploadPopup, setShowUploadPopup] = useState(false);
   const [selectedProjectForUpload, setSelectedProjectForUpload] = useState(null);
   const [editMode, setEditMode] = useState(false);
   const [projectIdToEdit, setProjectIdToEdit] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+
+  // Handler para o botão Proposta no detalhe do orçamento
+  const handleCliqueProposta = async () => {
+    const num = orcamento?.numero || numero;
+    if (!num) return;
+
+    setLoadingPropostaAction(true);
+    try {
+      const res = await api.get(`/orcamentos/${num}/propostas`);
+      const list = Array.isArray(res.data) ? res.data : [];
+
+      if (list.length === 0) {
+        // Primeira vez: gera a proposta e associa ao orçamento
+        await api.post(`/orcamentos/${num}/propostas`, {
+          titulo: `Proposta Comercial #${num} (v1)`
+        });
+      }
+      setShowPropostasModal(true);
+    } catch (err) {
+      console.error('Erro ao abrir propostas:', err);
+      alert('Erro ao carregar ou gerar propostas do orçamento: ' + (err.response?.data?.error || err.message));
+    } finally {
+      setLoadingPropostaAction(false);
+    }
+  };
 
   // Form State
   const [nome, setNome] = useState('');
@@ -20341,7 +21658,8 @@ function Projetos() {
               <span>Materiais</span>
             </button>
             <button 
-              onClick={() => handleGerarOrcamentoImpresso(orcamento, projetos)} 
+              onClick={() => handleCliqueProposta()} 
+              disabled={loadingPropostaAction}
               className="btn btn-secondary" 
               style={{ 
                 display: 'inline-flex', 
@@ -20354,9 +21672,9 @@ function Projetos() {
                 border: '1px solid rgba(6, 182, 212, 0.4)',
                 color: 'var(--accent-cyan)'
               }} 
-              title="Gerar e Imprimir Proposta Comercial do Orçamento"
+              title="Visualizar e Gerenciar Propostas Salvas deste Orçamento"
             >
-              <Printer size={16} />
+              <FileText size={16} />
               <span>Proposta</span>
             </button>
             <div style={{ display: 'inline-flex', alignItems: 'stretch' }}>
@@ -21719,6 +23037,16 @@ function Projetos() {
         financeiroConsolidado={financeiroConsolidado}
       />
 
+      {/* Modal de Histórico de Propostas Salvas */}
+      {showPropostasModal && orcamento && (
+        <ModalHistoricoPropostas 
+          orcamento={orcamento} 
+          onClose={() => setShowPropostasModal(false)} 
+          onOpenShare={() => setShowShareModal(true)} 
+          onOpenVirtual={() => handleAbrirPropostaVirtual(orcamento || numero)}
+        />
+      )}
+
       {/* Modal de Compartilhamento da Proposta */}
       {showShareModal && (
         <ModalCompartilharProposta 
@@ -21763,49 +23091,205 @@ function Projetos() {
 // 12. Página Financeiro
 function Financeiro() {
   const [orcamentos, setOrcamentos] = useState([]);
+  const [clientes, setClientes] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [buscaCliente, setBuscaCliente] = useState('');
+  const [dataInicio, setDataInicio] = useState('');
+  const [dataFim, setDataFim] = useState('');
+
+  // States para Fluxo Financeiro da Proposta Aprovada
+  const [showFluxoModal, setShowFluxoModal] = useState(false);
+  const [fluxoOrcamento, setFluxoOrcamento] = useState(null);
+  const [fluxoProjetos, setFluxoProjetos] = useState([]);
+
+  // States para Contrato da Proposta Aprovada
+  const [showClienteContratoModal, setShowClienteContratoModal] = useState(false);
+  const [showMinutaContratoModal, setShowMinutaContratoModal] = useState(false);
+  const [contratoOrcamento, setContratoOrcamento] = useState(null);
+  const [contratoProjetos, setContratoProjetos] = useState([]);
+  const [contratoCliente, setContratoCliente] = useState(null);
+
+  const fetchFin = async () => {
+    setLoading(true);
+    try {
+      const [orcRes, cliRes] = await Promise.all([
+        api.get('/orcamentos'),
+        api.get('/clientes').catch(() => ({ data: [] }))
+      ]);
+      setOrcamentos(Array.isArray(orcRes.data) ? resArray(orcRes.data) : []);
+      setClientes(Array.isArray(cliRes.data) ? resArray(cliRes.data) : []);
+    } catch (e) {
+      console.error('Erro ao buscar dados financeiros:', e);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const resArray = (data) => Array.isArray(data) ? data : [];
 
   useEffect(() => {
-    const fetchFin = async () => {
-      try {
-        const res = await api.get('/orcamentos');
-        setOrcamentos(Array.isArray(res.data) ? res.data : []);
-      } catch (e) {
-        console.error('Erro ao buscar dados financeiros:', e);
-      } finally {
-        setLoading(false);
-      }
-    };
     fetchFin();
   }, []);
 
-  const totalAprovados = orcamentos.filter(o => o.status === 'Aprovado' || o.status === 'Concluído').reduce((sum, o) => sum + (parseFloat(o.valor_total) || 0), 0);
-  const totalEmNegociacao = orcamentos.filter(o => o.status === 'Em Negociação' || o.status === 'Pendente' || !o.status).reduce((sum, o) => sum + (parseFloat(o.valor_total) || 0), 0);
-  const totalGeral = orcamentos.reduce((sum, o) => sum + (parseFloat(o.valor_total) || 0), 0);
-  const totalQtd = orcamentos.length;
+  const isAprovadoStatus = (o) => (o.status === 'Aprovado' || o.status === 'Aprovada') && o.status !== 'Efetivado';
+
+  const formatarDataBr = (dt) => {
+    if (!dt) return '-';
+    const str = String(dt).split('T')[0].split(' ')[0].trim();
+    const p = str.split('-');
+    if (p.length === 3 && p[0].length === 4) return `${p[2].padStart(2, '0')}/${p[1].padStart(2, '0')}/${p[0]}`;
+    return str || dt;
+  };
 
   const formatCurrency = (val) => {
     const num = parseFloat(val || 0);
     return num.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
   };
 
+  const handleAbrirFluxoFinanceiro = async (orc) => {
+    try {
+      setFluxoOrcamento(orc);
+      let projs = [];
+      try {
+        const projRes = await api.get(`/projetos?orcamento_numero=${orc.numero}`);
+        projs = projRes.data || [];
+      } catch (e) {
+        projs = [];
+      }
+      setFluxoProjetos(projs);
+      setShowFluxoModal(true);
+    } catch (err) {
+      console.error('Erro ao abrir fluxo financeiro:', err);
+      alert('Erro ao carregar dados do fluxo financeiro.');
+    }
+  };
+
+  const handleAbrirContrato = async (orc) => {
+    try {
+      setContratoOrcamento(orc);
+      
+      let clientData = null;
+      try {
+        const cliRes = await api.get(`/clientes/${orc.cliente_id}`);
+        clientData = cliRes.data;
+      } catch (e) {
+        const found = (clientes || []).find(c => c.id === orc.cliente_id);
+        clientData = found || null;
+      }
+
+      setContratoCliente({
+        id: orc.cliente_id,
+        nome: clientData?.nome || orc.cliente_nome || '',
+        documento: clientData?.documento || orc.cliente_documento || '',
+        telefone: clientData?.telefone || orc.cliente_telefone || '',
+        email: clientData?.email || orc.cliente_email || '',
+        rg: clientData?.rg || orc.cliente_rg || '',
+        endereco: clientData?.endereco || orc.cliente_endereco || '',
+        numero: clientData?.numero || orc.cliente_numero || '',
+        complemento: clientData?.complemento || orc.cliente_complemento || '',
+        bairro: clientData?.bairro || orc.cliente_bairro || '',
+        cidade: clientData?.cidade || orc.cliente_cidade || 'Belém',
+        uf: clientData?.uf || orc.cliente_uf || 'PA',
+        cep: clientData?.cep || orc.cliente_cep || '',
+        entrega_endereco: clientData?.entrega_endereco || orc.cliente_entrega_endereco || '',
+        entrega_numero: clientData?.entrega_numero || orc.cliente_entrega_numero || '',
+        entrega_complemento: clientData?.entrega_complemento || orc.cliente_entrega_complemento || '',
+        entrega_bairro: clientData?.entrega_bairro || orc.cliente_entrega_bairro || '',
+        entrega_cidade: clientData?.entrega_cidade || orc.cliente_entrega_cidade || '',
+        entrega_uf: clientData?.entrega_uf || orc.cliente_entrega_uf || '',
+        entrega_cep: clientData?.entrega_cep || orc.cliente_entrega_cep || ''
+      });
+
+      let projs = [];
+      try {
+        const projRes = await api.get(`/projetos?orcamento_numero=${orc.numero}`);
+        projs = projRes.data || [];
+      } catch (e) {
+        projs = [];
+      }
+      setContratoProjetos(projs);
+
+      setShowClienteContratoModal(true);
+    } catch (err) {
+      console.error('Erro ao carregar dados para o contrato:', err);
+      alert('Erro ao carregar dados do cliente e projetos para o contrato.');
+    }
+  };
+
+  const handleDesfazerAprovacao = async (numero) => {
+    if (window.confirm(`Deseja realmente desfazer a aprovação do Orçamento #${numero} e retorná-lo para a situação 'Em Aberto'?`)) {
+      try {
+        await api.put(`/orcamentos/${numero}`, { status: 'Em Aberto' });
+        await fetchFin();
+      } catch (err) {
+        console.error('Erro ao desfazer aprovação:', err);
+        alert(err.response?.data?.error || 'Erro ao desfazer aprovação do orçamento.');
+      }
+    }
+  };
+
+  // Filtragem dos orçamentos aprovados
+  const orcamentosAprovados = orcamentos.filter(isAprovadoStatus);
+
+  const orcamentosFiltrados = orcamentosAprovados.filter(o => {
+    // Filtro por Cliente ou Número
+    if (buscaCliente && buscaCliente.trim() !== '') {
+      const termo = buscaCliente.toLowerCase().trim();
+      const nomeMatch = (o.cliente_nome || '').toLowerCase().includes(termo);
+      const numMatch = String(o.numero || '').includes(termo);
+      if (!nomeMatch && !numMatch) return false;
+    }
+
+    // Filtro por Período da Data de Aprovação
+    const dtReferencia = o.data_aprovacao ? String(o.data_aprovacao).split('T')[0].split(' ')[0] : (o.data_criacao ? String(o.data_criacao).split('T')[0].split(' ')[0] : '');
+    if (dataInicio && dtReferencia && dtReferencia < dataInicio) return false;
+    if (dataFim && dtReferencia && dtReferencia > dataFim) return false;
+
+    return true;
+  });
+
+  const totalValorAprovado = orcamentosFiltrados.reduce((sum, o) => sum + (parseFloat(o.total_venda || o.valor_total) || 0), 0);
+  const totalGeralAprovados = orcamentosAprovados.reduce((sum, o) => sum + (parseFloat(o.total_venda || o.valor_total) || 0), 0);
+  const ticketMedio = orcamentosAprovados.length > 0 ? (totalGeralAprovados / orcamentosAprovados.length) : 0;
+
   return (
     <div>
       <div className="content-header">
         <div>
           <h1 className="page-title">Módulo Financeiro</h1>
-          <div style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>Visão geral de faturamento, orçamentos e fluxo de recebíveis</div>
+          <div style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>
+            Gestão de orçamentos aprovados, conferência do fluxo financeiro, geração de contratos e controle de aprovações.
+          </div>
+        </div>
+        <div className="flex-gap-2">
+          <button onClick={fetchFin} className="btn btn-secondary" title="Atualizar dados">
+            <RotateCcw size={16} /> Atualizar
+          </button>
+          <Link to="/orcamentos" className="btn btn-primary">
+            Ir para Orçamentos
+          </Link>
         </div>
       </div>
 
+      {/* KPI Stats Grid */}
       <div className="stats-grid">
         <div className="stat-card">
           <div className="stat-icon" style={{ color: 'var(--color-success)', border: '1.5px solid rgba(16, 185, 129, 0.4)' }}>
             <DollarSign size={24} />
           </div>
           <div className="stat-info">
-            <div className="stat-label">Faturamento Aprovado</div>
-            <div className="stat-value" style={{ color: 'var(--color-success)', fontSize: '1.5rem' }}>{formatCurrency(totalAprovados)}</div>
+            <div className="stat-label">Faturamento Aprovado (Total)</div>
+            <div className="stat-value" style={{ color: 'var(--color-success)', fontSize: '1.5rem' }}>{formatCurrency(totalGeralAprovados)}</div>
+          </div>
+        </div>
+
+        <div className="stat-card">
+          <div className="stat-icon" style={{ color: 'var(--accent-cyan)', border: '1.5px solid rgba(6, 182, 212, 0.4)' }}>
+            <CheckCircle2 size={24} />
+          </div>
+          <div className="stat-info">
+            <div className="stat-label">Orçamentos Aprovados</div>
+            <div className="stat-value" style={{ color: 'var(--accent-cyan)', fontSize: '1.5rem' }}>{orcamentosAprovados.length}</div>
           </div>
         </div>
 
@@ -21814,77 +23298,262 @@ function Financeiro() {
             <TrendingUp size={24} />
           </div>
           <div className="stat-info">
-            <div className="stat-label">Em Negociação</div>
-            <div className="stat-value" style={{ color: 'var(--color-warning)', fontSize: '1.5rem' }}>{formatCurrency(totalEmNegociacao)}</div>
-          </div>
-        </div>
-
-        <div className="stat-card">
-          <div className="stat-icon" style={{ color: 'var(--accent-cyan)' }}>
-            <Calculator size={24} />
-          </div>
-          <div className="stat-info">
-            <div className="stat-label">Volume Total</div>
-            <div className="stat-value" style={{ fontSize: '1.5rem' }}>{formatCurrency(totalGeral)}</div>
+            <div className="stat-label">Ticket Médio Aprovado</div>
+            <div className="stat-value" style={{ color: 'var(--color-warning)', fontSize: '1.5rem' }}>{formatCurrency(ticketMedio)}</div>
           </div>
         </div>
 
         <div className="stat-card">
           <div className="stat-icon" style={{ color: 'var(--accent-indigo)' }}>
-            <FileText size={24} />
+            <Calculator size={24} />
           </div>
           <div className="stat-info">
-            <div className="stat-label">Orçamentos Totais</div>
-            <div className="stat-value">{totalQtd}</div>
+            <div className="stat-label">Aprovados no Filtro Atual</div>
+            <div className="stat-value" style={{ fontSize: '1.5rem' }}>{formatCurrency(totalValorAprovado)}</div>
           </div>
         </div>
       </div>
 
+      {/* Tabela de Orçamentos Aprovados */}
       <div className="glass-card">
-        <div className="flex-between" style={{ marginBottom: '20px' }}>
-          <h3 style={{ fontWeight: 700 }}>Posição Financeira por Orçamento</h3>
-          <Link to="/orcamentos" className="btn btn-primary" style={{ padding: '8px 16px', fontSize: '0.85rem' }}>
-            Ir para Orçamentos
-          </Link>
+        <div className="flex-between" style={{ marginBottom: '16px', flexWrap: 'wrap', gap: '12px' }}>
+          <div>
+            <h3 style={{ fontWeight: 700, margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <CheckCircle2 size={20} color="var(--color-success)" />
+              Orçamentos Aprovados
+              <span className="badge badge-success" style={{ marginLeft: '8px' }}>
+                {orcamentosFiltrados.length} {orcamentosFiltrados.length === 1 ? 'orçamento' : 'orçamentos'}
+              </span>
+            </h3>
+            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '4px' }}>
+              Orçamentos que receberam aprovação comercial e aguardam validação de fluxo ou geração de contrato pelo gestor financeiro.
+            </div>
+          </div>
+
+          {/* Filtros rápidos */}
+          <div className="flex-gap-2" style={{ flexWrap: 'wrap', alignItems: 'center' }}>
+            <div style={{ position: 'relative', width: '220px' }}>
+              <Search size={14} style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} />
+              <input
+                type="text"
+                placeholder="Buscar cliente ou nº..."
+                value={buscaCliente}
+                onChange={(e) => setBuscaCliente(e.target.value)}
+                className="form-control"
+                style={{ paddingLeft: '30px', fontSize: '0.85rem' }}
+              />
+            </div>
+
+            <div className="flex-gap-1" style={{ alignItems: 'center' }}>
+              <input
+                type="date"
+                value={dataInicio}
+                onChange={(e) => setDataInicio(e.target.value)}
+                className="form-control"
+                style={{ fontSize: '0.82rem', width: '130px' }}
+                title="Data inicial de aprovação"
+              />
+              <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>até</span>
+              <input
+                type="date"
+                value={dataFim}
+                onChange={(e) => setDataFim(e.target.value)}
+                className="form-control"
+                style={{ fontSize: '0.82rem', width: '130px' }}
+                title="Data final de aprovação"
+              />
+            </div>
+
+            {(buscaCliente || dataInicio || dataFim) && (
+              <button 
+                onClick={() => { setBuscaCliente(''); setDataInicio(''); setDataFim(''); }} 
+                className="btn btn-secondary"
+                style={{ padding: '6px 10px', fontSize: '0.8rem' }}
+                title="Limpar filtros"
+              >
+                Limpar
+              </button>
+            )}
+          </div>
         </div>
 
         {loading ? (
-          <div style={{ textAlign: 'center', padding: '30px', color: 'var(--text-muted)' }}>Carregando dados financeiros...</div>
-        ) : orcamentos.length === 0 ? (
-          <div style={{ textAlign: 'center', padding: '30px', color: 'var(--text-muted)' }}>Nenhum orçamento registrado no sistema.</div>
+          <div style={{ textAlign: 'center', padding: '36px', color: 'var(--text-muted)' }}>
+            Carregando orçamentos aprovados...
+          </div>
+        ) : orcamentosFiltrados.length === 0 ? (
+          <div style={{ textAlign: 'center', padding: '36px', color: 'var(--text-muted)' }}>
+            {orcamentosAprovados.length === 0 
+              ? 'Nenhum orçamento na situação "Aprovado" no momento.' 
+              : 'Nenhum orçamento aprovado encontrado para os filtros selecionados.'}
+          </div>
         ) : (
-          <div className="table-container">
+          <div className="table-container" style={{ margin: 0 }}>
             <table className="data-table">
               <thead>
                 <tr>
-                  <th style={{ width: '100px' }}>Nº Orç.</th>
+                  <th style={{ width: '90px' }}>Nº Orç.</th>
                   <th>Cliente</th>
-                  <th>Descrição</th>
-                  <th style={{ width: '130px', textAlign: 'center' }}>Status</th>
-                  <th style={{ width: '160px', textAlign: 'right' }}>Valor Total</th>
+                  <th style={{ width: '130px', textAlign: 'center' }}>Data Aprovação</th>
+                  <th style={{ width: '160px' }}>Forma de Pagamento</th>
+                  <th style={{ width: '150px', textAlign: 'right' }}>Valor Aprovado</th>
+                  <th style={{ width: '150px', textAlign: 'center' }}>Ações Financeiras</th>
                 </tr>
               </thead>
               <tbody>
-                {orcamentos.map(orc => (
-                  <tr key={orc.id || orc.numero}>
-                    <td style={{ fontWeight: 700, color: 'var(--accent-cyan)' }}>#{orc.numero}</td>
-                    <td style={{ fontWeight: 600 }}>{orc.cliente_nome || '-'}</td>
-                    <td style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>{orc.descricao || '-'}</td>
-                    <td style={{ textAlign: 'center' }}>
-                      <span className={`badge ${orc.status === 'Aprovado' || orc.status === 'Concluído' ? 'badge-success' : orc.status === 'Cancelado' ? 'badge-danger' : 'badge-warning'}`}>
-                        {orc.status || 'Pendente'}
-                      </span>
-                    </td>
-                    <td style={{ textAlign: 'right', fontWeight: 700, color: 'var(--text-main)' }}>
-                      {formatCurrency(orc.valor_total)}
-                    </td>
-                  </tr>
-                ))}
+                {orcamentosFiltrados.map(orc => {
+                  const valorVenda = parseFloat(orc.total_venda || orc.valor_total) || 0;
+                  return (
+                    <tr key={orc.numero || orc.id}>
+                      <td style={{ fontWeight: 800, color: 'var(--accent-cyan)' }}>
+                        #{orc.numero}
+                      </td>
+                      <td style={{ fontWeight: 600 }}>
+                        {orc.cliente_nome || '-'}
+                        {orc.descricao && (
+                          <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 400 }}>
+                            {orc.descricao}
+                          </div>
+                        )}
+                      </td>
+                      <td style={{ textAlign: 'center', fontSize: '0.9rem', color: 'var(--text-muted)' }}>
+                        {formatarDataBr(orc.data_aprovacao || orc.data_criacao)}
+                      </td>
+                      <td style={{ fontSize: '0.85rem' }}>
+                        <span style={{ 
+                          background: 'rgba(255, 255, 255, 0.05)', 
+                          padding: '3px 8px', 
+                          borderRadius: '4px',
+                          border: '1px solid var(--glass-border)',
+                          fontWeight: 500
+                        }}>
+                          {orc.forma_pagamento_selecionada || 'À Vista'}
+                        </span>
+                      </td>
+                      <td style={{ textAlign: 'right', fontWeight: 800, color: 'var(--color-success)', fontSize: '1rem' }}>
+                        {formatCurrency(valorVenda)}
+                      </td>
+                      <td style={{ textAlign: 'center' }}>
+                        <div className="flex-gap-2" style={{ justifyContent: 'center' }}>
+                          {/* Ver Fluxo Financeiro */}
+                          <button
+                            onClick={() => handleAbrirFluxoFinanceiro(orc)}
+                            className="btn btn-secondary"
+                            style={{ 
+                              padding: '6px 10px', 
+                              color: '#10B981', 
+                              borderColor: 'rgba(16, 185, 129, 0.4)',
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '4px',
+                              fontSize: '0.8rem'
+                            }}
+                            title="Visualizar Fluxo Financeiro (Parcelas / Efetivação)"
+                          >
+                            <DollarSign size={15} />
+                            Fluxo
+                          </button>
+
+                          {/* Gerar Minuta do Contrato */}
+                          <button
+                            onClick={() => handleAbrirContrato(orc)}
+                            className="btn btn-primary"
+                            style={{ 
+                              padding: '6px 10px', 
+                              background: 'linear-gradient(135deg, #3B82F6, #1D4ED8)', 
+                              borderColor: '#3B82F6',
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '4px',
+                              fontSize: '0.8rem'
+                            }}
+                            title="Gerar e Imprimir Minuta do Contrato"
+                          >
+                            <FileSignature size={15} />
+                            Contrato
+                          </button>
+
+                          {/* Desfazer Aprovação */}
+                          <button
+                            onClick={() => handleDesfazerAprovacao(orc.numero)}
+                            className="btn btn-danger"
+                            style={{ 
+                              padding: '6px 8px',
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '4px',
+                              fontSize: '0.8rem'
+                            }}
+                            title="Desfazer Aprovação (Retornar para Em Aberto)"
+                          >
+                            <RotateCcw size={14} />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
+              <tfoot>
+                <tr style={{ background: 'rgba(255, 255, 255, 0.05)', fontWeight: 800, borderTop: '2px solid var(--glass-border)' }}>
+                  <td colSpan="4" style={{ textAlign: 'right', padding: '12px 16px', color: 'var(--text-main)' }}>
+                    Total ({orcamentosFiltrados.length} {orcamentosFiltrados.length === 1 ? 'orçamento' : 'orçamentos'}):
+                  </td>
+                  <td style={{ textAlign: 'right', padding: '12px 16px', color: 'var(--color-success)', fontSize: '1.05rem' }}>
+                    {formatCurrency(totalValorAprovado)}
+                  </td>
+                  <td></td>
+                </tr>
+              </tfoot>
             </table>
           </div>
         )}
       </div>
+
+      {/* Modal de Cadastro / Dados Complementares do Cliente para Contrato */}
+      {showClienteContratoModal && contratoCliente && contratoOrcamento && (
+        <ModalCadastroClienteContrato
+          isOpen={showClienteContratoModal}
+          onClose={() => setShowClienteContratoModal(false)}
+          cliente={contratoCliente}
+          orcamento={contratoOrcamento}
+          onSalvarEAvancar={(updatedCliente) => {
+            setContratoCliente(updatedCliente);
+            setShowClienteContratoModal(false);
+            setShowMinutaContratoModal(true);
+            fetchFin();
+          }}
+        />
+      )}
+
+      {/* Modal de Apresentação e Impressão da Minuta do Contrato */}
+      {showMinutaContratoModal && contratoOrcamento && contratoCliente && (
+        <ModalMinutaContrato
+          isOpen={showMinutaContratoModal}
+          onClose={() => setShowMinutaContratoModal(false)}
+          orcamento={contratoOrcamento}
+          cliente={contratoCliente}
+          projetos={contratoProjetos}
+          onEditarCliente={() => {
+            setShowMinutaContratoModal(false);
+            setShowClienteContratoModal(true);
+          }}
+        />
+      )}
+
+      {/* Modal de Visualização do Fluxo Financeiro */}
+      {showFluxoModal && fluxoOrcamento && (
+        <ModalVisualizarFluxoFinanceiro
+          isOpen={showFluxoModal}
+          onClose={() => setShowFluxoModal(false)}
+          orcamento={fluxoOrcamento}
+          projetos={fluxoProjetos}
+          onEfetivado={async () => {
+            await fetchFin();
+            setShowFluxoModal(false);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -23776,6 +25445,637 @@ function ModalCompartilharProposta({ orcamento, onClose }) {
   );
 }
 
+// Modal de Histórico e Gestão de Versões da Proposta Comercial
+function ModalHistoricoPropostas({ orcamento, onClose, onOpenShare, onOpenVirtual }) {
+  const [loading, setLoading] = useState(false);
+  const [gerando, setGerando] = useState(false);
+  const [propostas, setPropostas] = useState([]);
+  const [error, setError] = useState('');
+  const [selectedSnapshotProp, setSelectedSnapshotProp] = useState(null);
+  const [snapshotLoading, setSnapshotLoading] = useState(false);
+  const [sucessoMsg, setSucessoMsg] = useState('');
+
+  const numOrcamento = orcamento?.numero;
+
+  const formatCurrency = (val) => {
+    const num = parseFloat(val || 0);
+    return num.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+  };
+
+  const formatDataHora = (dtStr) => {
+    if (!dtStr) return '-';
+    const d = new Date(dtStr);
+    return isNaN(d.getTime()) ? '-' : d.toLocaleString('pt-BR');
+  };
+
+  const carregarPropostas = async () => {
+    if (!numOrcamento) return;
+    setLoading(true);
+    setError('');
+    try {
+      const res = await api.get(`/orcamentos/${numOrcamento}/propostas`);
+      const list = Array.isArray(res.data) ? res.data : [];
+      setPropostas(list);
+    } catch (err) {
+      console.error('Erro ao carregar propostas:', err);
+      setError('Erro ao carregar histórico de propostas.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    carregarPropostas();
+  }, [numOrcamento]);
+
+  const nextVersao = propostas.length > 0 
+    ? Math.max(...propostas.map(p => parseInt(p.versao, 10) || 1)) + 1 
+    : 1;
+
+  const handleGerarNovaProposta = async () => {
+    if (!numOrcamento) return;
+    setGerando(true);
+    setError('');
+    setSucessoMsg('');
+    try {
+      const res = await api.post(`/orcamentos/${numOrcamento}/propostas`, {
+        titulo: `Proposta Comercial #${numOrcamento} (v${nextVersao})`
+      });
+      const novaLista = Array.isArray(res.data?.propostas) 
+        ? res.data.propostas 
+        : [res.data, ...propostas];
+      setPropostas(novaLista);
+      setSucessoMsg(`Nova Proposta (Versão ${nextVersao}) gerada com sucesso!`);
+      setTimeout(() => setSucessoMsg(''), 4000);
+    } catch (err) {
+      console.error('Erro ao gerar nova proposta:', err);
+      setError(err.response?.data?.error || 'Erro ao gerar nova versão da proposta.');
+    } finally {
+      setGerando(false);
+    }
+  };
+
+  const handleVisualizarImprimir = async (prop) => {
+    try {
+      let versaoInfo = {
+        versao: prop.versao,
+        codigo: prop.codigo,
+        id: prop.id,
+        snapshot: null
+      };
+
+      try {
+        const resDetail = await api.get(`/propostas/${prop.id}`);
+        if (resDetail.data?.snapshot) {
+          versaoInfo.snapshot = resDetail.data.snapshot;
+        }
+      } catch (e) {
+        console.warn('Não foi possível buscar snapshot completo, usando dados em tempo real:', e);
+      }
+
+      await handleGerarOrcamentoImpresso(orcamento, null, versaoInfo);
+    } catch (err) {
+      console.error('Erro ao imprimir proposta:', err);
+      alert('Erro ao gerar documento para impressão: ' + err.message);
+    }
+  };
+
+  const handleVerSnapshot = async (prop) => {
+    setSnapshotLoading(true);
+    try {
+      const res = await api.get(`/propostas/${prop.id}`);
+      setSelectedSnapshotProp(res.data);
+    } catch (err) {
+      console.error('Erro ao buscar detalhes da versão:', err);
+      alert('Erro ao carregar dados gravados da proposta.');
+    } finally {
+      setSnapshotLoading(false);
+    }
+  };
+
+  const handleExcluirProposta = async (prop) => {
+    if (window.confirm(`Tem certeza que deseja excluir a Versão ${prop.versao} (${prop.codigo || `#${prop.id}`}) desta proposta?`)) {
+      try {
+        await api.delete(`/propostas/${prop.id}`);
+        setPropostas(prev => prev.filter(p => p.id !== prop.id));
+        setSucessoMsg(`Versão ${prop.versao} excluída com sucesso.`);
+        setTimeout(() => setSucessoMsg(''), 3000);
+      } catch (err) {
+        console.error('Erro ao excluir proposta:', err);
+        alert('Erro ao excluir proposta: ' + (err.response?.data?.error || err.message));
+      }
+    }
+  };
+
+  const handleAlterarStatus = async (prop, novoStatus) => {
+    try {
+      await api.put(`/propostas/${prop.id}`, { status: novoStatus });
+      setPropostas(prev => prev.map(p => p.id === prop.id ? { ...p, status: novoStatus } : p));
+    } catch (err) {
+      console.error('Erro ao alterar status da proposta:', err);
+      alert('Erro ao atualizar status da proposta.');
+    }
+  };
+
+  const getStatusBadgeStyle = (status) => {
+    switch (status) {
+      case 'Aprovada':
+        return { bg: 'rgba(16, 185, 129, 0.15)', color: 'var(--color-success)', border: '1px solid rgba(16, 185, 129, 0.3)' };
+      case 'Enviada':
+        return { bg: 'rgba(245, 158, 11, 0.15)', color: 'var(--color-warning)', border: '1px solid rgba(245, 158, 11, 0.3)' };
+      case 'Recusada':
+      case 'Cancelada':
+        return { bg: 'rgba(239, 68, 68, 0.15)', color: 'var(--color-danger)', border: '1px solid rgba(239, 68, 68, 0.3)' };
+      case 'Gerada':
+      default:
+        return { bg: 'rgba(6, 182, 212, 0.15)', color: 'var(--accent-cyan)', border: '1px solid rgba(6, 182, 212, 0.3)' };
+    }
+  };
+
+  return (
+    <div className="modal-overlay" style={{ zIndex: 1100 }}>
+      <div className="modal-content" style={{ maxWidth: '960px', width: '94%', maxHeight: '90vh', display: 'flex', flexDirection: 'column' }}>
+        {/* Header */}
+        <div className="modal-header" style={{ borderBottom: '1px solid var(--glass-border)', padding: '18px 24px' }}>
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <div style={{
+                background: 'linear-gradient(135deg, rgba(6, 182, 212, 0.2) 0%, rgba(99, 102, 241, 0.2) 100%)',
+                border: '1px solid rgba(6, 182, 212, 0.4)',
+                borderRadius: '8px',
+                padding: '6px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center'
+              }}>
+                <FileText size={20} color="var(--accent-cyan)" />
+              </div>
+              <h2 className="modal-title" style={{ margin: 0, fontSize: '1.25rem' }}>
+                Propostas do Orçamento #{orcamento?.numero}
+              </h2>
+            </div>
+            <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginTop: '4px', display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+              <span><strong>Cliente:</strong> {orcamento?.cliente_nome || '-'}</span>
+              <span>&bull;</span>
+              <span><strong>Total Atual:</strong> {formatCurrency(orcamento?.total_venda)}</span>
+              <span>&bull;</span>
+              <span><strong>Status:</strong> {orcamento?.status || 'Em Aberto'}</span>
+            </div>
+          </div>
+          
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <button
+              onClick={handleGerarNovaProposta}
+              disabled={gerando}
+              className="btn btn-primary"
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '8px',
+                padding: '9px 18px',
+                fontWeight: 700,
+                fontSize: '0.9rem',
+                background: 'linear-gradient(135deg, #06b6d4 0%, #3b82f6 100%)',
+                border: 'none',
+                boxShadow: '0 4px 14px rgba(6, 182, 212, 0.35)',
+                whiteSpace: 'nowrap'
+              }}
+              title="Gerar uma nova versão da proposta para este orçamento"
+            >
+              {gerando ? (
+                <>
+                  <RefreshCw size={16} className="animate-spin" />
+                  <span>Gerando Versão {nextVersao}...</span>
+                </>
+              ) : (
+                <>
+                  <PlusCircle size={17} />
+                  <span>Gerar Nova Proposta (v{nextVersao})</span>
+                </>
+              )}
+            </button>
+            <button onClick={onClose} className="btn-close" style={{ marginLeft: '4px' }}>&times;</button>
+          </div>
+        </div>
+
+        {/* Body */}
+        <div className="modal-body" style={{ padding: '20px 24px', overflowY: 'auto', flex: 1, display: 'flex', flexDirection: 'column', gap: '16px' }}>
+          {error && (
+            <div style={{ padding: '12px 16px', background: 'rgba(239, 68, 68, 0.12)', border: '1px solid rgba(239, 68, 68, 0.35)', borderRadius: '8px', color: '#f87171', fontSize: '0.9rem', display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <AlertCircle size={18} />
+              <span>{error}</span>
+            </div>
+          )}
+
+          {sucessoMsg && (
+            <div style={{ padding: '12px 16px', background: 'rgba(16, 185, 129, 0.12)', border: '1px solid rgba(16, 185, 129, 0.35)', borderRadius: '8px', color: 'var(--color-success)', fontSize: '0.9rem', display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <CheckCircle2 size={18} />
+              <span>{sucessoMsg}</span>
+            </div>
+          )}
+
+          {/* Cards de Resumo */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '12px' }}>
+            <div style={{ background: 'var(--glass-bg)', border: '1px solid var(--glass-border)', borderRadius: '10px', padding: '12px 16px' }}>
+              <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 600, letterSpacing: '0.5px' }}>
+                Versões Geradas
+              </div>
+              <div style={{ fontSize: '1.4rem', fontWeight: 800, color: 'var(--accent-cyan)', marginTop: '2px' }}>
+                {propostas.length} {propostas.length === 1 ? 'versão' : 'versões'}
+              </div>
+            </div>
+
+            <div style={{ background: 'var(--glass-bg)', border: '1px solid var(--glass-border)', borderRadius: '10px', padding: '12px 16px' }}>
+              <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 600, letterSpacing: '0.5px' }}>
+                Versão Mais Recente
+              </div>
+              <div style={{ fontSize: '1.4rem', fontWeight: 800, color: 'var(--text-main)', marginTop: '2px' }}>
+                {propostas.length > 0 ? `v${propostas[0].versao}` : '-'}
+              </div>
+            </div>
+
+            <div style={{ background: 'var(--glass-bg)', border: '1px solid var(--glass-border)', borderRadius: '10px', padding: '12px 16px' }}>
+              <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 600, letterSpacing: '0.5px' }}>
+                Valor da Proposta Recente
+              </div>
+              <div style={{ fontSize: '1.4rem', fontWeight: 800, color: 'var(--color-success)', marginTop: '2px' }}>
+                {propostas.length > 0 ? formatCurrency(propostas[0].valor_final || propostas[0].valor_total) : '-'}
+              </div>
+            </div>
+          </div>
+
+          {/* Tabela de Versões de Propostas */}
+          <div style={{ background: 'var(--glass-bg)', border: '1px solid var(--glass-border)', borderRadius: '10px', overflow: 'hidden' }}>
+            <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--glass-border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ fontWeight: 700, fontSize: '0.95rem', color: 'var(--text-main)', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <History size={16} color="var(--accent-cyan)" />
+                Histórico de Versões Salvas
+              </div>
+              <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                Clique em Imprimir ou Virtual para visualizar cada versão
+              </div>
+            </div>
+
+            <div className="table-responsive">
+              <table className="table" style={{ margin: 0 }}>
+                <thead>
+                  <tr>
+                    <th style={{ width: '90px' }}>Versão</th>
+                    <th>Código / Título</th>
+                    <th>Data / Hora</th>
+                    <th>Criado Por</th>
+                    <th style={{ textAlign: 'right' }}>Valor Total</th>
+                    <th style={{ textAlign: 'center', width: '130px' }}>Status</th>
+                    <th style={{ textAlign: 'right', width: '220px' }}>Ações</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {loading && propostas.length === 0 ? (
+                    <tr>
+                      <td colSpan="7" style={{ textAlign: 'center', padding: '24px', color: 'var(--text-muted)' }}>
+                        <RefreshCw size={20} className="animate-spin" style={{ margin: '0 auto 8px auto' }} />
+                        <div>Carregando propostas...</div>
+                      </td>
+                    </tr>
+                  ) : propostas.length === 0 ? (
+                    <tr>
+                      <td colSpan="7" style={{ textAlign: 'center', padding: '32px 16px', color: 'var(--text-muted)' }}>
+                        <div style={{ marginBottom: '8px', fontSize: '1.1rem', fontWeight: 600, color: 'var(--text-main)' }}>
+                          Nenhuma proposta salva para este orçamento.
+                        </div>
+                        <div style={{ fontSize: '0.85rem', marginBottom: '16px' }}>
+                          Clique no botão acima para gerar a primeira versão da proposta comercial.
+                        </div>
+                        <button
+                          onClick={handleGerarNovaProposta}
+                          disabled={gerando}
+                          className="btn btn-primary"
+                          style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+                        >
+                          <PlusCircle size={16} />
+                          <span>Gerar Proposta Inicial (v1)</span>
+                        </button>
+                      </td>
+                    </tr>
+                  ) : (
+                    propostas.map((prop, index) => {
+                      const isLatest = index === 0;
+                      const badgeStyle = getStatusBadgeStyle(prop.status);
+
+                      return (
+                        <tr 
+                          key={prop.id}
+                          style={{
+                            background: isLatest ? 'rgba(6, 182, 212, 0.04)' : undefined,
+                            borderBottom: '1px solid var(--glass-border-subtle)'
+                          }}
+                        >
+                          <td>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                              <span style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                padding: '3px 8px',
+                                borderRadius: '6px',
+                                fontSize: '0.8rem',
+                                fontWeight: 800,
+                                background: isLatest 
+                                  ? 'linear-gradient(135deg, #06b6d4 0%, #3b82f6 100%)' 
+                                  : 'rgba(255, 255, 255, 0.08)',
+                                color: '#ffffff',
+                                border: isLatest ? 'none' : '1px solid var(--glass-border)'
+                              }}>
+                                v{prop.versao}
+                              </span>
+                              {isLatest && (
+                                <span style={{
+                                  fontSize: '0.68rem',
+                                  fontWeight: 700,
+                                  color: 'var(--accent-cyan)',
+                                  background: 'rgba(6, 182, 212, 0.12)',
+                                  padding: '1px 5px',
+                                  borderRadius: '4px',
+                                  border: '1px solid rgba(6, 182, 212, 0.3)'
+                                }}>
+                                  Atual
+                                </span>
+                              )}
+                            </div>
+                          </td>
+
+                          <td>
+                            <div style={{ fontWeight: 700, color: 'var(--text-main)', fontSize: '0.88rem' }}>
+                              {prop.codigo || `PROP-${numOrcamento}-v${prop.versao}`}
+                            </div>
+                            <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '2px' }}>
+                              {prop.titulo || `Proposta #${numOrcamento}`}
+                            </div>
+                          </td>
+
+                          <td style={{ fontSize: '0.82rem', color: 'var(--text-secondary)' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                              <Clock size={13} color="var(--text-muted)" />
+                              <span>{formatDataHora(prop.criado_em)}</span>
+                            </div>
+                          </td>
+
+                          <td style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                              <User size={13} />
+                              <span>{prop.criado_por_nome || 'Usuário'}</span>
+                            </div>
+                          </td>
+
+                          <td style={{ textAlign: 'right' }}>
+                            <div style={{ fontWeight: 800, color: 'var(--color-success)', fontSize: '0.92rem' }}>
+                              {formatCurrency(prop.valor_final || prop.valor_total)}
+                            </div>
+                            {parseFloat(prop.desconto_valor || 0) > 0 && (
+                              <div style={{ fontSize: '0.72rem', color: '#f87171' }}>
+                                Desc: {formatCurrency(prop.desconto_valor)} ({prop.desconto_percentual || 0}%)
+                              </div>
+                            )}
+                          </td>
+
+                          <td style={{ textAlign: 'center' }}>
+                            <select
+                              value={prop.status || 'Gerada'}
+                              onChange={(e) => handleAlterarStatus(prop, e.target.value)}
+                              style={{
+                                padding: '3px 8px',
+                                borderRadius: '6px',
+                                fontSize: '0.75rem',
+                                fontWeight: 700,
+                                background: badgeStyle.bg,
+                                color: badgeStyle.color,
+                                border: badgeStyle.border,
+                                cursor: 'pointer',
+                                outline: 'none'
+                              }}
+                            >
+                              <option value="Gerada" style={{ background: '#1e293b', color: '#fff' }}>Gerada</option>
+                              <option value="Enviada" style={{ background: '#1e293b', color: '#fff' }}>Enviada</option>
+                              <option value="Aprovada" style={{ background: '#1e293b', color: '#fff' }}>Aprovada</option>
+                              <option value="Recusada" style={{ background: '#1e293b', color: '#fff' }}>Recusada</option>
+                              <option value="Cancelada" style={{ background: '#1e293b', color: '#fff' }}>Cancelada</option>
+                            </select>
+                          </td>
+
+                          <td style={{ textAlign: 'right' }}>
+                            <div style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                              {/* Imprimir Proposta Comercial */}
+                              <button
+                                type="button"
+                                onClick={() => handleVisualizarImprimir(prop)}
+                                className="btn btn-secondary"
+                                style={{
+                                  padding: '5px 10px',
+                                  fontSize: '0.78rem',
+                                  fontWeight: 600,
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '4px',
+                                  background: 'linear-gradient(135deg, rgba(6, 182, 212, 0.15) 0%, rgba(59, 130, 246, 0.15) 100%)',
+                                  border: '1px solid rgba(6, 182, 212, 0.4)',
+                                  color: 'var(--accent-cyan)'
+                                }}
+                                title="Visualizar / Imprimir esta versão da Proposta Comercial"
+                              >
+                                <Printer size={14} />
+                                <span>Imprimir</span>
+                              </button>
+
+                              {/* Proposta Virtual Online Vinculada a esta Versão */}
+                              <button
+                                type="button"
+                                onClick={() => handleAbrirPropostaVirtual(orcamento, prop.id)}
+                                className="btn btn-secondary"
+                                style={{
+                                  padding: '5px 10px',
+                                  fontSize: '0.78rem',
+                                  fontWeight: 600,
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '4px',
+                                  background: 'linear-gradient(135deg, rgba(13, 148, 136, 0.15) 0%, rgba(6, 182, 212, 0.15) 100%)',
+                                  border: '1px solid rgba(13, 148, 136, 0.4)',
+                                  color: '#2DD4BF'
+                                }}
+                                title="Abrir Proposta Virtual Online desta versão gravada"
+                              >
+                                <ExternalLink size={14} />
+                                <span>Virtual</span>
+                              </button>
+
+                              {/* Ver Detalhes / Snapshot */}
+                              <button
+                                type="button"
+                                onClick={() => handleVerSnapshot(prop)}
+                                className="btn btn-secondary"
+                                style={{
+                                  padding: '5px 8px',
+                                  fontSize: '0.78rem',
+                                  display: 'inline-flex',
+                                  alignItems: 'center'
+                                }}
+                                title="Ver dados gravados (fotografia) desta versão"
+                              >
+                                <Eye size={14} />
+                              </button>
+
+                              {/* Excluir Versão */}
+                              <button
+                                type="button"
+                                onClick={() => handleExcluirProposta(prop)}
+                                className="btn btn-danger"
+                                style={{
+                                  padding: '5px 8px',
+                                  fontSize: '0.78rem',
+                                  display: 'inline-flex',
+                                  alignItems: 'center'
+                                }}
+                                title="Excluir esta versão de proposta"
+                              >
+                                <Trash2 size={14} />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Drawer / Submodal de Detalhes da Proposta Gravada */}
+          {selectedSnapshotProp && (
+            <div style={{
+              marginTop: '10px',
+              padding: '18px',
+              background: 'linear-gradient(135deg, rgba(15, 23, 42, 0.95) 0%, rgba(30, 41, 59, 0.95) 100%)',
+              border: '1px solid rgba(6, 182, 212, 0.4)',
+              borderRadius: '10px',
+              boxShadow: '0 8px 30px rgba(0,0,0,0.5)'
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px', borderBottom: '1px solid var(--glass-border)', paddingBottom: '10px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <Eye size={18} color="var(--accent-cyan)" />
+                  <div style={{ fontWeight: 800, fontSize: '1rem', color: 'var(--text-main)' }}>
+                    Fotografia Gravada da Proposta: {selectedSnapshotProp.codigo || `v${selectedSnapshotProp.versao}`}
+                  </div>
+                  <span style={{
+                    padding: '2px 8px',
+                    borderRadius: '4px',
+                    fontSize: '0.75rem',
+                    fontWeight: 700,
+                    background: 'rgba(6, 182, 212, 0.2)',
+                    color: 'var(--accent-cyan)'
+                  }}>
+                    Versão {selectedSnapshotProp.versao}
+                  </span>
+                </div>
+                <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                  <button
+                    type="button"
+                    onClick={() => handleVisualizarImprimir(selectedSnapshotProp)}
+                    className="btn btn-primary"
+                    style={{ padding: '5px 12px', fontSize: '0.78rem', display: 'inline-flex', alignItems: 'center', gap: '5px' }}
+                  >
+                    <Printer size={14} />
+                    <span>Imprimir Esta Fotografia</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedSnapshotProp(null)}
+                    className="btn btn-secondary"
+                    style={{ padding: '5px 10px', fontSize: '0.78rem' }}
+                  >
+                    Fechar Detalhes
+                  </button>
+                </div>
+              </div>
+
+              {snapshotLoading ? (
+                <div style={{ textAlign: 'center', padding: '20px', color: 'var(--text-muted)' }}>
+                  Carregando fotografia gravada...
+                </div>
+              ) : selectedSnapshotProp.snapshot ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                  {/* Metadados do Momento em que foi salva */}
+                  <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap', fontSize: '0.82rem', color: 'var(--text-muted)' }}>
+                    <span><strong>Data da Fotografia:</strong> {formatDataHora(selectedSnapshotProp.snapshot.geradoEm || selectedSnapshotProp.criado_em)}</span>
+                    <span>&bull;</span>
+                    <span><strong>Salvo por:</strong> {selectedSnapshotProp.snapshot.geradoPorNome || selectedSnapshotProp.criado_por_nome || 'Usuário'}</span>
+                    <span>&bull;</span>
+                    <span><strong>Cliente:</strong> {selectedSnapshotProp.snapshot.orcamento?.cliente_nome || '-'}</span>
+                  </div>
+
+                  {/* Resumo dos Projetos Gravados */}
+                  <div>
+                    <div style={{ fontSize: '0.82rem', fontWeight: 700, color: 'var(--text-muted)', marginBottom: '6px', textTransform: 'uppercase' }}>
+                      Projetos e Ambientes Gravados ({selectedSnapshotProp.snapshot.projetos?.length || 0})
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: '8px' }}>
+                      {(selectedSnapshotProp.snapshot.projetos || []).map(p => (
+                        <div key={p.id} style={{ background: 'rgba(255, 255, 255, 0.04)', border: '1px solid var(--glass-border-subtle)', borderRadius: '6px', padding: '8px 12px' }}>
+                          <div style={{ fontWeight: 700, fontSize: '0.85rem', color: 'var(--text-main)' }}>{p.nome || `Projeto #${p.id}`}</div>
+                          <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>{p.ambiente || 'Ambiente'}</div>
+                          <div style={{ fontWeight: 800, color: 'var(--color-success)', fontSize: '0.85rem', marginTop: '4px' }}>
+                            {formatCurrency(p.preco_venda_final || p.preco_venda_sugerido)}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Detalhes Financeiros */}
+                  <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap', background: 'rgba(0,0,0,0.2)', padding: '10px 14px', borderRadius: '6px' }}>
+                    <div>
+                      <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Valor Bruto: </span>
+                      <strong style={{ color: 'var(--text-main)' }}>{formatCurrency(selectedSnapshotProp.snapshot.valores?.valor_total)}</strong>
+                    </div>
+                    <div>
+                      <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Desconto: </span>
+                      <strong style={{ color: '#f87171' }}>{formatCurrency(selectedSnapshotProp.snapshot.valores?.desconto_valor)} ({selectedSnapshotProp.snapshot.valores?.desconto_percentual || 0}%)</strong>
+                    </div>
+                    <div>
+                      <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Valor Líquido: </span>
+                      <strong style={{ color: 'var(--color-success)' }}>{formatCurrency(selectedSnapshotProp.snapshot.valores?.valor_final)}</strong>
+                    </div>
+                    {selectedSnapshotProp.forma_pagamento_selecionada && (
+                      <div>
+                        <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Forma de Pagamento: </span>
+                        <strong style={{ color: 'var(--accent-cyan)' }}>{selectedSnapshotProp.forma_pagamento_selecionada}</strong>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+                  Valores gravados: Total {formatCurrency(selectedSnapshotProp.valor_total)} &bull; Final {formatCurrency(selectedSnapshotProp.valor_final)}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="modal-footer" style={{ borderTop: '1px solid var(--glass-border)', padding: '14px 24px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>
+            Total de {propostas.length} {propostas.length === 1 ? 'proposta gerada' : 'propostas geradas'} para este orçamento
+          </div>
+          <button onClick={onClose} className="btn btn-secondary" style={{ padding: '8px 20px', fontWeight: 600 }}>
+            Fechar
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ---------------- 18. Proposta Comercial Pública (Acesso via Token Válido por 3 Dias) ----------------
 function PropostaPublica() {
   const { token } = useParams();
@@ -24050,9 +26350,9 @@ function PropostaPublica() {
           </div>
           <div style={{ textAlign: 'right' }}>
             <div style={{ display: 'inline-block', background: isAprovado ? '#ecfdf5' : '#e0f2fe', color: isAprovado ? '#059669' : '#0369a1', fontWeight: 800, fontSize: '16px', padding: '4px 12px', borderRadius: '6px', marginBottom: '6px', border: isAprovado ? '1px solid #a7f3d0' : 'none' }}>
-              Orçamento nº #{orc.numero} {isAprovado && '✓ APROVADO'}
+              {data?.codigo ? data.codigo : `Orçamento nº #${orc.numero}`} {data?.versao && !data?.codigo ? `(v${data.versao})` : ''} {isAprovado && '✓ APROVADO'}
             </div>
-            <div style={{ fontSize: '12px', color: '#64748b' }}>Emissão: {new Date(orc.data_criacao || Date.now()).toLocaleDateString('pt-BR')}</div>
+            <div style={{ fontSize: '12px', color: '#64748b' }}>Emissão: {new Date(data?.geradoEm || orc.data_criacao || Date.now()).toLocaleDateString('pt-BR')}</div>
             <div style={{ fontSize: '12px', color: '#059669', fontWeight: 600 }}>Acesso liberado até: {formatDataHora(compartilhamento?.expira_em)}</div>
           </div>
         </div>
@@ -24504,6 +26804,992 @@ function PropostaPublica() {
         </div>
 
       </div>
+    </div>
+  );
+}
+
+// =============================================================
+// 4.11. TELA FLUXO DE RECEBIMENTO
+// =============================================================
+function FluxoRecebimento() {
+  const [lancamentos, setLancamentos] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [empresaParams, setEmpresaParams] = useState(null);
+
+  // Helper para obter primeiro e último dia do mês da data atual
+  const getDatasMesAtual = () => {
+    const agora = new Date();
+    const ano = agora.getFullYear();
+    const mes = String(agora.getMonth() + 1).padStart(2, '0');
+    const ultimoDia = new Date(ano, agora.getMonth() + 1, 0).getDate();
+    return {
+      inicio: `${ano}-${mes}-01`,
+      fim: `${ano}-${mes}-${String(ultimoDia).padStart(2, '0')}`
+    };
+  };
+
+  const datasPadraoMes = getDatasMesAtual();
+
+  // Filtros
+  const [busca, setBusca] = useState('');
+  const [filtroStatus, setFiltroStatus] = useState('TODOS');
+  const [dataInicio, setDataInicio] = useState(datasPadraoMes.inicio);
+  const [dataFim, setDataFim] = useState(datasPadraoMes.fim);
+
+  // Modais
+  const [modalBaixa, setModalBaixa] = useState({
+    isOpen: false,
+    item: null,
+    valor_recebido: '',
+    data_recebimento: '',
+    meio_pagamento: '',
+    observacoes: ''
+  });
+
+  const [modalEditar, setModalEditar] = useState({
+    isOpen: false,
+    item: null,
+    descricao: '',
+    valor: '',
+    data_vencimento: '',
+    meio_pagamento: '',
+    observacoes: ''
+  });
+
+  const [salvando, setSalvando] = useState(false);
+
+  useEffect(() => {
+    getEmpresaParametros().then(p => setEmpresaParams(p)).catch(() => {});
+    carregarLancamentos({ data_inicio: datasPadraoMes.inicio, data_fim: datasPadraoMes.fim });
+  }, []);
+
+  const carregarLancamentos = async (overrideParams = {}) => {
+    try {
+      setLoading(true);
+      setError('');
+      const params = {};
+      const statusFiltro = overrideParams.status !== undefined ? overrideParams.status : filtroStatus;
+      const buscaFiltro = overrideParams.busca !== undefined ? overrideParams.busca : busca;
+      const dInicio = overrideParams.data_inicio !== undefined ? overrideParams.data_inicio : dataInicio;
+      const dFim = overrideParams.data_fim !== undefined ? overrideParams.data_fim : dataFim;
+
+      if (statusFiltro && statusFiltro !== 'TODOS') params.status = statusFiltro;
+      if (buscaFiltro) params.busca = buscaFiltro;
+      if (dInicio) params.data_inicio = dInicio;
+      if (dFim) params.data_fim = dFim;
+
+      const res = await api.get('/fluxo-recebimento', { params });
+      setLancamentos(res.data || []);
+    } catch (err) {
+      console.error('Erro ao carregar fluxo de recebimento:', err);
+      setError('Erro ao carregar os lançamentos de recebimento.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleFiltrar = (e) => {
+    e.preventDefault();
+    carregarLancamentos();
+  };
+
+  const handleLimparFiltros = () => {
+    const datas = getDatasMesAtual();
+    setBusca('');
+    setFiltroStatus('TODOS');
+    setDataInicio(datas.inicio);
+    setDataFim(datas.fim);
+    carregarLancamentos({ busca: '', status: 'TODOS', data_inicio: datas.inicio, data_fim: datas.fim });
+  };
+
+  const formatarDataBr = (dt) => {
+    if (!dt) return '-';
+    const str = String(dt).split('T')[0].split(' ')[0].trim();
+    const p = str.split('-');
+    if (p.length === 3 && p[0].length === 4) return `${p[2].padStart(2, '0')}/${p[1].padStart(2, '0')}/${p[0]}`;
+    return str || dt;
+  };
+
+  const hojeIso = new Date().toISOString().split('T')[0];
+
+  // Cálculos de KPIs
+  const totalGeral = lancamentos.reduce((acc, l) => acc + (parseFloat(l.valor) || 0), 0);
+  const totalRecebido = lancamentos
+    .filter(l => (l.status || '').toUpperCase() === 'RECEBIDO')
+    .reduce((acc, l) => acc + (parseFloat(l.valor_recebido || l.valor) || 0), 0);
+  const totalPendente = lancamentos
+    .filter(l => (l.status || '').toUpperCase() === 'PENDENTE' && (!l.data_vencimento || l.data_vencimento >= hojeIso))
+    .reduce((acc, l) => acc + (parseFloat(l.valor) || 0), 0);
+  const totalAtrasado = lancamentos
+    .filter(l => (l.status || '').toUpperCase() === 'PENDENTE' && l.data_vencimento && l.data_vencimento < hojeIso)
+    .reduce((acc, l) => acc + (parseFloat(l.valor) || 0), 0);
+
+  // Emissão de Recibo Oficial
+  const handleEmitirRecibo = async (item) => {
+    try {
+      const printWindow = window.open('', '_blank', 'width=950,height=850');
+      if (!printWindow) {
+        alert('Permita popups no navegador para visualizar e imprimir o recibo.');
+        return;
+      }
+
+      const pEmpresa = empresaParams || await getEmpresaParametros();
+
+      let clienteDados = {
+        nome: item.cliente_razao_social || item.cliente_nome,
+        nome_fantasia: item.cliente_fantasia,
+        documento: item.cliente_cnpj_cpf,
+        telefone: item.cliente_telefone,
+        email: item.cliente_email
+      };
+
+      // Tentar obter dados completos de endereço do cliente
+      if (item.cliente_id) {
+        try {
+          const cliRes = await api.get(`/clientes/${item.cliente_id}`);
+          if (cliRes.data) clienteDados = { ...clienteDados, ...cliRes.data };
+        } catch (e) {
+          console.warn('Não foi possível carregar endereço detalhado do cliente:', e);
+        }
+      }
+
+      // Tentar obter dados do orçamento
+      let orcDados = {
+        numero: item.orcamento_numero,
+        cliente_nome: item.cliente_nome,
+        forma_pagamento_selecionada: item.meio_pagamento,
+        data_aprovacao: item.data_vencimento,
+        total_venda: item.valor
+      };
+
+      if (item.orcamento_numero) {
+        try {
+          const orcRes = await api.get(`/orcamentos?busca=${item.orcamento_numero}`);
+          if (orcRes.data && Array.isArray(orcRes.data) && orcRes.data.length > 0) {
+            const achado = orcRes.data.find(o => String(o.numero) === String(item.orcamento_numero));
+            if (achado) orcDados = { ...orcDados, ...achado };
+          }
+        } catch (e) {}
+      }
+
+      const parcelaObj = {
+        valor: item.status === 'RECEBIDO' ? (item.valor_recebido || item.valor) : item.valor,
+        data: item.data_vencimento,
+        descricao: item.descricao,
+        meio_pagamento: item.meio_pagamento
+      };
+
+      const html = gerarDocumentoReciboHtml({
+        orcamento: orcDados,
+        cliente: clienteDados,
+        parcela: parcelaObj,
+        index: item.numero_parcela ? item.numero_parcela - 1 : 0,
+        totalParcelas: item.total_parcelas || 1,
+        isTotal: false,
+        projetos: [],
+        empresaParams: pEmpresa
+      });
+
+      printWindow.document.write(html);
+      printWindow.document.close();
+
+      // Registrar que recibo foi emitido
+      await api.post(`/fluxo-recebimento/${item.id}/marcar-recibo`);
+      setLancamentos(prev => prev.map(l => l.id === item.id ? { ...l, recibo_emitido: 1 } : l));
+    } catch (err) {
+      console.error('Erro ao emitir recibo:', err);
+      alert('Erro ao emitir recibo: ' + (err.message || ''));
+    }
+  };
+
+  // Abrir Modal de Baixa
+  const handleAbrirBaixa = (item) => {
+    setModalBaixa({
+      isOpen: true,
+      item,
+      valor_recebido: formatDecimalPtBr(item.valor),
+      data_recebimento: hojeIso,
+      meio_pagamento: item.meio_pagamento || 'PIX',
+      observacoes: item.observacoes || ''
+    });
+  };
+
+  // Confirmar Baixa
+  const handleConfirmarBaixa = async (e) => {
+    e.preventDefault();
+    if (!modalBaixa.item) return;
+
+    try {
+      setSalvando(true);
+      const vlr = parsePtBrToFloat(modalBaixa.valor_recebido) || modalBaixa.item.valor;
+      await api.post(`/fluxo-recebimento/${modalBaixa.item.id}/baixar`, {
+        valor_recebido: vlr,
+        data_recebimento: modalBaixa.data_recebimento,
+        meio_pagamento: modalBaixa.meio_pagamento,
+        observacoes: modalBaixa.observacoes
+      });
+
+      setModalBaixa({ isOpen: false, item: null, valor_recebido: '', data_recebimento: '', meio_pagamento: '', observacoes: '' });
+      carregarLancamentos();
+    } catch (err) {
+      console.error('Erro ao baixar recebimento:', err);
+      alert(err.response?.data?.error || 'Erro ao confirmar baixa de recebimento.');
+    } finally {
+      setSalvando(false);
+    }
+  };
+
+  // Estornar Recebimento
+  const handleEstornar = async (item) => {
+    if (!window.confirm(`Deseja estornar a baixa do lançamento "${item.descricao}"? O status voltará para Pendente.`)) {
+      return;
+    }
+
+    try {
+      setSalvando(true);
+      await api.post(`/fluxo-recebimento/${item.id}/estornar`);
+      carregarLancamentos();
+    } catch (err) {
+      console.error('Erro ao estornar recebimento:', err);
+      alert(err.response?.data?.error || 'Erro ao estornar recebimento.');
+    } finally {
+      setSalvando(false);
+    }
+  };
+
+  // Abrir Modal de Edição
+  const handleAbrirEditar = (item) => {
+    setModalEditar({
+      isOpen: true,
+      item,
+      descricao: item.descricao || '',
+      valor: formatDecimalPtBr(item.valor),
+      data_vencimento: item.data_vencimento ? item.data_vencimento.split('T')[0] : '',
+      meio_pagamento: item.meio_pagamento || 'PIX',
+      observacoes: item.observacoes || ''
+    });
+  };
+
+  // Salvar Edição
+  const handleSalvarEditar = async (e) => {
+    e.preventDefault();
+    if (!modalEditar.item) return;
+
+    try {
+      setSalvando(true);
+      const vlr = parsePtBrToFloat(modalEditar.valor);
+      await api.put(`/fluxo-recebimento/${modalEditar.item.id}`, {
+        descricao: modalEditar.descricao,
+        valor: vlr,
+        data_vencimento: modalEditar.data_vencimento,
+        meio_pagamento: modalEditar.meio_pagamento,
+        observacoes: modalEditar.observacoes
+      });
+
+      setModalEditar({ isOpen: false, item: null, descricao: '', valor: '', data_vencimento: '', meio_pagamento: '', observacoes: '' });
+      carregarLancamentos();
+    } catch (err) {
+      console.error('Erro ao editar lançamento:', err);
+      alert(err.response?.data?.error || 'Erro ao salvar alterações.');
+    } finally {
+      setSalvando(false);
+    }
+  };
+
+  // Excluir Lançamento
+  const handleExcluir = async (item) => {
+    if (!window.confirm(`Deseja realmente excluir este lançamento (${item.descricao})?`)) {
+      return;
+    }
+
+    try {
+      setSalvando(true);
+      await api.delete(`/fluxo-recebimento/${item.id}`);
+      carregarLancamentos();
+    } catch (err) {
+      console.error('Erro ao excluir:', err);
+      alert(err.response?.data?.error || 'Erro ao excluir lançamento.');
+    } finally {
+      setSalvando(false);
+    }
+  };
+
+  return (
+    <div className="container" style={{ maxWidth: '1400px', margin: '0 auto', padding: '24px 20px' }}>
+      {/* Page Header */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '24px', flexWrap: 'wrap', gap: '16px' }}>
+        <div>
+          <h1 style={{ margin: 0, fontSize: '1.7rem', fontWeight: 800, color: '#ffffff', display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <div style={{ background: '#ecfdf5', padding: '8px', borderRadius: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <Receipt size={28} color="#059669" />
+            </div>
+            Fluxo de Recebimento
+          </h1>
+          <p style={{ margin: '6px 0 0 0', color: '#ffffff', fontSize: '0.95rem', fontWeight: 500 }}>
+            Controle de contas a receber, liquidação de parcelas de propostas aprovadas e emissão de recibos.
+          </p>
+        </div>
+
+        <div style={{ display: 'flex', gap: '10px' }}>
+          <button
+            type="button"
+            onClick={carregarLancamentos}
+            disabled={loading}
+            className="btn btn-secondary"
+            style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 600 }}
+          >
+            <RefreshCw size={16} className={loading ? 'animate-spin' : ''} />
+            <span>Atualizar</span>
+          </button>
+        </div>
+      </div>
+
+      {/* KPI Cards */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '16px', marginBottom: '24px' }}>
+        <div style={{ background: '#ffffff', borderRadius: '10px', border: '1px solid #e2e8f0', padding: '18px 20px', boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }}>
+          <div style={{ fontSize: '0.8rem', fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+            Total Geral Previsto
+          </div>
+          <div style={{ fontSize: '1.65rem', fontWeight: 800, color: '#0f172a', marginTop: '6px' }}>
+            R$ {formatDecimalPtBr(totalGeral)}
+          </div>
+          <div style={{ fontSize: '0.8rem', color: '#64748b', marginTop: '4px' }}>
+            {lancamentos.length} {lancamentos.length === 1 ? 'lançamento' : 'lançamentos'}
+          </div>
+        </div>
+
+        <div style={{ background: '#ffffff', borderRadius: '10px', border: '1px solid #d1fae5', padding: '18px 20px', boxShadow: '0 1px 3px rgba(5,150,105,0.08)' }}>
+          <div style={{ fontSize: '0.8rem', fontWeight: 700, color: '#059669', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+            Total Recebido (Baixado)
+          </div>
+          <div style={{ fontSize: '1.65rem', fontWeight: 800, color: '#059669', marginTop: '6px' }}>
+            R$ {formatDecimalPtBr(totalRecebido)}
+          </div>
+          <div style={{ fontSize: '0.8rem', color: '#047857', marginTop: '4px' }}>
+            {lancamentos.filter(l => l.status === 'RECEBIDO').length} parcelas liquidadas
+          </div>
+        </div>
+
+        <div style={{ background: '#ffffff', borderRadius: '10px', border: '1px solid #e0f2fe', padding: '18px 20px', boxShadow: '0 1px 3px rgba(2,132,199,0.08)' }}>
+          <div style={{ fontSize: '0.8rem', fontWeight: 700, color: '#0284c7', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+            A Receber (No Prazo)
+          </div>
+          <div style={{ fontSize: '1.65rem', fontWeight: 800, color: '#0284c7', marginTop: '6px' }}>
+            R$ {formatDecimalPtBr(totalPendente)}
+          </div>
+          <div style={{ fontSize: '0.8rem', color: '#0369a1', marginTop: '4px' }}>
+            Vencimentos futuros
+          </div>
+        </div>
+
+        <div style={{ background: '#ffffff', borderRadius: '10px', border: '1px solid #fee2e2', padding: '18px 20px', boxShadow: '0 1px 3px rgba(220,38,38,0.08)' }}>
+          <div style={{ fontSize: '0.8rem', fontWeight: 700, color: '#dc2626', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+            Em Atraso (Vencidos)
+          </div>
+          <div style={{ fontSize: '1.65rem', fontWeight: 800, color: '#dc2626', marginTop: '6px' }}>
+            R$ {formatDecimalPtBr(totalAtrasado)}
+          </div>
+          <div style={{ fontSize: '0.8rem', color: '#b91c1c', marginTop: '4px' }}>
+            {lancamentos.filter(l => l.status === 'PENDENTE' && l.data_vencimento && l.data_vencimento < hojeIso).length} parcelas vencidas
+          </div>
+        </div>
+      </div>
+
+      {/* Filter Bar */}
+      <div style={{ background: '#ffffff', borderRadius: '10px', border: '1px solid #e2e8f0', padding: '16px 20px', marginBottom: '20px', boxShadow: '0 1px 3px rgba(0,0,0,0.04)' }}>
+        <form onSubmit={handleFiltrar} style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', alignItems: 'flex-end' }}>
+          <div style={{ flex: '1 1 260px', minWidth: '220px' }}>
+            <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 700, color: '#475569', marginBottom: '4px' }}>
+              Buscar por Cliente / Orçamento / Descrição
+            </label>
+            <div style={{ position: 'relative' }}>
+              <input
+                type="text"
+                value={busca}
+                onChange={e => setBusca(e.target.value)}
+                placeholder="Ex: João da Silva, 1005, Parcela 1..."
+                className="form-control"
+                style={{ width: '100%', paddingLeft: '34px', fontSize: '0.9rem' }}
+              />
+              <Search size={16} style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', color: '#94a3b8' }} />
+            </div>
+          </div>
+
+          <div style={{ width: '170px' }}>
+            <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 700, color: '#475569', marginBottom: '4px' }}>
+              Status
+            </label>
+            <select
+              value={filtroStatus}
+              onChange={e => setFiltroStatus(e.target.value)}
+              className="form-control"
+              style={{ width: '100%', fontSize: '0.9rem' }}
+            >
+              <option value="TODOS">Todos os Status</option>
+              <option value="PENDENTE">Pendentes</option>
+              <option value="ATRASADO">Em Atraso</option>
+              <option value="RECEBIDO">Recebidos</option>
+            </select>
+          </div>
+
+          <div style={{ width: '150px' }}>
+            <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 700, color: '#475569', marginBottom: '4px' }}>
+              Vencimento Inicial
+            </label>
+            <input
+              type="date"
+              value={dataInicio}
+              onChange={e => setDataInicio(e.target.value)}
+              className="form-control"
+              style={{ width: '100%', fontSize: '0.9rem' }}
+            />
+          </div>
+
+          <div style={{ width: '150px' }}>
+            <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 700, color: '#475569', marginBottom: '4px' }}>
+              Vencimento Final
+            </label>
+            <input
+              type="date"
+              value={dataFim}
+              onChange={e => setDataFim(e.target.value)}
+              className="form-control"
+              style={{ width: '100%', fontSize: '0.9rem' }}
+            />
+          </div>
+
+          <div style={{ display: 'flex', gap: '8px', marginTop: 'auto' }}>
+            <button
+              type="submit"
+              className="btn btn-primary"
+              style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 700, padding: '8px 16px' }}
+            >
+              <Search size={15} />
+              <span>Filtrar</span>
+            </button>
+            <button
+              type="button"
+              onClick={handleLimparFiltros}
+              className="btn btn-secondary"
+              style={{ padding: '8px 14px' }}
+              title="Limpar todos os filtros"
+            >
+              Limpar
+            </button>
+          </div>
+        </form>
+      </div>
+
+      {error && (
+        <div style={{ background: '#fee2e2', border: '1px solid #fca5a5', color: '#991b1b', padding: '12px 16px', borderRadius: '8px', marginBottom: '16px', fontSize: '0.9rem' }}>
+          {error}
+        </div>
+      )}
+
+      {/* Main Table Card */}
+      <div style={{ background: '#ffffff', borderRadius: '10px', border: '1px solid #e2e8f0', boxShadow: '0 2px 4px rgba(0,0,0,0.04)', overflow: 'hidden' }}>
+        <div style={{ padding: '16px 20px', borderBottom: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <h3 style={{ margin: 0, fontSize: '1.05rem', fontWeight: 700, color: '#0f172a' }}>
+            Lançamentos de Recebimento
+          </h3>
+          <span style={{ fontSize: '0.84rem', color: '#64748b' }}>
+            Exibindo <strong>{lancamentos.length}</strong> registro(s)
+          </span>
+        </div>
+
+        {loading ? (
+          <div style={{ padding: '40px', textAlign: 'center', color: '#64748b' }}>
+            <RefreshCw size={28} className="animate-spin" style={{ margin: '0 auto 10px auto', display: 'block', color: '#059669' }} />
+            <span>Carregando fluxo de recebimento...</span>
+          </div>
+        ) : lancamentos.length === 0 ? (
+          <div style={{ padding: '48px 20px', textAlign: 'center', color: '#64748b' }}>
+            <Receipt size={42} style={{ color: '#cbd5e1', marginBottom: '12px' }} />
+            <div style={{ fontSize: '1.05rem', fontWeight: 700, color: '#334155' }}>Nenhum lançamento de recebimento encontrado</div>
+            <p style={{ fontSize: '0.88rem', color: '#94a3b8', marginTop: '4px', maxWidth: '480px', margin: '6px auto 0 auto' }}>
+              Para incluir lançamentos aqui, aprove uma proposta comercial e clique em <strong>"Efetivar Fluxo"</strong> na tela de Fluxo Financeiro do orçamento.
+            </p>
+          </div>
+        ) : (
+          <div style={{ overflowX: 'auto' }}>
+            <table className="table" style={{ width: '100%', margin: 0, fontSize: '0.88rem', borderCollapse: 'collapse' }}>
+              <thead>
+                <tr style={{ background: '#f8fafc', borderBottom: '1px solid #e2e8f0', color: '#475569' }}>
+                  <th style={{ padding: '12px 14px', textAlign: 'center', width: '110px' }}>Status</th>
+                  <th style={{ padding: '12px 14px', textAlign: 'center', width: '105px' }}>Vencimento</th>
+                  <th style={{ padding: '12px 14px', textAlign: 'center', width: '80px' }}>Orç.</th>
+                  <th style={{ padding: '12px 14px', textAlign: 'left' }}>Cliente</th>
+                  <th style={{ padding: '12px 14px', textAlign: 'left' }}>Parcela / Descrição</th>
+                  <th style={{ padding: '12px 14px', textAlign: 'left', width: '130px' }}>Meio de Pagto</th>
+                  <th style={{ padding: '12px 14px', textAlign: 'right', width: '125px' }}>Valor Previsto</th>
+                  <th style={{ padding: '12px 14px', textAlign: 'right', width: '135px' }}>Valor Recebido</th>
+                  <th style={{ padding: '12px 14px', textAlign: 'center', width: '90px' }}>Recibo</th>
+                  <th style={{ padding: '12px 14px', textAlign: 'center', width: '190px' }}>Ações</th>
+                </tr>
+              </thead>
+              <tbody>
+                {lancamentos.map((item, idx) => {
+                  const isRecebido = (item.status || '').toUpperCase() === 'RECEBIDO';
+                  const isVencido = !isRecebido && item.data_vencimento && item.data_vencimento < hojeIso;
+
+                  return (
+                    <tr 
+                      key={item.id} 
+                      style={{ 
+                        borderBottom: '1px solid #f1f5f9',
+                        background: isRecebido ? '#fcfdfd' : (isVencido ? '#fef2f2' : (idx % 2 === 0 ? '#ffffff' : '#f8fafc'))
+                      }}
+                    >
+                      {/* Status */}
+                      <td style={{ padding: '10px 14px', textAlign: 'center' }}>
+                        {isRecebido ? (
+                          <span style={{ background: '#d1fae5', color: '#065f46', padding: '3px 9px', borderRadius: '12px', fontSize: '0.75rem', fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                            <CheckCircle2 size={12} /> Recebido
+                          </span>
+                        ) : isVencido ? (
+                          <span style={{ background: '#fee2e2', color: '#991b1b', padding: '3px 9px', borderRadius: '12px', fontSize: '0.75rem', fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                            <AlertTriangle size={12} /> Em Atraso
+                          </span>
+                        ) : (
+                          <span style={{ background: '#e0f2fe', color: '#0369a1', padding: '3px 9px', borderRadius: '12px', fontSize: '0.75rem', fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                            <Clock size={12} /> Pendente
+                          </span>
+                        )}
+                      </td>
+
+                      {/* Vencimento */}
+                      <td style={{ padding: '10px 14px', textAlign: 'center', fontWeight: 700, color: isVencido ? '#dc2626' : '#1e293b' }}>
+                        {formatarDataBr(item.data_vencimento)}
+                      </td>
+
+                      {/* Orçamento */}
+                      <td style={{ padding: '10px 14px', textAlign: 'center' }}>
+                        <span style={{ fontWeight: 800, color: '#2563eb', background: '#eff6ff', padding: '2px 6px', borderRadius: '4px', fontSize: '0.8rem' }}>
+                          #{item.orcamento_numero}
+                        </span>
+                      </td>
+
+                      {/* Cliente */}
+                      <td style={{ padding: '10px 14px' }}>
+                        <div style={{ fontWeight: 700, color: '#0f172a' }}>{item.cliente_razao_social || item.cliente_nome}</div>
+                        {item.cliente_cnpj_cpf && (
+                          <div style={{ fontSize: '0.76rem', color: '#64748b', marginTop: '2px' }}>
+                            Doc: {item.cliente_cnpj_cpf}
+                          </div>
+                        )}
+                      </td>
+
+                      {/* Parcela / Descrição */}
+                      <td style={{ padding: '10px 14px', color: '#334155' }}>
+                        <div style={{ fontWeight: 600 }}>{item.descricao || `Parcela ${item.numero_parcela || 1}`}</div>
+                        {item.observacoes && (
+                          <div style={{ fontSize: '0.75rem', color: '#64748b', fontStyle: 'italic', marginTop: '2px' }}>
+                            Obs: {item.observacoes}
+                          </div>
+                        )}
+                      </td>
+
+                      {/* Meio de Pagamento */}
+                      <td style={{ padding: '10px 14px' }}>
+                        <span style={{ background: '#f1f5f9', color: '#334155', padding: '3px 8px', borderRadius: '4px', fontSize: '0.78rem', fontWeight: 600 }}>
+                          {item.meio_pagamento || 'PIX'}
+                        </span>
+                      </td>
+
+                      {/* Valor Previsto */}
+                      <td style={{ padding: '10px 14px', textAlign: 'right', fontWeight: 800, color: '#0f172a' }}>
+                        R$ {formatDecimalPtBr(item.valor)}
+                      </td>
+
+                      {/* Valor Recebido */}
+                      <td style={{ padding: '10px 14px', textAlign: 'right' }}>
+                        {isRecebido ? (
+                          <div>
+                            <div style={{ fontWeight: 800, color: '#059669' }}>
+                              R$ {formatDecimalPtBr(item.valor_recebido || item.valor)}
+                            </div>
+                            <div style={{ fontSize: '0.74rem', color: '#059669', marginTop: '2px' }}>
+                              em {formatarDataBr(item.data_recebimento)}
+                            </div>
+                          </div>
+                        ) : (
+                          <span style={{ color: '#94a3b8' }}>-</span>
+                        )}
+                      </td>
+
+                      {/* Recibo Emitido */}
+                      <td style={{ padding: '10px 14px', textAlign: 'center' }}>
+                        {item.recibo_emitido ? (
+                          <span style={{ background: '#ecfdf5', color: '#059669', border: '1px solid #a7f3d0', padding: '2px 7px', borderRadius: '4px', fontSize: '0.74rem', fontWeight: 700 }}>
+                            Emitido
+                          </span>
+                        ) : (
+                          <span style={{ color: '#94a3b8', fontSize: '0.78rem' }}>Não</span>
+                        )}
+                      </td>
+
+                      {/* Ações */}
+                      <td style={{ padding: '10px 14px', textAlign: 'center' }}>
+                        <div style={{ display: 'flex', gap: '5px', justifyContent: 'center', alignItems: 'center' }}>
+                          {/* Botão Emitir Recibo */}
+                          <button
+                            type="button"
+                            onClick={() => handleEmitirRecibo(item)}
+                            style={{
+                              padding: '5px 8px',
+                              background: '#ecfdf5',
+                              border: '1px solid #a7f3d0',
+                              color: '#059669',
+                              borderRadius: '5px',
+                              cursor: 'pointer',
+                              fontWeight: 700,
+                              fontSize: '0.78rem',
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '4px',
+                              title: 'Emitir e Imprimir Recibo Oficial'
+                            }}
+                            title="Emitir Recibo desta parcela"
+                          >
+                            <Receipt size={14} />
+                            <span>Recibo</span>
+                          </button>
+
+                          {/* Botão Confirmar Baixa / Estornar */}
+                          {!isRecebido ? (
+                            <button
+                              type="button"
+                              onClick={() => handleAbrirBaixa(item)}
+                              style={{
+                                padding: '5px 8px',
+                                background: '#059669',
+                                border: 'none',
+                                color: '#ffffff',
+                                borderRadius: '5px',
+                                cursor: 'pointer',
+                                fontWeight: 700,
+                                fontSize: '0.78rem',
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '4px'
+                              }}
+                              title="Confirmar recebimento / Baixar parcela"
+                            >
+                              <CheckCircle2 size={14} />
+                              <span>Baixar</span>
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => handleEstornar(item)}
+                              style={{
+                                padding: '5px 8px',
+                                background: '#fffbeb',
+                                border: '1px solid #fde68a',
+                                color: '#d97706',
+                                borderRadius: '5px',
+                                cursor: 'pointer',
+                                fontWeight: 700,
+                                fontSize: '0.78rem',
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '4px'
+                              }}
+                              title="Estornar baixa (voltar para pendente)"
+                            >
+                              <RotateCcw size={14} />
+                              <span>Estornar</span>
+                            </button>
+                          )}
+
+                          {/* Botão Editar */}
+                          <button
+                            type="button"
+                            onClick={() => handleAbrirEditar(item)}
+                            style={{
+                              padding: '5px 7px',
+                              background: '#f8fafc',
+                              border: '1px solid #cbd5e1',
+                              color: '#475569',
+                              borderRadius: '5px',
+                              cursor: 'pointer'
+                            }}
+                            title="Editar lançamento"
+                          >
+                            <Edit2 size={13} />
+                          </button>
+
+                          {/* Botão Excluir */}
+                          <button
+                            type="button"
+                            onClick={() => handleExcluir(item)}
+                            style={{
+                              padding: '5px 7px',
+                              background: '#fef2f2',
+                              border: '1px solid #fecaca',
+                              color: '#dc2626',
+                              borderRadius: '5px',
+                              cursor: 'pointer'
+                            }}
+                            title="Excluir lançamento"
+                          >
+                            <Trash2 size={13} />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* MODAL DE BAIXA DE RECEBIMENTO */}
+      {modalBaixa.isOpen && modalBaixa.item && (
+        <div className="modal-overlay" style={{ zIndex: 1300, backgroundColor: 'rgba(0,0,0,0.6)' }}>
+          <div className="modal-content" style={{ maxWidth: '520px', width: '90%', borderRadius: '10px', padding: '0', overflow: 'hidden' }}>
+            <div style={{ background: '#f8fafc', padding: '16px 20px', borderBottom: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <h3 style={{ margin: 0, fontSize: '1.1rem', fontWeight: 800, color: '#0f172a', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <CheckCircle2 size={20} color="#059669" />
+                Confirmar Baixa de Recebimento
+              </h3>
+              <button 
+                type="button" 
+                onClick={() => setModalBaixa({ isOpen: false, item: null, valor_recebido: '', data_recebimento: '', meio_pagamento: '', observacoes: '' })}
+                style={{ background: 'transparent', border: 'none', fontSize: '1.4rem', cursor: 'pointer', color: '#64748b' }}
+              >
+                &times;
+              </button>
+            </div>
+
+            <form onSubmit={handleConfirmarBaixa} style={{ padding: '20px' }}>
+              <div style={{ background: '#f1f5f9', border: '1px solid #cbd5e1', borderRadius: '6px', padding: '12px 14px', marginBottom: '16px', fontSize: '0.88rem', color: '#000000' }}>
+                <div style={{ color: '#000000' }}><strong style={{ color: '#000000' }}>Cliente:</strong> {modalBaixa.item.cliente_razao_social || modalBaixa.item.cliente_nome}</div>
+                <div style={{ marginTop: '4px', color: '#000000' }}><strong style={{ color: '#000000' }}>Orçamento:</strong> #{modalBaixa.item.orcamento_numero} &bull; <strong style={{ color: '#000000' }}>Parcela:</strong> {modalBaixa.item.descricao}</div>
+                <div style={{ marginTop: '4px', color: '#000000' }}><strong style={{ color: '#000000' }}>Valor Original:</strong> R$ {formatDecimalPtBr(modalBaixa.item.valor)}</div>
+              </div>
+
+              <div style={{ marginBottom: '14px' }}>
+                <label style={{ display: 'block', fontSize: '0.84rem', fontWeight: 700, color: '#334155', marginBottom: '5px' }}>
+                  Valor Recebido (R$) *
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={modalBaixa.valor_recebido}
+                  onChange={e => setModalBaixa(prev => ({ ...prev, valor_recebido: e.target.value }))}
+                  className="form-control"
+                  style={{ width: '100%', fontSize: '1rem', fontWeight: 700, color: '#059669' }}
+                />
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '14px' }}>
+                <div>
+                  <label style={{ display: 'block', fontSize: '0.84rem', fontWeight: 700, color: '#334155', marginBottom: '5px' }}>
+                    Data do Recebimento *
+                  </label>
+                  <input
+                    type="date"
+                    required
+                    value={modalBaixa.data_recebimento}
+                    onChange={e => setModalBaixa(prev => ({ ...prev, data_recebimento: e.target.value }))}
+                    className="form-control"
+                    style={{ width: '100%', fontSize: '0.9rem' }}
+                  />
+                </div>
+
+                <div>
+                  <label style={{ display: 'block', fontSize: '0.84rem', fontWeight: 700, color: '#334155', marginBottom: '5px' }}>
+                    Meio de Pagamento *
+                  </label>
+                  <select
+                    value={modalBaixa.meio_pagamento}
+                    onChange={e => setModalBaixa(prev => ({ ...prev, meio_pagamento: e.target.value }))}
+                    className="form-control"
+                    style={{ width: '100%', fontSize: '0.9rem' }}
+                  >
+                    <option value="PIX">PIX</option>
+                    <option value="Boleto Bancário">Boleto Bancário</option>
+                    <option value="Cartão de Crédito">Cartão de Crédito</option>
+                    <option value="Cartão de Débito">Cartão de Débito</option>
+                    <option value="Transferência Bancária">Transferência Bancária</option>
+                    <option value="Dinheiro">Dinheiro</option>
+                    <option value="Cheque">Cheque</option>
+                    <option value="Outro">Outro</option>
+                  </select>
+                </div>
+              </div>
+
+              <div style={{ marginBottom: '18px' }}>
+                <label style={{ display: 'block', fontSize: '0.84rem', fontWeight: 700, color: '#334155', marginBottom: '5px' }}>
+                  Observações da Baixa (opcional)
+                </label>
+                <textarea
+                  rows="2"
+                  value={modalBaixa.observacoes}
+                  onChange={e => setModalBaixa(prev => ({ ...prev, observacoes: e.target.value }))}
+                  placeholder="Ex: Pago com desconto acordado, comprovante arquivado..."
+                  className="form-control"
+                  style={{ width: '100%', fontSize: '0.88rem' }}
+                />
+              </div>
+
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
+                <button
+                  type="button"
+                  onClick={() => setModalBaixa({ isOpen: false, item: null, valor_recebido: '', data_recebimento: '', meio_pagamento: '', observacoes: '' })}
+                  className="btn btn-secondary"
+                  disabled={salvando}
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={salvando}
+                  style={{
+                    background: '#059669',
+                    color: '#ffffff',
+                    border: 'none',
+                    borderRadius: '6px',
+                    padding: '8px 20px',
+                    fontWeight: 700,
+                    cursor: salvando ? 'not-allowed' : 'pointer',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '6px'
+                  }}
+                >
+                  {salvando ? <RefreshCw size={15} className="animate-spin" /> : <CheckCircle2 size={15} />}
+                  <span>{salvando ? 'Baixando...' : 'Confirmar Baixa'}</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL DE EDIÇÃO DE PARCELA */}
+      {modalEditar.isOpen && modalEditar.item && (
+        <div className="modal-overlay" style={{ zIndex: 1300, backgroundColor: 'rgba(0,0,0,0.6)' }}>
+          <div className="modal-content" style={{ maxWidth: '520px', width: '90%', borderRadius: '10px', padding: '0', overflow: 'hidden' }}>
+            <div style={{ background: '#f8fafc', padding: '16px 20px', borderBottom: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <h3 style={{ margin: 0, fontSize: '1.1rem', fontWeight: 800, color: '#0f172a', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <Edit2 size={18} color="#2563eb" />
+                Editar Lançamento do Fluxo
+              </h3>
+              <button 
+                type="button" 
+                onClick={() => setModalEditar({ isOpen: false, item: null, descricao: '', valor: '', data_vencimento: '', meio_pagamento: '', observacoes: '' })}
+                style={{ background: 'transparent', border: 'none', fontSize: '1.4rem', cursor: 'pointer', color: '#64748b' }}
+              >
+                &times;
+              </button>
+            </div>
+
+            <form onSubmit={handleSalvarEditar} style={{ padding: '20px' }}>
+              <div style={{ marginBottom: '14px' }}>
+                <label style={{ display: 'block', fontSize: '0.84rem', fontWeight: 700, color: '#334155', marginBottom: '5px' }}>
+                  Descrição da Parcela *
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={modalEditar.descricao}
+                  onChange={e => setModalEditar(prev => ({ ...prev, descricao: e.target.value }))}
+                  className="form-control"
+                  style={{ width: '100%', fontSize: '0.9rem' }}
+                />
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '14px' }}>
+                <div>
+                  <label style={{ display: 'block', fontSize: '0.84rem', fontWeight: 700, color: '#334155', marginBottom: '5px' }}>
+                    Valor Previsto (R$) *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={modalEditar.valor}
+                    onChange={e => setModalEditar(prev => ({ ...prev, valor: e.target.value }))}
+                    className="form-control"
+                    style={{ width: '100%', fontSize: '0.95rem', fontWeight: 700 }}
+                  />
+                </div>
+
+                <div>
+                  <label style={{ display: 'block', fontSize: '0.84rem', fontWeight: 700, color: '#334155', marginBottom: '5px' }}>
+                    Data de Vencimento *
+                  </label>
+                  <input
+                    type="date"
+                    required
+                    value={modalEditar.data_vencimento}
+                    onChange={e => setModalEditar(prev => ({ ...prev, data_vencimento: e.target.value }))}
+                    className="form-control"
+                    style={{ width: '100%', fontSize: '0.9rem' }}
+                  />
+                </div>
+              </div>
+
+              <div style={{ marginBottom: '14px' }}>
+                <label style={{ display: 'block', fontSize: '0.84rem', fontWeight: 700, color: '#334155', marginBottom: '5px' }}>
+                  Meio de Pagamento
+                </label>
+                <select
+                  value={modalEditar.meio_pagamento}
+                  onChange={e => setModalEditar(prev => ({ ...prev, meio_pagamento: e.target.value }))}
+                  className="form-control"
+                  style={{ width: '100%', fontSize: '0.9rem' }}
+                >
+                  <option value="PIX">PIX</option>
+                  <option value="Boleto Bancário">Boleto Bancário</option>
+                  <option value="Cartão de Crédito">Cartão de Crédito</option>
+                  <option value="Cartão de Débito">Cartão de Débito</option>
+                  <option value="Transferência Bancária">Transferência Bancária</option>
+                  <option value="Dinheiro">Dinheiro</option>
+                  <option value="Cheque">Cheque</option>
+                  <option value="Outro">Outro</option>
+                </select>
+              </div>
+
+              <div style={{ marginBottom: '18px' }}>
+                <label style={{ display: 'block', fontSize: '0.84rem', fontWeight: 700, color: '#334155', marginBottom: '5px' }}>
+                  Observações
+                </label>
+                <textarea
+                  rows="2"
+                  value={modalEditar.observacoes}
+                  onChange={e => setModalEditar(prev => ({ ...prev, observacoes: e.target.value }))}
+                  className="form-control"
+                  style={{ width: '100%', fontSize: '0.88rem' }}
+                />
+              </div>
+
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
+                <button
+                  type="button"
+                  onClick={() => setModalEditar({ isOpen: false, item: null, descricao: '', valor: '', data_vencimento: '', meio_pagamento: '', observacoes: '' })}
+                  className="btn btn-secondary"
+                  disabled={salvando}
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={salvando}
+                  className="btn btn-primary"
+                  style={{ fontWeight: 700 }}
+                >
+                  {salvando ? 'Salvando...' : 'Salvar Alterações'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
