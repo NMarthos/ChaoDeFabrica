@@ -23,6 +23,7 @@ import {
   Search, 
   Upload,
   User,
+  UserPlus,
   DollarSign,
   Briefcase,
   AlertTriangle,
@@ -69,7 +70,9 @@ import {
   Hash,
   Layers,
   History,
-  PlusCircle
+  PlusCircle,
+  ClipboardCheck,
+  ArrowLeft
 } from 'lucide-react';
 
 // Base URL da API (relativa por padrão para mesmo domínio/produção ou configurável via VITE_API_URL)
@@ -1398,6 +1401,8 @@ const imprimirMateriaisConsolidados = async (orc, projs = []) => {
     const un = item.ProjetoItemUnidade || 'UNI';
     const duracaoMin = parseInt(item.ProjetoItemDuracao, 10) || Math.round((parseInt(item.ProjetoItemTempo, 10) || 0) * qtd);
 
+    const seqVal = item.sequencia !== undefined && item.sequencia !== null ? parseInt(item.sequencia, 10) : (item.servico_sequencia !== undefined && item.servico_sequencia !== null ? parseInt(item.servico_sequencia, 10) : 999);
+
     if (!mapItens.has(ref)) {
       mapItens.set(ref, {
         referencia: ref,
@@ -1407,7 +1412,8 @@ const imprimirMateriaisConsolidados = async (orc, projs = []) => {
         unidade: un,
         qtd: 0,
         total: 0,
-        duracaoMin: 0
+        duracaoMin: 0,
+        sequencia: seqVal
       });
     }
 
@@ -1418,6 +1424,7 @@ const imprimirMateriaisConsolidados = async (orc, projs = []) => {
     if (!entry.descricao && desc) entry.descricao = desc;
     if (!entry.unidade && un) entry.unidade = un;
     if (!entry.grupo && grupo) entry.grupo = grupo;
+    if (entry.sequencia === 999 && seqVal !== 999) entry.sequencia = seqVal;
   }
 
   const consolidated = Array.from(mapItens.values());
@@ -1440,7 +1447,7 @@ const imprimirMateriaisConsolidados = async (orc, projs = []) => {
 
   const servicosList = consolidated
     .filter(i => i.tipo === 'Serviço')
-    .sort((a, b) => (a.descricao || a.referencia).localeCompare(b.descricao || b.referencia, 'pt-BR', { sensitivity: 'base' }));
+    .sort((a, b) => (a.sequencia ?? 999) - (b.sequencia ?? 999) || (a.descricao || a.referencia).localeCompare(b.descricao || b.referencia, 'pt-BR', { sensitivity: 'base' }));
 
   const totalProdutos = produtosList.reduce((sum, i) => sum + i.total, 0);
   const totalServicos = servicosList.reduce((sum, i) => sum + i.total, 0);
@@ -1476,11 +1483,22 @@ const imprimirMateriaisConsolidados = async (orc, projs = []) => {
     'linear-gradient(90deg, #475569, #94a3b8)'  // Cinza/Slate
   ];
 
+  const serviceSeqMap = new Map();
+  allItens.forEach(i => {
+    if (i.MaterialTipo === 'Serviço') {
+      const desc = (i.MaterialDescricao || i.MaterialReferencia || 'Serviço').trim();
+      const seq = i.sequencia !== undefined && i.sequencia !== null ? parseInt(i.sequencia, 10) : (i.servico_sequencia !== undefined && i.servico_sequencia !== null ? parseInt(i.servico_sequencia, 10) : 999);
+      if (!serviceSeqMap.has(desc) || (serviceSeqMap.get(desc) === 999 && seq !== 999)) {
+        serviceSeqMap.set(desc, seq);
+      }
+    }
+  });
+
   const uniqueServiceNames = Array.from(new Set(
     allItens
       .filter(i => i.MaterialTipo === 'Serviço' && i.MaterialReferencia !== 'FAB.MON.CLI' && i.MaterialReferencia !== 'FAB.QTD.PCA')
       .map(i => (i.MaterialDescricao || i.MaterialReferencia || 'Serviço').trim())
-  )).sort((a, b) => a.localeCompare(b, 'pt-BR', { sensitivity: 'base' }));
+  )).sort((a, b) => (serviceSeqMap.get(a) ?? 999) - (serviceSeqMap.get(b) ?? 999) || a.localeCompare(b, 'pt-BR', { sensitivity: 'base' }));
 
   const serviceColorMap = new Map();
   uniqueServiceNames.forEach((desc, idx) => {
@@ -1500,20 +1518,25 @@ const imprimirMateriaisConsolidados = async (orc, projs = []) => {
     pServicosRaw.forEach(it => {
       const desc = (it.MaterialDescricao || it.MaterialReferencia || 'Serviço').trim();
       const durMin = parseInt(it.ProjetoItemDuracao, 10) || Math.round((parseInt(it.ProjetoItemTempo, 10) || 0) * (parseFloat(it.ProjetoItemQtd) || 0));
+      const seq = it.sequencia !== undefined && it.sequencia !== null ? parseInt(it.sequencia, 10) : (it.servico_sequencia !== undefined && it.servico_sequencia !== null ? parseInt(it.servico_sequencia, 10) : (serviceSeqMap.get(desc) ?? 999));
       if (durMin > 0) {
         if (!servicosProjMap.has(desc)) {
           servicosProjMap.set(desc, {
             descricao: desc,
             duracaoMin: 0,
+            sequencia: seq,
             gradient: serviceColorMap.get(desc) || serviceGradients[0]
           });
         }
         servicosProjMap.get(desc).duracaoMin += durMin;
+        if (servicosProjMap.get(desc).sequencia === 999 && seq !== 999) {
+          servicosProjMap.get(desc).sequencia = seq;
+        }
       }
     });
 
     let servicosListProj = Array.from(servicosProjMap.values())
-      .sort((a, b) => a.descricao.localeCompare(b.descricao, 'pt-BR', { sensitivity: 'base' }));
+      .sort((a, b) => (a.sequencia ?? 999) - (b.sequencia ?? 999) || a.descricao.localeCompare(b.descricao, 'pt-BR', { sensitivity: 'base' }));
 
     const fallbackDur = parseInt(p.DuracaoFabricacao ?? p.Duracao, 10) || 0;
     if (servicosListProj.length === 0 && fallbackDur > 0) {
@@ -2151,17 +2174,19 @@ const imprimirMateriaisProjeto = async (orc, proj, itensParam = null) => {
     .map(i => {
       const qtd = parseFloat(i.ProjetoItemQtd) || 0;
       const duracaoMin = parseInt(i.ProjetoItemDuracao, 10) || Math.round((parseInt(i.ProjetoItemTempo, 10) || 0) * qtd);
+      const seq = i.sequencia !== undefined && i.sequencia !== null ? parseInt(i.sequencia, 10) : (i.servico_sequencia !== undefined && i.servico_sequencia !== null ? parseInt(i.servico_sequencia, 10) : 999);
       return {
         referencia: i.MaterialReferencia || 'SEM_REF',
         descricao: i.MaterialDescricao || i.MaterialReferencia,
         duracaoMin: duracaoMin,
+        sequencia: seq,
         unidade: i.ProjetoItemUnidade || 'UNI',
         qtd: qtd,
         vlrUnit: parseFloat(i.ProjetoItemVlrUnit) || 0,
         total: parseFloat(i.ProjetoItemTotal) || 0
       };
     })
-    .sort((a, b) => (a.descricao || a.referencia).localeCompare(b.descricao || b.referencia, 'pt-BR', { sensitivity: 'base' }));
+    .sort((a, b) => (a.sequencia ?? 999) - (b.sequencia ?? 999) || (a.descricao || a.referencia).localeCompare(b.descricao || b.referencia, 'pt-BR', { sensitivity: 'base' }));
 
   const totalProdutos = produtosList.reduce((sum, i) => sum + i.total, 0);
   const totalServicos = servicosList.reduce((sum, i) => sum + i.total, 0);
@@ -2196,11 +2221,22 @@ const imprimirMateriaisProjeto = async (orc, proj, itensParam = null) => {
     'linear-gradient(90deg, #475569, #94a3b8)'  // Cinza/Slate
   ];
 
+  const serviceSeqMap = new Map();
+  itens.forEach(i => {
+    if (i.MaterialTipo === 'Serviço') {
+      const desc = (i.MaterialDescricao || i.MaterialReferencia || 'Serviço').trim();
+      const seq = i.sequencia !== undefined && i.sequencia !== null ? parseInt(i.sequencia, 10) : (i.servico_sequencia !== undefined && i.servico_sequencia !== null ? parseInt(i.servico_sequencia, 10) : 999);
+      if (!serviceSeqMap.has(desc) || (serviceSeqMap.get(desc) === 999 && seq !== 999)) {
+        serviceSeqMap.set(desc, seq);
+      }
+    }
+  });
+
   const uniqueServiceNames = Array.from(new Set(
     itens
       .filter(i => i.MaterialTipo === 'Serviço' && i.MaterialReferencia !== 'FAB.MON.CLI' && i.MaterialReferencia !== 'FAB.QTD.PCA')
       .map(i => (i.MaterialDescricao || i.MaterialReferencia || 'Serviço').trim())
-  )).sort((a, b) => a.localeCompare(b, 'pt-BR', { sensitivity: 'base' }));
+  )).sort((a, b) => (serviceSeqMap.get(a) ?? 999) - (serviceSeqMap.get(b) ?? 999) || a.localeCompare(b, 'pt-BR', { sensitivity: 'base' }));
 
   const serviceColorMap = new Map();
   uniqueServiceNames.forEach((desc, idx) => {
@@ -2214,20 +2250,25 @@ const imprimirMateriaisProjeto = async (orc, proj, itensParam = null) => {
   pServicosRaw.forEach(it => {
     const desc = (it.MaterialDescricao || it.MaterialReferencia || 'Serviço').trim();
     const durMin = parseInt(it.ProjetoItemDuracao, 10) || Math.round((parseInt(it.ProjetoItemTempo, 10) || 0) * (parseFloat(it.ProjetoItemQtd) || 0));
+    const seq = it.sequencia !== undefined && it.sequencia !== null ? parseInt(it.sequencia, 10) : (it.servico_sequencia !== undefined && it.servico_sequencia !== null ? parseInt(it.servico_sequencia, 10) : (serviceSeqMap.get(desc) ?? 999));
     if (durMin > 0) {
       if (!servicosProjMap.has(desc)) {
         servicosProjMap.set(desc, {
           descricao: desc,
           duracaoMin: 0,
+          sequencia: seq,
           gradient: serviceColorMap.get(desc) || serviceGradients[0]
         });
       }
       servicosProjMap.get(desc).duracaoMin += durMin;
+      if (servicosProjMap.get(desc).sequencia === 999 && seq !== 999) {
+        servicosProjMap.get(desc).sequencia = seq;
+      }
     }
   });
 
   let servicosListProj = Array.from(servicosProjMap.values())
-    .sort((a, b) => a.descricao.localeCompare(b.descricao, 'pt-BR', { sensitivity: 'base' }));
+    .sort((a, b) => (a.sequencia ?? 999) - (b.sequencia ?? 999) || a.descricao.localeCompare(b.descricao, 'pt-BR', { sensitivity: 'base' }));
 
   const fallbackDur = parseInt(proj.DuracaoFabricacao ?? proj.Duracao, 10) || 0;
   if (servicosListProj.length === 0 && fallbackDur > 0) {
@@ -3653,6 +3694,16 @@ function Layout() {
       ]
     },
     {
+      id: 'fabrica',
+      label: 'Fábrica',
+      icon: Factory,
+      type: 'group',
+      items: [
+        { path: '/planta-baixa', label: 'Planta baixa', icon: Factory },
+        { path: '/ordem-servico', label: 'Ordens de serviço', icon: Layers }
+      ]
+    },
+    {
       id: 'administrativo',
       label: 'Administrativo',
       icon: FileText,
@@ -3660,16 +3711,6 @@ function Layout() {
       items: [
         { path: '/administrativo', label: 'Contratos & Termos', icon: FileText },
         { path: '/parametros-empresa', label: 'Parâmetros Empresa', icon: Sliders }
-      ]
-    },
-    {
-      id: 'producao',
-      label: 'Produção',
-      icon: Factory,
-      type: 'group',
-      items: [
-        { path: '/planta-baixa', label: 'Planta baixa', icon: Factory },
-        { path: '/ordens-servico', label: 'Ordens de serviço', icon: ClipboardList }
       ]
     },
     {
@@ -3817,8 +3858,10 @@ function Layout() {
           <Route path="/orcamentos/:numero/projetos" element={<Projetos />} />
           <Route path="/fluxo-recebimento" element={<FluxoRecebimento />} />
           <Route path="/servicos" element={<Servicos />} />
-          <Route path="/ordens-servico" element={<OrdensServico />} />
-          <Route path="/ordens-servico/:numero/cronograma" element={<CronogramaOS />} />
+          <Route path="/ordem-servico" element={<OrdemControle />} />
+          <Route path="/ordem-controle" element={<OrdemControle />} />
+          <Route path="/ordem-servico/:numero/:projetoId/revisao-tecnica" element={<RevisaoTecnica />} />
+          <Route path="/ordem-servico/:numero/revisao-tecnica" element={<RevisaoTecnica />} />
           <Route path="/produtos" element={<Produtos />} />
           <Route path="/importar" element={<ImportarLayouts />} />
           <Route path="/planta-baixa" element={<PlantaBaixa />} />
@@ -6859,1465 +6902,826 @@ function Produtos() {
   );
 }
 
-// 4.6. Ordens de Serviço Page
-function OrdensServico() {
+// 4.7.5. Ordens de Serviço Page (Ordem_Servico)
+function OrdemControle() {
   const navigate = useNavigate();
   const [ordens, setOrdens] = useState([]);
-  const [clientes, setClientes] = useState([]);
-  const [servicosDisponiveis, setServicosDisponiveis] = useState([]);
-  const [showModal, setShowModal] = useState(false);
-  const [showDetailModal, setShowDetailModal] = useState(false);
-  const [selectedOs, setSelectedOs] = useState(null);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+  const [busca, setBusca] = useState('');
+  const [filtroSituacao, setFiltroSituacao] = useState('TODAS');
 
-  // Import PDF States
-  const [showImportModal, setShowImportModal] = useState(false);
-  const [importOsNumero, setImportOsNumero] = useState(null);
-  const [selectedFile, setSelectedFile] = useState(null);
-  const [importing, setImporting] = useState(false);
-  const [importedPecas, setImportedPecas] = useState([]);
-  const [importError, setImportError] = useState('');
+  // Modais
+  const [modalNovo, setModalNovo] = useState({
+    isOpen: false,
+    Numero: '',
+    ProjetoID: '1',
+    NomeProjeto: '',
+    Tempo: '',
+    DataCriacao: new Date().toISOString().split('T')[0],
+    DataConclusao: '',
+    Situacao: 'Aberta',
+    Responsavel: ''
+  });
 
-  // Upload PDF for existing OS States
-  const [showUploadModal, setShowUploadModal] = useState(false);
-  const [uploadOsNumero, setUploadOsNumero] = useState(null);
-  const [uploadFile, setUploadFile] = useState(null);
-  const [uploading, setUploading] = useState(false);
-  const [uploadError, setUploadError] = useState('');
+  const [modalEditar, setModalEditar] = useState({
+    isOpen: false,
+    item: null,
+    ProjetoID: '1',
+    NomeProjeto: '',
+    Tempo: '',
+    DataCriacao: '',
+    DataConclusao: '',
+    Situacao: 'Aberta',
+    Responsavel: ''
+  });
 
-  // Import Chapas PDF States
-  const [showImportChapasModal, setShowImportChapasModal] = useState(false);
-  const [importChapasOsNumero, setImportChapasOsNumero] = useState(null);
-  const [importChapasFile, setImportChapasFile] = useState(null);
-  const [importingChapas, setImportingChapas] = useState(false);
-  const [importChapasError, setImportChapasError] = useState('');
-  const [importedChapasList, setImportedChapasList] = useState([]);
-  const [expandedChapas, setExpandedChapas] = useState({});
+  const [salvando, setSalvando] = useState(false);
 
-  // Manual OS Creation Quantities
-  const [qtdChapas, setQtdChapas] = useState('');
-  const [qtdEspeciais, setQtdEspeciais] = useState('');
-  const [qtdCaixa, setQtdCaixa] = useState('');
-
-  // Expandable/collapsible pieces modules state
-  const [expandedModules, setExpandedModules] = useState({});
-
-  // Edit OS Details States
-  const [editCliente, setEditCliente] = useState('');
-  const [editAmbiente, setEditAmbiente] = useState('');
-  const [editStatus, setEditStatus] = useState('');
-  const [editQuantidades, setEditQuantidades] = useState({});
-  const [isEditingOs, setIsEditingOs] = useState(false);
-
-  // Form State - Novo OS
-  const [cliente, setCliente] = useState('');
-  const [ambiente, setAmbiente] = useState('');
-  const [quantidadesServices, setQuantidadesServices] = useState({});
-
-  const scheduledOsList = ordens.filter(o => o.data_inicio && o.data_fim);
-
-  const getGeneralTimelineRange = () => {
-    if (scheduledOsList.length === 0) {
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      const range = [];
-      for (let i = 0; i < 7; i++) {
-        const d = new Date(today);
-        d.setDate(today.getDate() + i);
-        range.push(d);
-      }
-      return { range, startDate: today, totalDays: 7 };
-    }
-
-    let minDate = null;
-    let maxDate = null;
-
-    scheduledOsList.forEach(os => {
-      const start = new Date(os.data_inicio);
-      const end = new Date(os.data_fim);
-      if (isNaN(start.getTime()) || isNaN(end.getTime())) return;
-
-      if (!minDate || start < minDate) minDate = start;
-      if (!maxDate || end > maxDate) maxDate = end;
-    });
-
-    if (!minDate || isNaN(minDate.getTime())) {
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      const range = [];
-      for (let i = 0; i < 7; i++) {
-        const d = new Date(today);
-        d.setDate(today.getDate() + i);
-        range.push(d);
-      }
-      return { range, startDate: today, totalDays: 7 };
-    }
-
-    const startDate = new Date(minDate);
-    startDate.setHours(0, 0, 0, 0);
-    startDate.setDate(startDate.getDate() - 1); // 1 day padding
-
-    const endDate = new Date(maxDate);
-    endDate.setHours(23, 59, 59, 999);
-    endDate.setDate(endDate.getDate() + 2); // 2 days padding
-
-    const diffTime = Math.abs(endDate - startDate);
-    const totalDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) || 1;
-
-    const finalDays = Math.min(60, totalDays);
-
-    const range = [];
-    for (let i = 0; i < finalDays; i++) {
-      const d = new Date(startDate);
-      d.setDate(startDate.getDate() + i);
-      range.push(d);
-    }
-
-    return { range, startDate, totalDays: finalDays };
-  };
-
-  const { range: generalTimelineDays, startDate: generalTimelineStart, totalDays: generalTimelineTotalDays } = getGeneralTimelineRange();
-  const generalDayWidth = 140;
-  const generalWeekendWidth = 45;
-  const generalRowHeight = 56;
-  const generalLayout = getTimelineLayout(generalTimelineDays, generalDayWidth, generalWeekendWidth);
-
-  const fetchInitialData = async () => {
+  const carregarOrdens = async (overrideParams = {}) => {
     try {
-      const ordensRes = await api.get('/ordens-servico');
-      setOrdens(ordensRes.data);
+      setLoading(true);
+      setError('');
+      const params = {};
+      const sit = overrideParams.situacao !== undefined ? overrideParams.situacao : filtroSituacao;
+      const b = overrideParams.busca !== undefined ? overrideParams.busca : busca;
 
-      const clientesRes = await api.get('/clientes');
-      setClientes(clientesRes.data.filter(c => c.status === 'Ativo'));
+      if (sit && sit !== 'TODAS') params.situacao = sit;
+      if (b) params.busca = b;
 
-      const servicosRes = await api.get('/servicos');
-      setServicosDisponiveis(servicosRes.data);
+      const res = await api.get('/ordem-servico', { params });
+      setOrdens(res.data || []);
     } catch (err) {
-      setError('Erro ao carregar dados do sistema.');
+      console.error('Erro ao carregar ordens de serviço:', err);
+      setError('Erro ao carregar ordens de serviço.');
+    } finally {
+      setLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchInitialData();
+    carregarOrdens();
   }, []);
 
-  const handleOpenAddModal = () => {
-    setQtdChapas('');
-    setQtdEspeciais('');
-    setQtdCaixa('');
-    setShowModal(true);
+  const handleFiltrar = (e) => {
+    e.preventDefault();
+    carregarOrdens();
   };
 
-  const handleCreateOs = async (e) => {
-    if (e) e.preventDefault();
-    setError('');
+  const handleLimparFiltros = () => {
+    setBusca('');
+    setFiltroSituacao('TODAS');
+    carregarOrdens({ busca: '', situacao: 'TODAS' });
+  };
 
+  const formatarDataBr = (dt) => {
+    if (!dt) return '-';
+    const str = String(dt).split('T')[0].split(' ')[0].trim();
+    const p = str.split('-');
+    if (p.length === 3 && p[0].length === 4) return `${p[2].padStart(2, '0')}/${p[1].padStart(2, '0')}/${p[0]}`;
+    return str || dt;
+  };
+
+  // KPIs
+  const totalOrdens = ordens.length;
+  const totalAbertas = ordens.filter(o => o.Situacao === 'Aberta').length;
+  const totalProducao = ordens.filter(o => o.Situacao === 'Producao' || o.Situacao === 'EmProducao').length;
+  const totalSuspensas = ordens.filter(o => o.Situacao === 'Suspensa').length;
+  const totalConcluidas = ordens.filter(o => o.Situacao === 'Concluida' || o.Situacao === 'Concluída').length;
+
+  const getSituacaoBadgeStyle = (sit) => {
+    switch (sit) {
+      case 'Aberta':
+        return { bg: 'rgba(6, 182, 212, 0.15)', color: 'var(--accent-cyan)', border: '1px solid rgba(6, 182, 212, 0.35)', label: 'Aberta' };
+      case 'Producao':
+      case 'EmProducao':
+        return { bg: 'rgba(245, 158, 11, 0.15)', color: '#fbbf24', border: '1px solid rgba(245, 158, 11, 0.35)', label: 'Produção' };
+      case 'Suspensa':
+        return { bg: 'rgba(239, 68, 68, 0.15)', color: '#f87171', border: '1px solid rgba(239, 68, 68, 0.35)', label: 'Suspensa' };
+      case 'Concluida':
+      case 'Concluída':
+        return { bg: 'rgba(16, 185, 129, 0.15)', color: '#34d399', border: '1px solid rgba(16, 185, 129, 0.35)', label: 'Concluída' };
+      default:
+        return { bg: 'rgba(148, 163, 184, 0.15)', color: '#94a3b8', border: '1px solid rgba(148, 163, 184, 0.3)', label: sit || 'Aberta' };
+    }
+  };
+
+  const handleAlterarSituacaoRapida = async (item, novaSituacao) => {
     try {
-      await api.post('/ordens-servico', {
-        qtd_chapas: parseInt(qtdChapas) || 0,
-        qtd_especiais: parseInt(qtdEspeciais) || 0,
-        qtd_caixa: parseInt(qtdCaixa) || 0
-      });
-      setShowModal(false);
-      setQtdChapas('');
-      setQtdEspeciais('');
-      setQtdCaixa('');
-      fetchInitialData();
-      alert('Ordem de Serviço criada com sucesso!');
-    } catch (err) {
-      setError(err.response?.data?.error || 'Erro ao registrar ordem de serviço.');
-    }
-  };
-
-  const handleOpenUploadModal = (numero) => {
-    setUploadOsNumero(numero);
-    setUploadFile(null);
-    setUploadError('');
-    setUploading(false);
-    setShowUploadModal(true);
-  };
-
-  const handleUploadFileChange = (e) => {
-    if (e.target.files && e.target.files[0]) {
-      setUploadFile(e.target.files[0]);
-      setUploadError('');
-    }
-  };
-
-  const handleUploadPdf = async () => {
-    if (!uploadFile) {
-      setUploadError('Por favor, selecione um arquivo.');
-      return;
-    }
-
-    setUploading(true);
-    setUploadError('');
-    const formData = new FormData();
-    formData.append('file', uploadFile);
-
-    try {
-      await api.post(`/ordens-servico/${uploadOsNumero}/pecas/import`, formData, {
-        headers: {
-          'Content-Type': 'multipart/form-data'
-        }
-      });
-      setShowUploadModal(false);
-      setUploadFile(null);
-      fetchInitialData();
-      alert('Peças importadas e associadas à OS com sucesso!');
-    } catch (err) {
-      setUploadError(err.response?.data?.error || 'Erro ao importar PDF de etiquetas.');
-    } finally {
-      setUploading(false);
-    }
-  };
-
-  const handleOpenImportChapasModal = async (numero) => {
-    setImportChapasOsNumero(numero);
-    setImportChapasFile(null);
-    setImportChapasError('');
-    setImportingChapas(false);
-    setImportedChapasList([]);
-    setExpandedChapas({});
-    setShowImportChapasModal(true);
-
-    try {
-      const res = await api.get(`/ordens-servico/${numero}/chapas`);
-      setImportedChapasList(res.data);
-    } catch (err) {
-      console.error('Erro ao buscar chapas da OS:', err);
-    }
-  };
-
-  const handleImportChapasFileChange = (e) => {
-    if (e.target.files && e.target.files[0]) {
-      setImportChapasFile(e.target.files[0]);
-      setImportChapasError('');
-    }
-  };
-
-  const handleImportChapasPdf = async () => {
-    if (!importChapasFile) {
-      setImportChapasError('Por favor, selecione um arquivo.');
-      return;
-    }
-
-    setImportingChapas(true);
-    setImportChapasError('');
-    const formData = new FormData();
-    formData.append('arquivo', importChapasFile);
-
-    try {
-      await api.post(`/ordens-servico/${importChapasOsNumero}/importar-chapas`, formData, {
-        headers: {
-          'Content-Type': 'multipart/form-data'
-        }
-      });
-      setImportChapasFile(null);
-      
-      const res = await api.get(`/ordens-servico/${importChapasOsNumero}/chapas`);
-      setImportedChapasList(res.data);
-      
-      fetchInitialData();
-      alert('Chapas e subdados importados com sucesso!');
-    } catch (err) {
-      setImportChapasError(err.response?.data?.error || 'Erro ao importar PDF de chapas.');
-    } finally {
-      setImportingChapas(false);
-    }
-  };
-
-  const toggleChapaExpand = (id) => {
-    setExpandedChapas(prev => ({
-      ...prev,
-      [id]: !prev[id]
-    }));
-  };
-
-  const getUnidadeLabel = (val) => {
-    const labels = {
-      1: 'Chapa',
-      2: 'Peça',
-      3: 'Metro',
-      4: 'Caixa',
-      5: 'Unidade',
-      6: 'Outro'
-    };
-    return labels[val] || 'Outro';
-  };
-
-  const handleViewDetails = async (numero) => {
-    setError('');
-    try {
-      const res = await api.get(`/ordens-servico/${numero}`);
-      setSelectedOs(res.data);
-      setEditCliente(res.data.cliente || '');
-      setEditAmbiente(res.data.ambiente || '');
-      setEditStatus(res.data.status || 'Aberta');
-      
-      const initialQuantities = {};
-      if (res.data.servicos) {
-        res.data.servicos.forEach(item => {
-          initialQuantities[item.servico_id] = item.quantidade;
-        });
+      const payload = {
+        Situacao: novaSituacao
+      };
+      if (novaSituacao === 'Concluida' && !item.DataConclusao) {
+        payload.DataConclusao = new Date().toISOString().split('T')[0];
       }
-      setEditQuantidades(initialQuantities);
-
-      setIsEditingOs(false);
-      setShowDetailModal(true);
+      await api.put(`/ordem-servico/${item.Numero}?projetoId=${item.ProjetoID || 1}`, payload);
+      setSuccess(`Situação da Ordem #${item.Numero} (Item ${item.ProjetoID || 1}) alterada para "${novaSituacao}".`);
+      setTimeout(() => setSuccess(''), 3000);
+      carregarOrdens();
     } catch (err) {
-      setError('Não foi possível carregar os detalhes da OS.');
+      console.error('Erro ao atualizar situação:', err);
+      alert(err.response?.data?.error || 'Erro ao alterar situação da ordem de serviço.');
     }
   };
 
-  const handleOpenImportModal = async (numero) => {
-    setImportOsNumero(numero);
-    setSelectedFile(null);
-    setImportError('');
-    setImportedPecas([]);
-    setExpandedModules({});
-    setShowImportModal(true);
-    
-    try {
-      const res = await api.get(`/ordens-servico/${numero}/pecas`);
-      setImportedPecas(res.data);
-    } catch (err) {
-      console.error('Erro ao buscar pecas da OS:', err);
-    }
+  const handleAbrirEditar = (item) => {
+    setModalEditar({
+      isOpen: true,
+      item,
+      ProjetoID: item.ProjetoID !== undefined && item.ProjetoID !== null ? String(item.ProjetoID) : '1',
+      NomeProjeto: item.NomeProjeto || '',
+      Tempo: item.Tempo !== undefined && item.Tempo !== null ? String(item.Tempo) : '',
+      DataCriacao: item.DataCriacao ? String(item.DataCriacao).split('T')[0] : '',
+      DataConclusao: item.DataConclusao ? String(item.DataConclusao).split('T')[0] : '',
+      Situacao: item.Situacao || 'Aberta',
+      Responsavel: item.Responsavel || ''
+    });
   };
 
-  const handleFileChange = (e) => {
-    if (e.target.files && e.target.files[0]) {
-      setSelectedFile(e.target.files[0]);
-      setImportError('');
-    }
-  };
-
-  const handleImportPdf = async () => {
-    if (!selectedFile || !importOsNumero) return;
-    setImporting(true);
-    setImportError('');
-    
-    const formData = new FormData();
-    formData.append('file', selectedFile);
+  const handleSalvarEditar = async (e) => {
+    e.preventDefault();
+    if (!modalEditar.item) return;
 
     try {
-      const res = await api.post(`/ordens-servico/${importOsNumero}/pecas/import`, formData, {
-        headers: {
-          'Content-Type': 'multipart/form-data'
-        }
+      setSalvando(true);
+      await api.put(`/ordem-servico/${modalEditar.item.Numero}?projetoId=${modalEditar.item.ProjetoID || 1}`, {
+        DataCriacao: modalEditar.DataCriacao || null,
+        DataConclusao: modalEditar.DataConclusao || null,
+        Situacao: modalEditar.Situacao,
+        Responsavel: modalEditar.Responsavel || null,
+        NomeProjeto: modalEditar.NomeProjeto || null,
+        Tempo: modalEditar.Tempo ? parseInt(modalEditar.Tempo, 10) : 0
       });
-      setImportedPecas(res.data);
-      setSelectedFile(null);
-      alert('Arquivo importado e peças registradas com sucesso!');
+
+      setModalEditar({ isOpen: false, item: null, ProjetoID: '1', NomeProjeto: '', Tempo: '', DataCriacao: '', DataConclusao: '', Situacao: 'Aberta', Responsavel: '' });
+      setSuccess(`Ordem de Serviço #${modalEditar.item.Numero} (Item ${modalEditar.item.ProjetoID || 1}) atualizada com sucesso!`);
+      setTimeout(() => setSuccess(''), 3500);
+      carregarOrdens();
     } catch (err) {
-      setImportError(err.response?.data?.error || 'Erro ao importar PDF de etiquetas.');
+      console.error('Erro ao editar ordem:', err);
+      alert(err.response?.data?.error || 'Erro ao atualizar ordem de serviço.');
     } finally {
-      setImporting(false);
+      setSalvando(false);
     }
   };
 
-  const handleSaveChanges = async () => {
-    if (!selectedOs) return;
-    setError('');
-
-    // Format the services array to submit
-    const updatedServices = selectedOs.servicos.map(item => ({
-      servico_id: item.servico_id,
-      quantidade: parseInt(editQuantidades[item.servico_id]) || 1
-    }));
-
+  const handleSalvarNovo = async (e) => {
+    e.preventDefault();
     try {
-      await api.put(`/ordens-servico/${selectedOs.numero}`, {
-        cliente: editCliente || null,
-        ambiente: editAmbiente || null,
-        status: editStatus,
-        servicos: updatedServices
+      setSalvando(true);
+      await api.post('/ordem-servico', {
+        Numero: modalNovo.Numero ? parseInt(modalNovo.Numero, 10) : undefined,
+        ProjetoID: modalNovo.ProjetoID ? parseInt(modalNovo.ProjetoID, 10) : 1,
+        NomeProjeto: modalNovo.NomeProjeto || null,
+        Tempo: modalNovo.Tempo ? parseInt(modalNovo.Tempo, 10) : 0,
+        DataCriacao: modalNovo.DataCriacao || null,
+        DataConclusao: modalNovo.DataConclusao || null,
+        Situacao: modalNovo.Situacao,
+        Responsavel: modalNovo.Responsavel || null
       });
-      const res = await api.get(`/ordens-servico/${selectedOs.numero}`);
-      setSelectedOs(res.data);
-      fetchInitialData();
-      setIsEditingOs(false);
-      alert('Alterações salvas com sucesso!');
+
+      setModalNovo({ isOpen: false, Numero: '', ProjetoID: '1', NomeProjeto: '', Tempo: '', DataCriacao: new Date().toISOString().split('T')[0], DataConclusao: '', Situacao: 'Aberta', Responsavel: '' });
+      setSuccess('Ordem de Serviço criada com sucesso!');
+      setTimeout(() => setSuccess(''), 3500);
+      carregarOrdens();
     } catch (err) {
-      setError('Erro ao salvar alterações da OS.');
+      console.error('Erro ao criar ordem:', err);
+      alert(err.response?.data?.error || 'Erro ao criar ordem de serviço.');
+    } finally {
+      setSalvando(false);
     }
   };
 
-  const handleUpdateStatus = async (status) => {
-    if (!selectedOs) return;
-    setError('');
-    try {
-      await api.put(`/ordens-servico/${selectedOs.numero}`, { status });
-      const res = await api.get(`/ordens-servico/${selectedOs.numero}`);
-      setSelectedOs(res.data);
-      fetchInitialData();
-    } catch (err) {
-      setError('Erro ao atualizar status da OS.');
-    }
-  };
-
-  const handleServiceAction = async (servico_id, action) => {
-    if (!selectedOs) return;
-    setError('');
-    try {
-      await api.post(`/ordens-servico/${selectedOs.numero}/servicos/${servico_id}/action`, { action });
-      const res = await api.get(`/ordens-servico/${selectedOs.numero}`);
-      setSelectedOs(res.data);
-      fetchInitialData();
-    } catch (err) {
-      setError(err.response?.data?.error || 'Erro ao registrar andamento do serviço.');
-    }
-  };
-
-  const handleDeleteOs = async (numero) => {
-    if (window.confirm(`Tem certeza que deseja excluir permanentemente a OS #${numero}?`)) {
+  const handleExcluir = async (item) => {
+    const num = item.Numero;
+    const projId = item.ProjetoID || 1;
+    if (window.confirm(`Tem certeza que deseja excluir a Ordem de Serviço #${num} (Item ${projId})?`)) {
       try {
-        await api.delete(`/ordens-servico/${numero}`);
-        setShowDetailModal(false);
-        fetchInitialData();
+        await api.delete(`/ordem-servico/${num}?projetoId=${projId}`);
+        setSuccess(`Ordem de Serviço #${num} (Item ${projId}) excluída com sucesso!`);
+        setTimeout(() => setSuccess(''), 3000);
+        carregarOrdens();
       } catch (err) {
-        setError('Erro ao excluir ordem de serviço.');
+        console.error('Erro ao excluir:', err);
+        alert(err.response?.data?.error || 'Erro ao excluir ordem de serviço.');
       }
-    }
-  };
-
-  const getRowPredictedTime = (item) => {
-    const sObj = servicosDisponiveis.find(s => s.id === item.servico_id);
-    const unitTime = sObj ? sObj.tempo : (item.tempo_previsto / (item.quantidade || 1));
-    const qty = isEditingOs ? (parseInt(editQuantidades[item.servico_id]) || 0) : item.quantidade;
-    return qty * unitTime;
-  };
-
-  const calculateTotalPredictedTime = () => {
-    if (!selectedOs || !selectedOs.servicos) return 0;
-    return selectedOs.servicos.reduce((sum, item) => {
-      return sum + getRowPredictedTime(item);
-    }, 0);
-  };
-
-  const getStatusBadgeClass = (status) => {
-    switch (status) {
-      case 'Aberta': return 'badge-info';
-      case 'EmProducao': return 'badge-warning';
-      case 'Suspensa': return 'badge-danger';
-      case 'Fechada': return 'badge-success';
-      default: return 'badge-secondary';
     }
   };
 
   return (
-    <div>
-      <div className="content-header">
-        <h1 className="page-title">Ordens de Serviço</h1>
-        <button onClick={handleOpenAddModal} className="btn btn-primary">
-          <Plus size={18} />
-          <span>Abertura de OS</span>
-        </button>
+    <div className="container" style={{ maxWidth: '1400px', margin: '0 auto', padding: '24px 20px' }}>
+      {/* Header */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '24px', flexWrap: 'wrap', gap: '16px' }}>
+        <div>
+          <h1 style={{ margin: 0, fontSize: '1.7rem', fontWeight: 800, color: '#ffffff', display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <div style={{ background: 'rgba(6, 182, 212, 0.15)', border: '1px solid rgba(6, 182, 212, 0.3)', padding: '8px', borderRadius: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <Layers size={28} color="var(--accent-cyan)" />
+            </div>
+            Ordens de Serviço
+          </h1>
+          <p style={{ margin: '6px 0 0 0', color: 'var(--text-muted)', fontSize: '0.95rem' }}>
+            Acompanhamento das ordens de serviço geradas por projeto a partir da efetivação de orçamentos e fluxo financeiro.
+          </p>
+        </div>
+
+        <div style={{ display: 'flex', gap: '10px' }}>
+          <button
+            type="button"
+            onClick={carregarOrdens}
+            disabled={loading}
+            className="btn btn-secondary"
+            style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 600 }}
+          >
+            <RefreshCw size={16} className={loading ? 'animate-spin' : ''} />
+            <span>Atualizar</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setModalNovo(prev => ({ ...prev, isOpen: true }))}
+            className="btn btn-primary"
+            style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 700 }}
+          >
+            <Plus size={16} />
+            <span>Nova Ordem</span>
+          </button>
+        </div>
       </div>
 
-      {error && <div className="alert alert-danger">{error}</div>}
+      {/* Alerts */}
+      {error && (
+        <div style={{ background: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.3)', color: '#f87171', padding: '12px 16px', borderRadius: '8px', marginBottom: '16px', fontSize: '0.9rem' }}>
+          {error}
+        </div>
+      )}
+      {success && (
+        <div style={{ background: 'rgba(16, 185, 129, 0.1)', border: '1px solid rgba(16, 185, 129, 0.3)', color: 'var(--color-success)', padding: '12px 16px', borderRadius: '8px', marginBottom: '16px', fontSize: '0.9rem' }}>
+          {success}
+        </div>
+      )}
 
-      <div className="glass-card">
-        <div className="table-container">
-          <table className="data-table">
+      {/* KPI Cards */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '16px', marginBottom: '24px' }}>
+        <div className="glass-card" style={{ padding: '16px 20px' }}>
+          <div style={{ fontSize: '0.78rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+            Total de Ordens
+          </div>
+          <div style={{ fontSize: '1.75rem', fontWeight: 800, color: 'var(--text-main)', marginTop: '4px' }}>
+            {totalOrdens}
+          </div>
+          <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '2px' }}>
+            Registros na base de ordens de serviço
+          </div>
+        </div>
+
+        <div className="glass-card" style={{ padding: '16px 20px', borderLeft: '4px solid var(--accent-cyan)' }}>
+          <div style={{ fontSize: '0.78rem', fontWeight: 700, color: 'var(--accent-cyan)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+            Abertas
+          </div>
+          <div style={{ fontSize: '1.75rem', fontWeight: 800, color: 'var(--accent-cyan)', marginTop: '4px' }}>
+            {totalAbertas}
+          </div>
+          <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '2px' }}>
+            Aguardando início de produção
+          </div>
+        </div>
+
+        <div className="glass-card" style={{ padding: '16px 20px', borderLeft: '4px solid #fbbf24' }}>
+          <div style={{ fontSize: '0.78rem', fontWeight: 700, color: '#fbbf24', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+            Em Produção
+          </div>
+          <div style={{ fontSize: '1.75rem', fontWeight: 800, color: '#fbbf24', marginTop: '4px' }}>
+            {totalProducao}
+          </div>
+          <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '2px' }}>
+            Em processo na fábrica
+          </div>
+        </div>
+
+        <div className="glass-card" style={{ padding: '16px 20px', borderLeft: '4px solid #f87171' }}>
+          <div style={{ fontSize: '0.78rem', fontWeight: 700, color: '#f87171', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+            Suspensas
+          </div>
+          <div style={{ fontSize: '1.75rem', fontWeight: 800, color: '#f87171', marginTop: '4px' }}>
+            {totalSuspensas}
+          </div>
+          <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '2px' }}>
+            Pausadas temporariamente
+          </div>
+        </div>
+
+        <div className="glass-card" style={{ padding: '16px 20px', borderLeft: '4px solid #34d399' }}>
+          <div style={{ fontSize: '0.78rem', fontWeight: 700, color: '#34d399', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+            Concluídas
+          </div>
+          <div style={{ fontSize: '1.75rem', fontWeight: 800, color: '#34d399', marginTop: '4px' }}>
+            {totalConcluidas}
+          </div>
+          <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '2px' }}>
+            Processo finalizado
+          </div>
+        </div>
+      </div>
+
+      {/* Filter Bar */}
+      <div className="glass-card" style={{ padding: '16px 20px', marginBottom: '20px' }}>
+        <form onSubmit={handleFiltrar} style={{ display: 'flex', gap: '14px', flexWrap: 'wrap', alignItems: 'flex-end' }}>
+          <div style={{ flex: '1 1 280px', minWidth: '220px' }}>
+            <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 700, color: 'var(--text-muted)', marginBottom: '4px' }}>
+              Buscar por Número / Projeto / Responsável / Cliente / Descrição
+            </label>
+            <div style={{ position: 'relative' }}>
+              <input
+                type="text"
+                value={busca}
+                onChange={e => setBusca(e.target.value)}
+                placeholder="Ex: 1005, Cozinha, admin..."
+                className="form-control"
+                style={{ width: '100%', paddingLeft: '34px', fontSize: '0.9rem' }}
+              />
+              <Search size={16} style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} />
+            </div>
+          </div>
+
+          <div style={{ width: '180px' }}>
+            <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 700, color: 'var(--text-muted)', marginBottom: '4px' }}>
+              Situação
+            </label>
+            <select
+              value={filtroSituacao}
+              onChange={e => setFiltroSituacao(e.target.value)}
+              className="form-control"
+              style={{ width: '100%', fontSize: '0.9rem' }}
+            >
+              <option value="TODAS">Todas as Situações</option>
+              <option value="Aberta">Aberta</option>
+              <option value="Producao">Produção</option>
+              <option value="Suspensa">Suspensa</option>
+              <option value="Concluida">Concluída</option>
+            </select>
+          </div>
+
+          <div style={{ display: 'flex', gap: '8px', marginTop: 'auto' }}>
+            <button
+              type="submit"
+              className="btn btn-primary"
+              style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 700, padding: '8px 16px' }}
+            >
+              <Search size={15} />
+              <span>Filtrar</span>
+            </button>
+            <button
+              type="button"
+              onClick={handleLimparFiltros}
+              className="btn btn-secondary"
+              style={{ padding: '8px 14px' }}
+              title="Limpar todos os filtros"
+            >
+              Limpar
+            </button>
+          </div>
+        </form>
+      </div>
+
+      {/* Main Table */}
+      <div className="glass-card" style={{ padding: 0, overflow: 'hidden' }}>
+        <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--glass-border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <h3 style={{ margin: 0, fontSize: '1.05rem', fontWeight: 700, color: 'var(--text-main)' }}>
+            Listagem de Ordens de Serviço
+          </h3>
+          <span style={{ fontSize: '0.84rem', color: 'var(--text-muted)' }}>
+            Exibindo <strong>{ordens.length}</strong> registro(s)
+          </span>
+        </div>
+
+        <div className="table-responsive">
+          <table className="data-table" style={{ margin: 0 }}>
             <thead>
               <tr>
-                <th>Número OS</th>
-                <th>Cliente</th>
-                <th>Ambiente</th>
-                <th>Abertura</th>
-                <th>Data Início</th>
-                <th>Data Fim</th>
-                <th>Situação</th>
-                <th>Qtd Peças</th>
-                <th>Qtd Chapas</th>
-                <th>Qtd Especiais</th>
-                <th>Qtd Caixas</th>
-                <th>Tempo Previsto</th>
-                <th>Tempo Real</th>
-                <th style={{ textAlign: 'right' }}>Ações</th>
+                <th style={{ width: '150px' }}>Ordem / Item</th>
+                <th>Projeto / Ambiente</th>
+                <th style={{ width: '110px' }}>Tempo</th>
+                <th>Cliente / Detalhes</th>
+                <th style={{ width: '130px' }}>Data Criação</th>
+                <th style={{ width: '140px' }}>Data Conclusão</th>
+                <th style={{ width: '150px', textAlign: 'center' }}>Situação</th>
+                <th style={{ width: '190px', textAlign: 'right' }}>Ações</th>
               </tr>
             </thead>
             <tbody>
-              {ordens.length === 0 ? (
+              {loading ? (
                 <tr>
-                  <td colSpan="14" style={{ textAlign: 'center', color: 'var(--text-muted)' }}>Nenhuma ordem de serviço registrada.</td>
+                  <td colSpan="8" style={{ textAlign: 'center', padding: '40px', color: 'var(--text-muted)' }}>
+                    <RefreshCw size={24} className="animate-spin" style={{ margin: '0 auto 10px auto' }} />
+                    <div>Carregando ordens de serviço...</div>
+                  </td>
+                </tr>
+              ) : ordens.length === 0 ? (
+                <tr>
+                  <td colSpan="8" style={{ textAlign: 'center', padding: '40px 20px', color: 'var(--text-muted)' }}>
+                    <Layers size={36} style={{ opacity: 0.3, marginBottom: '10px', display: 'block', margin: '0 auto 10px' }} />
+                    <div style={{ fontSize: '1rem', fontWeight: 600, color: 'var(--text-main)', marginBottom: '4px' }}>
+                      Nenhuma ordem de serviço encontrada
+                    </div>
+                    <div style={{ fontSize: '0.85rem' }}>
+                      As ordens de serviço são criadas automaticamente para cada projeto ao efetivar o fluxo financeiro de um orçamento aprovado.
+                    </div>
+                  </td>
                 </tr>
               ) : (
-                ordens.map((o) => (
-                  <tr key={o.numero}>
-                    <td style={{ fontWeight: 700 }}>#{o.numero}</td>
-                    <td>{o.cliente_nome || 'Sem cliente'}</td>
-                    <td>{o.ambiente || '-'}</td>
-                    <td>{new Date(o.data_abertura).toLocaleString('pt-BR')}</td>
-                    <td>{o.data_inicio ? new Date(o.data_inicio).toLocaleString('pt-BR') : '-'}</td>
-                    <td>{o.data_fim ? new Date(o.data_fim).toLocaleString('pt-BR') : '-'}</td>
-                    <td>
-                      <span className={`badge ${getStatusBadgeClass(o.status)}`}>
-                        {o.status === 'EmProducao' ? 'Em Produção' : o.status}
-                      </span>
-                    </td>
-                    <td style={{ fontWeight: 700, textAlign: 'center' }}>{o.qtd_pecas || 0}</td>
-                    <td style={{ textAlign: 'center', fontWeight: 600 }}>{o.qtd_chapas || 0}</td>
-                    <td style={{ textAlign: 'center', fontWeight: 600 }}>{o.qtd_especiais || 0}</td>
-                    <td style={{ textAlign: 'center', fontWeight: 600 }}>{o.qtd_caixa || 0}</td>
-                    <td>{o.tempo_previsto} min</td>
-                    <td>{o.tempo_real ? `${o.tempo_real} min` : '-'}</td>
-                    <td style={{ textAlign: 'right' }}>
-                      <div className="flex-gap-2" style={{ justifyContent: 'flex-end' }}>
-                        <button onClick={() => handleOpenUploadModal(o.numero)} className="btn btn-primary" style={{ padding: '6px 12px', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '6px' }} title="Importar Etiquetas PDF">
-                          <Upload size={14} />
-                          <span>Importar</span>
-                        </button>
-                        <button onClick={() => handleOpenImportChapasModal(o.numero)} className="btn btn-primary" style={{ padding: '6px 12px', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '6px' }} title="Importar Chapas PDF">
-                          <Upload size={14} />
-                          <span>Importar Chapas</span>
-                        </button>
-                        <button onClick={() => handleViewDetails(o.numero)} className="btn btn-secondary" style={{ padding: '6px 12px', fontSize: '0.85rem' }}>
-                          Gerenciar
-                        </button>
-                        <button onClick={() => navigate(`/ordens-servico/${o.numero}/cronograma`)} className="btn btn-secondary" style={{ padding: '6px 12px', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '6px' }} title="Cronograma">
-                          <Calendar size={14} />
-                          <span>Cronograma</span>
-                        </button>
-                        <button onClick={() => handleOpenImportModal(o.numero)} className="btn btn-secondary" style={{ padding: '6px 12px', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '6px' }} title="Visualizar Peças">
-                          <ClipboardList size={14} />
-                          <span>Peças</span>
-                        </button>
-                        <button onClick={() => handleDeleteOs(o.numero)} className="btn btn-danger" style={{ padding: '6px' }} title="Excluir">
-                          <Trash2 size={14} />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))
+                ordens.map((item) => {
+                  const badge = getSituacaoBadgeStyle(item.Situacao);
+                  return (
+                    <tr key={`${item.Numero}-${item.ProjetoID}`}>
+                      {/* Número e Item */}
+                      <td>
+                        <span style={{ fontWeight: 800, fontSize: '0.95rem', color: 'var(--accent-cyan)' }}>
+                          #{item.Numero}/{String(item.ProjetoID || 1).padStart(3, '0')}
+                        </span>
+                      </td>
+
+                      {/* Nome do Projeto */}
+                      <td>
+                        <div style={{ fontWeight: 700, color: 'var(--text-main)', fontSize: '0.9rem' }}>
+                          {item.NomeProjeto || <span style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>Projeto Padrão</span>}
+                        </div>
+                      </td>
+
+                      {/* Tempo */}
+                      <td style={{ fontSize: '0.85rem', color: 'var(--text-main)', fontWeight: 600 }}>
+                        {item.Tempo ? `${item.Tempo} min` : '-'}
+                      </td>
+
+                      {/* Cliente / Descrição */}
+                      <td>
+                        <div style={{ fontWeight: 700, color: 'var(--text-main)', fontSize: '0.9rem' }}>
+                          {item.cliente_nome || <span style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>Sem cliente associado</span>}
+                        </div>
+                        {item.orcamento_descricao && (
+                          <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '2px', maxWidth: '320px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={item.orcamento_descricao}>
+                            {item.orcamento_descricao}
+                          </div>
+                        )}
+                      </td>
+
+                      {/* Data Criação */}
+                      <td style={{ color: 'var(--text-main)', fontSize: '0.85rem', fontWeight: 600 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+                          <Calendar size={13} color="var(--accent-cyan)" />
+                          <span>{formatarDataBr(item.DataCriacao)}</span>
+                        </div>
+                      </td>
+
+                      {/* Data Conclusão */}
+                      <td style={{ fontSize: '0.85rem' }}>
+                        {item.DataConclusao ? (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '5px', color: '#34d399', fontWeight: 600 }}>
+                            <CheckCircle2 size={13} />
+                            <span>{formatarDataBr(item.DataConclusao)}</span>
+                          </div>
+                        ) : (
+                          <span style={{ color: 'var(--text-muted)', fontStyle: 'italic', fontSize: '0.8rem' }}>
+                            Em aberto
+                          </span>
+                        )}
+                      </td>
+
+                      {/* Situação com Seletor Rápido */}
+                      <td style={{ textAlign: 'center' }}>
+                        <select
+                          value={item.Situacao || 'Aberta'}
+                          onChange={(e) => handleAlterarSituacaoRapida(item, e.target.value)}
+                          style={{
+                            background: badge.bg,
+                            color: badge.color,
+                            border: badge.border,
+                            borderRadius: '6px',
+                            padding: '3px 8px',
+                            fontSize: '0.78rem',
+                            fontWeight: 700,
+                            cursor: 'pointer',
+                            outline: 'none'
+                          }}
+                          title="Clique para alterar a situação desta ordem"
+                        >
+                          <option value="Aberta" style={{ background: '#1e293b', color: '#38bdf8' }}>Aberta</option>
+                          <option value="Producao" style={{ background: '#1e293b', color: '#fbbf24' }}>Produção</option>
+                          <option value="Suspensa" style={{ background: '#1e293b', color: '#f87171' }}>Suspensa</option>
+                          <option value="Concluida" style={{ background: '#1e293b', color: '#34d399' }}>Concluída</option>
+                        </select>
+                      </td>
+
+                      {/* Ações */}
+                      <td style={{ textAlign: 'right' }}>
+                        <div style={{ display: 'inline-flex', gap: '6px' }}>
+                          <button
+                            type="button"
+                            onClick={() => navigate(`/ordem-servico/${item.Numero}/${item.ProjetoID}/revisao-tecnica`)}
+                            className="btn btn-secondary"
+                            style={{ 
+                              padding: '5px 8px', 
+                              fontSize: '0.78rem', 
+                              color: '#10b981', 
+                              background: 'rgba(16, 185, 129, 0.1)', 
+                              border: '1px solid rgba(16, 185, 129, 0.4)' 
+                            }}
+                            title="Revisão Técnica (Checklist, Imagens, Materiais e Gantt)"
+                          >
+                            <ClipboardCheck size={13} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleAbrirEditar(item)}
+                            className="btn btn-secondary"
+                            style={{ padding: '5px 8px', fontSize: '0.78rem' }}
+                            title="Editar detalhes da ordem de serviço"
+                          >
+                            <Edit2 size={13} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => navigate(`/orcamentos/${item.Numero}/projetos`)}
+                            className="btn btn-secondary"
+                            style={{ padding: '5px 8px', fontSize: '0.78rem', color: 'var(--accent-cyan)' }}
+                            title="Ver projetos do orçamento"
+                          >
+                            <ExternalLink size={13} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleExcluir(item)}
+                            className="btn btn-danger"
+                            style={{ padding: '5px 8px', fontSize: '0.78rem' }}
+                            title="Excluir ordem de serviço"
+                          >
+                            <Trash2 size={13} />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
               )}
             </tbody>
           </table>
         </div>
       </div>
 
-      {/* SEÇÃO: Diagrama de Gantt de Ordens de Serviço */}
-      <div className="glass-card" style={{ marginTop: '32px', padding: '24px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '20px' }}>
-          <Calendar size={22} style={{ color: 'var(--accent-cyan)' }} />
-          <h2 style={{ fontSize: '1.25rem', fontWeight: 700, margin: 0 }}>Diagrama de Gantt das OSs</h2>
-        </div>
-
-        {scheduledOsList.length === 0 ? (
-          <div style={{ padding: '40px 20px', textAlign: 'center', color: 'var(--text-muted)', background: 'rgba(0,0,0,0.1)', borderRadius: 'var(--border-radius-md)', border: '1px dashed var(--glass-border)' }}>
-            Nenhuma Ordem de Serviço agendada com cronograma para exibição.
-          </div>
-        ) : (
-          <div style={{ display: 'flex', border: '1px solid var(--glass-border)', borderRadius: 'var(--border-radius-lg)', background: 'rgba(0, 0, 0, 0.15)', overflow: 'hidden' }}>
-            {/* Left sticky panel */}
-            <div style={{ width: '250px', flexShrink: 0, borderRight: '1px solid var(--glass-border)', background: 'rgba(255, 255, 255, 0.02)' }}>
-              <div style={{ height: '40px', display: 'flex', alignItems: 'center', padding: '0 16px', fontWeight: 700, fontSize: '0.8rem', color: 'var(--text-muted)', borderBottom: '1px solid var(--glass-border)', background: 'rgba(255, 255, 255, 0.03)' }}>
-                Ordem de Serviço
-              </div>
-              <div>
-                {scheduledOsList.map(os => (
-                  <div key={os.numero} style={{ height: `${generalRowHeight}px`, display: 'flex', flexDirection: 'column', justifyContent: 'center', padding: '0 16px', borderBottom: '1px solid rgba(255, 255, 255, 0.03)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={`OS #${os.numero} - ${os.cliente_nome}`}>
-                    <div style={{ fontWeight: 700, fontSize: '0.9rem' }}>#{os.numero}</div>
-                    <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textOverflow: 'ellipsis', overflow: 'hidden' }}>{os.cliente_nome || 'Sem cliente'}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div style={{ flexGrow: 1, overflowX: 'auto' }}>
-              <div style={{ width: `${generalLayout.totalWidth}px`, position: 'relative' }}>
-                {/* Vertical current time indicator line */}
-                {(() => {
-                  const now = new Date();
-                  const currentNowPx = getPixelOffsetForDate(now, generalLayout.dayLayouts);
-                  const isNowInTimeline = currentNowPx >= 0 && currentNowPx <= generalLayout.totalWidth;
-                  if (!isNowInTimeline) return null;
-                  return (
-                    <div
-                      style={{
-                        position: 'absolute',
-                        top: 0,
-                        bottom: 0,
-                        left: `${currentNowPx}px`,
-                        width: '2px',
-                        background: '#22c55e',
-                        boxShadow: '0 0 8px #22c55e',
-                        zIndex: 100,
-                        pointerEvents: 'none'
-                      }}
-                    >
-                      {/* Circle glowing indicator at the top of the header */}
-                      <div
-                        style={{
-                          position: 'absolute',
-                          top: 0,
-                          left: '50%',
-                          transform: 'translateX(-50%)',
-                          width: '8px',
-                          height: '8px',
-                          borderRadius: '50%',
-                          background: '#22c55e',
-                          boxShadow: '0 0 12px #22c55e'
-                        }}
-                      />
-                    </div>
-                  );
-                })()}
-
-                {/* Timeline Header Days */}
-                <div className="gantt-timeline-header" style={{ width: '100%' }}>
-                  {generalLayout.dayLayouts.map((item, index) => {
-                    return (
-                      <div
-                        key={index}
-                        className="gantt-header-cell"
-                        style={{
-                          width: `${item.width}px`,
-                          background: item.isWeekend ? 'rgba(255, 255, 255, 0.05)' : 'transparent',
-                          color: item.isWeekend ? 'var(--text-muted)' : 'var(--text-main)',
-                          padding: 0,
-                          height: '52px',
-                          display: 'flex',
-                          flexDirection: 'column',
-                          justifyContent: 'stretch'
-                        }}
-                      >
-                        {/* Top Line: Date */}
-                        <div style={{
-                          flex: 1,
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          borderBottom: '1px solid rgba(255, 255, 255, 0.1)',
-                          fontSize: '0.75rem',
-                          fontWeight: 700
-                        }}>
-                          {formatarDiaGantt(item.date)}
-                        </div>
-                        
-                        {/* Bottom Line: Hours */}
-                        <div style={{
-                          flex: 1,
-                          display: 'flex',
-                          background: 'rgba(0, 0, 0, 0.1)'
-                        }}>
-                          {item.isWeekend ? (
-                            <div style={{
-                              width: '100%',
-                              display: 'flex',
-                              alignItems: 'center',
-                              justifyContent: 'center',
-                              fontSize: '0.6rem',
-                              color: 'rgba(255, 255, 255, 0.3)',
-                              fontWeight: 600
-                            }}>
-                              Folga
-                            </div>
-                          ) : (
-                            ['1', '2', '3', '4', '5', '6', '7', '8'].map((hr, hrIdx) => (
-                              <div
-                                key={hrIdx}
-                                style={{
-                                  flex: 1,
-                                  display: 'flex',
-                                  alignItems: 'center',
-                                  justifyContent: 'center',
-                                  fontSize: '0.55rem',
-                                  color: 'rgba(255, 255, 255, 0.5)',
-                                  borderRight: hrIdx === 7 ? 'none' : '1px solid rgba(255, 255, 255, 0.05)'
-                                }}
-                              >
-                                {hr}
-                              </div>
-                            ))
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-
-                {/* Gantt Rows and Bars */}
-                <div className="gantt-rows-container" style={{ width: `${generalLayout.totalWidth}px`, height: `${scheduledOsList.length * generalRowHeight}px` }}>
-                  {/* Vertical Grid Lines */}
-                  <div className="gantt-grid-lines">
-                    {generalLayout.dayLayouts.map((item, index) => {
-                      return (
-                        <div
-                          key={index}
-                          className="gantt-grid-line"
-                          style={{
-                            width: `${item.width}px`,
-                            background: item.isWeekend ? 'rgba(255, 255, 255, 0.03)' : 'transparent',
-                            display: 'flex'
-                          }}
-                        >
-                          {!item.isWeekend && Array.from({ length: 8 }).map((_, colIdx) => (
-                            <div
-                              key={colIdx}
-                              style={{
-                                flex: 1,
-                                height: '100%',
-                                borderRight: colIdx === 7 ? 'none' : '1px solid rgba(255, 255, 255, 0.03)'
-                              }}
-                            />
-                          ))}
-                        </div>
-                      );
-                    })}
-                  </div>
-
-                  {/* Bars Rendering */}
-                  {scheduledOsList.map((os, index) => {
-                    const start = new Date(os.data_inicio);
-                    const end = new Date(os.data_fim);
-                    const elapsedHours = Math.max(1, (end - start) / (1000 * 60 * 60));
-
-                    const tasksSorted = os.cronograma ? [...os.cronograma].sort((a, b) => (a.sequencia || 0) - (b.sequencia || 0)) : [];
-                    
-                    // Fallback task if cronograma is empty
-                    const tasksToRender = tasksSorted.length > 0 ? tasksSorted : [{
-                      id: `fallback-${os.numero}`,
-                      titulo: os.ambiente || 'Sem ambiente',
-                      data_inicio: os.data_inicio,
-                      tempo: elapsedHours
-                    }];
-
-                    // Absolute position for the total duration label
-                    const labelLeftPx = getPixelOffsetForDate(end, generalLayout.dayLayouts) + 8;
-
-                    return (
-                      <div key={os.numero} className="gantt-row" style={{ width: '100%' }}>
-                        {/* Daily segments for each task, skipping weekends */}
-                        {tasksToRender.flatMap((t, idx) => {
-                          const tStart = new Date(t.data_inicio);
-                          const tEnd = t.id.startsWith('fallback-') ? end : somarHorasUteis(tStart, parseInt(t.tempo) || 1);
-                          
-                          // Monochromatic solid HSL sequence from light blue to dark indigo/violet
-                          const n = tasksToRender.length;
-                          const hue = n > 1 ? 195 + (idx * (35 / (n - 1))) : 195;
-                          const saturation = n > 1 ? 85 - (idx * (15 / (n - 1))) : 80;
-                          const lightness = n > 1 ? 62 - (idx * (20 / (n - 1))) : 52;
-                          const solidColor = `hsl(${hue}, ${saturation}%, ${lightness}%)`;
-
-                          return generalTimelineDays.map((d, dIdx) => {
-                            const isWeekend = d.getDay() === 0 || d.getDay() === 6;
-                            if (isWeekend) return null;
-
-                            const dayStart = new Date(d);
-                            dayStart.setHours(0, 0, 0, 0);
-                            const dayEnd = new Date(d);
-                            dayEnd.setHours(23, 59, 59, 999);
-
-                            const overlapStart = new Date(Math.max(tStart.getTime(), dayStart.getTime()));
-                            const overlapEnd = new Date(Math.min(tEnd.getTime(), dayEnd.getTime()));
-
-                            if (overlapStart < overlapEnd) {
-                              const leftPx = getPixelOffsetForDate(overlapStart, generalLayout.dayLayouts);
-                              const widthPx = getPixelOffsetForDate(overlapEnd, generalLayout.dayLayouts) - leftPx;
-
-                              return (
-                                <div
-                                  key={`${t.id}-${dIdx}`}
-                                  className="gantt-bar-wrapper"
-                                  style={{
-                                    left: `${leftPx}px`,
-                                    width: `${widthPx}px`
-                                  }}
-                                >
-                                  <div
-                                    className="gantt-bar"
-                                    style={{
-                                      padding: 0,
-                                      display: 'flex',
-                                      overflow: 'hidden',
-                                      background: solidColor,
-                                      boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
-                                      borderColor: 'rgba(255,255,255,0.15)',
-                                      position: 'relative',
-                                      borderRadius: 0,
-                                      alignItems: 'center',
-                                      justifyContent: 'center',
-                                      fontSize: '0.7rem'
-                                    }}
-                                    title={`${t.titulo}: ${t.tempo}h`}
-                                  >
-                                    {t.titulo} ({t.tempo}h)
-                                  </div>
-                                </div>
-                              );
-                            }
-                            return null;
-                          });
-                        })}
-
-                        {/* Single overall duration label positioned after the end of OS */}
-                        <span
-                          className="gantt-bar-label"
-                          style={{
-                            position: 'absolute',
-                            left: `${labelLeftPx}px`,
-                            whiteSpace: 'nowrap'
-                          }}
-                        >
-                          {Math.round(elapsedHours / 24 * 10) / 10} dias
-                        </span>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* MODAL: Nova OS */}
-      {showModal && (
-        <div className="modal-overlay">
-          <div className="glass-card modal-content" style={{ maxWidth: '500px', width: '95%' }}>
+      {/* MODAL DE EDIÇÃO */}
+      {modalEditar.isOpen && modalEditar.item && (
+        <div className="modal-overlay" style={{ zIndex: 1200 }}>
+          <div className="glass-card modal-content" style={{ maxWidth: '560px', width: '92%' }}>
             <div className="modal-header">
-              <h3 className="modal-title">Abertura de Ordem de Serviço</h3>
-              <button onClick={() => setShowModal(false)} className="close-btn">&times;</button>
+              <h3 className="modal-title" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <Edit2 size={18} color="var(--accent-cyan)" />
+                Editar Ordem de Serviço #{modalEditar.item.Numero} (Item {modalEditar.item.ProjetoID})
+              </h3>
+              <button
+                type="button"
+                onClick={() => setModalEditar({ isOpen: false, item: null, ProjetoID: '1', NomeProjeto: '', Tempo: '', DataCriacao: '', DataConclusao: '', Situacao: 'Aberta', Responsavel: '' })}
+                className="close-btn"
+              >
+                &times;
+              </button>
             </div>
-            <form onSubmit={handleCreateOs}>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', marginTop: '16px' }}>
+
+            <form onSubmit={handleSalvarEditar} style={{ marginTop: '16px' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '14px', marginBottom: '14px' }}>
                 <div className="form-group">
-                  <label className="form-label">Quantidade de Chapas (QtcChapas)</label>
-                  <input 
-                    type="number"
-                    min="0"
-                    placeholder="Digite a quantidade de chapas..."
-                    className="form-control" 
-                    value={qtdChapas} 
-                    onChange={(e) => setQtdChapas(e.target.value)} 
-                    required
+                  <label className="form-label">Nome do Projeto / Ambiente</label>
+                  <input
+                    type="text"
+                    value={modalEditar.NomeProjeto}
+                    onChange={e => setModalEditar(prev => ({ ...prev, NomeProjeto: e.target.value }))}
+                    className="form-control"
+                    placeholder="Ex: Cozinha Planejada"
                   />
                 </div>
-
                 <div className="form-group">
-                  <label className="form-label">Quantidade de Especiais (QtdEspeciais)</label>
-                  <input 
+                  <label className="form-label">Tempo (minutos)</label>
+                  <input
                     type="number"
-                    min="0"
-                    placeholder="Digite a quantidade de peças especiais..."
-                    className="form-control" 
-                    value={qtdEspeciais} 
-                    onChange={(e) => setQtdEspeciais(e.target.value)} 
-                    required
-                  />
-                </div>
-
-                <div className="form-group">
-                  <label className="form-label">Quantidade de Caixas (QtdCaixa)</label>
-                  <input 
-                    type="number"
-                    min="0"
-                    placeholder="Digite a quantidade de caixas..."
-                    className="form-control" 
-                    value={qtdCaixa} 
-                    onChange={(e) => setQtdCaixa(e.target.value)} 
-                    required
+                    value={modalEditar.Tempo}
+                    onChange={e => setModalEditar(prev => ({ ...prev, Tempo: e.target.value }))}
+                    className="form-control"
+                    placeholder="Ex: 120"
                   />
                 </div>
               </div>
 
-              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', marginTop: '28px' }}>
-                <button type="button" onClick={() => setShowModal(false)} className="btn btn-secondary">Cancelar</button>
-                <button type="submit" className="btn btn-primary">Salvar e Criar OS</button>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px', marginBottom: '14px' }}>
+                <div className="form-group">
+                  <label className="form-label">Data de Criação</label>
+                  <input
+                    type="date"
+                    value={modalEditar.DataCriacao}
+                    onChange={e => setModalEditar(prev => ({ ...prev, DataCriacao: e.target.value }))}
+                    className="form-control"
+                    required
+                  />
+                </div>
+
+                <div className="form-group">
+                  <label className="form-label">Data de Conclusão</label>
+                  <input
+                    type="date"
+                    value={modalEditar.DataConclusao}
+                    onChange={e => setModalEditar(prev => ({ ...prev, DataConclusao: e.target.value }))}
+                    className="form-control"
+                  />
+                </div>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px', marginBottom: '16px' }}>
+                <div className="form-group">
+                  <label className="form-label">Situação *</label>
+                  <select
+                    value={modalEditar.Situacao}
+                    onChange={e => setModalEditar(prev => ({ ...prev, Situacao: e.target.value }))}
+                    className="form-control"
+                    required
+                  >
+                    <option value="Aberta">Aberta</option>
+                    <option value="Producao">Produção</option>
+                    <option value="Suspensa">Suspensa</option>
+                    <option value="Concluida">Concluída</option>
+                  </select>
+                </div>
+
+                <div className="form-group">
+                  <label className="form-label">Responsável (Login)</label>
+                  <input
+                    type="text"
+                    maxLength={20}
+                    value={modalEditar.Responsavel}
+                    onChange={e => setModalEditar(prev => ({ ...prev, Responsavel: e.target.value }))}
+                    className="form-control"
+                    placeholder="Ex: admin"
+                  />
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '20px' }}>
+                <button
+                  type="button"
+                  onClick={() => setModalEditar({ isOpen: false, item: null, ProjetoID: '1', NomeProjeto: '', Tempo: '', DataCriacao: '', DataConclusao: '', Situacao: 'Aberta', Responsavel: '' })}
+                  className="btn btn-secondary"
+                  disabled={salvando}
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={salvando}
+                  className="btn btn-primary"
+                  style={{ fontWeight: 700 }}
+                >
+                  {salvando ? 'Salvando...' : 'Salvar Alterações'}
+                </button>
               </div>
             </form>
           </div>
         </div>
       )}
 
-      {/* MODAL: Importar Etiquetas PDF para OS Existente */}
-      {showUploadModal && (
-        <div className="modal-overlay">
-          <div className="glass-card modal-content" style={{ maxWidth: '600px', width: '95%' }}>
+      {/* MODAL DE NOVA ORDEM */}
+      {modalNovo.isOpen && (
+        <div className="modal-overlay" style={{ zIndex: 1200 }}>
+          <div className="glass-card modal-content" style={{ maxWidth: '560px', width: '92%' }}>
             <div className="modal-header">
               <h3 className="modal-title" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <Upload size={20} />
-                <span>Importar Etiquetas (OS #{uploadOsNumero})</span>
+                <Plus size={18} color="var(--accent-cyan)" />
+                Nova Ordem de Serviço
               </h3>
-              <button onClick={() => setShowUploadModal(false)} className="close-btn">&times;</button>
-            </div>
-
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', marginTop: '16px' }}>
-              {/* Upload Box */}
-              <div 
-                style={{
-                  border: '2px dashed rgba(255,255,255,0.15)',
-                  borderRadius: '12px',
-                  padding: '30px 20px',
-                  textAlign: 'center',
-                  background: 'rgba(255, 255, 255, 0.02)',
-                  cursor: 'pointer',
-                  transition: 'all 0.2s',
-                  position: 'relative'
-                }}
-                onClick={() => document.getElementById('os-upload-file-input').click()}
+              <button
+                type="button"
+                onClick={() => setModalNovo({ isOpen: false, Numero: '', ProjetoID: '1', NomeProjeto: '', Tempo: '', DataCriacao: new Date().toISOString().split('T')[0], DataConclusao: '', Situacao: 'Aberta', Responsavel: '' })}
+                className="close-btn"
               >
-                <input 
-                  type="file" 
-                  id="os-upload-file-input" 
-                  accept=".pdf" 
-                  style={{ display: 'none' }}
-                  onChange={handleUploadFileChange}
-                />
-                <Upload size={36} style={{ marginBottom: '12px', color: '#3b82f6' }} />
-                {uploadFile ? (
-                  <div>
-                    <p style={{ fontWeight: 600, fontSize: '1rem', color: '#fff' }}>{uploadFile.name}</p>
-                    <p style={{ fontSize: '0.8rem', color: 'rgba(255,255,255,0.5)', marginTop: '4px' }}>
-                      {(uploadFile.size / 1024).toFixed(1)} KB
-                    </p>
-                  </div>
-                ) : (
-                  <div>
-                    <p style={{ fontWeight: 600, fontSize: '1.05rem' }}>Clique para selecionar o PDF de etiquetas</p>
-                    <p style={{ fontSize: '0.8rem', color: 'rgba(255,255,255,0.4)', marginTop: '4px' }}>
-                      O sistema lerá as etiquetas e atualizará os dados da OS #{uploadOsNumero} automaticamente.
-                    </p>
-                  </div>
-                )}
+                &times;
+              </button>
+            </div>
+
+            <form onSubmit={handleSalvarNovo} style={{ marginTop: '16px' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '14px', marginBottom: '14px' }}>
+                <div className="form-group">
+                  <label className="form-label">Número da Ordem (Orçamento / OS)</label>
+                  <input
+                    type="number"
+                    value={modalNovo.Numero}
+                    onChange={e => setModalNovo(prev => ({ ...prev, Numero: e.target.value }))}
+                    className="form-control"
+                    placeholder="Deixe em branco para auto..."
+                  />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">ProjetoID / Item (1-999) *</label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="999"
+                    value={modalNovo.ProjetoID}
+                    onChange={e => setModalNovo(prev => ({ ...prev, ProjetoID: e.target.value }))}
+                    className="form-control"
+                    required
+                  />
+                </div>
               </div>
 
-              {/* Action Buttons */}
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div>
-                  {uploadError && (
-                    <div style={{ color: '#ef4444', fontSize: '0.9rem', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                      <span>⚠️ {uploadError}</span>
-                    </div>
-                  )}
+              <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '14px', marginBottom: '14px' }}>
+                <div className="form-group">
+                  <label className="form-label">Nome do Projeto / Ambiente</label>
+                  <input
+                    type="text"
+                    value={modalNovo.NomeProjeto}
+                    onChange={e => setModalNovo(prev => ({ ...prev, NomeProjeto: e.target.value }))}
+                    className="form-control"
+                    placeholder="Ex: Cozinha Planejada"
+                  />
                 </div>
-                <div className="flex-gap-2">
-                  <button 
-                    type="button" 
-                    onClick={() => setShowUploadModal(false)} 
-                    className="btn btn-secondary"
-                    style={{ padding: '8px 16px' }}
+                <div className="form-group">
+                  <label className="form-label">Tempo (minutos)</label>
+                  <input
+                    type="number"
+                    value={modalNovo.Tempo}
+                    onChange={e => setModalNovo(prev => ({ ...prev, Tempo: e.target.value }))}
+                    className="form-control"
+                    placeholder="Ex: 120"
+                  />
+                </div>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px', marginBottom: '14px' }}>
+                <div className="form-group">
+                  <label className="form-label">Data de Criação *</label>
+                  <input
+                    type="date"
+                    value={modalNovo.DataCriacao}
+                    onChange={e => setModalNovo(prev => ({ ...prev, DataCriacao: e.target.value }))}
+                    className="form-control"
+                    required
+                  />
+                </div>
+
+                <div className="form-group">
+                  <label className="form-label">Data de Conclusão</label>
+                  <input
+                    type="date"
+                    value={modalNovo.DataConclusao}
+                    onChange={e => setModalNovo(prev => ({ ...prev, DataConclusao: e.target.value }))}
+                    className="form-control"
+                  />
+                </div>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px', marginBottom: '16px' }}>
+                <div className="form-group">
+                  <label className="form-label">Situação *</label>
+                  <select
+                    value={modalNovo.Situacao}
+                    onChange={e => setModalNovo(prev => ({ ...prev, Situacao: e.target.value }))}
+                    className="form-control"
+                    required
                   >
-                    Cancelar
-                  </button>
-                  <button 
-                    type="button" 
-                    onClick={handleUploadPdf} 
-                    className="btn btn-primary"
-                    style={{ padding: '8px 20px', display: 'flex', alignItems: 'center', gap: '8px' }}
-                    disabled={!uploadFile || uploading}
-                  >
-                    {uploading ? (
-                      <span>Processando...</span>
-                    ) : (
-                      <>
-                        <Upload size={16} />
-                        <span>Importar Peças</span>
-                      </>
-                    )}
-                  </button>
+                    <option value="Aberta">Aberta</option>
+                    <option value="Producao">Produção</option>
+                    <option value="Suspensa">Suspensa</option>
+                    <option value="Concluida">Concluída</option>
+                  </select>
                 </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
 
-      {/* MODAL: Importar Chapas PDF para OS Existente */}
-      {showImportChapasModal && (
-        <div className="modal-overlay">
-          <div className="glass-card modal-content" style={{ maxWidth: '750px', width: '95%' }}>
-            <div className="modal-header">
-              <h3 className="modal-title" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <Upload size={20} />
-                <span>Importar Chapas (OS #{importChapasOsNumero})</span>
-              </h3>
-              <button onClick={() => setShowImportChapasModal(false)} className="close-btn">&times;</button>
-            </div>
-
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', marginTop: '16px' }}>
-              {/* Upload Box */}
-              <div 
-                style={{
-                  border: '2px dashed rgba(255,255,255,0.15)',
-                  borderRadius: '12px',
-                  padding: '30px 20px',
-                  textAlign: 'center',
-                  background: 'rgba(255, 255, 255, 0.02)',
-                  cursor: 'pointer',
-                  transition: 'all 0.2s',
-                  position: 'relative'
-                }}
-                onClick={() => document.getElementById('chapas-upload-file-input').click()}
-              >
-                <input 
-                  type="file" 
-                  id="chapas-upload-file-input" 
-                  accept=".pdf" 
-                  style={{ display: 'none' }}
-                  onChange={handleImportChapasFileChange}
-                />
-                <Upload size={36} style={{ marginBottom: '12px', color: '#10b981' }} />
-                {importChapasFile ? (
-                  <div>
-                    <p style={{ fontWeight: 600, fontSize: '1rem', color: '#fff' }}>{importChapasFile.name}</p>
-                    <p style={{ fontSize: '0.8rem', color: 'rgba(255,255,255,0.5)', marginTop: '4px' }}>
-                      {(importChapasFile.size / 1024).toFixed(1)} KB
-                    </p>
-                  </div>
-                ) : (
-                  <div>
-                    <p style={{ fontWeight: 600, fontSize: '1.05rem' }}>Clique para selecionar o PDF de chapas</p>
-                    <p style={{ fontSize: '0.8rem', color: 'rgba(255,255,255,0.4)', marginTop: '4px' }}>
-                      O sistema lerá o arquivo ListaChapas.pdf e atualizará os dados da OS #{importChapasOsNumero} automaticamente.
-                    </p>
-                  </div>
-                )}
-              </div>
-
-              {/* Collapsible Chapas List */}
-              {importedChapasList.length > 0 && (
-                <div style={{ marginTop: '16px', borderTop: '1px solid var(--glass-border)', paddingTop: '20px' }}>
-                  <h4 style={{ marginBottom: '14px', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <ClipboardList size={18} style={{ color: 'var(--accent-cyan)' }} />
-                    <span>Chapas Importadas ({importedChapasList.length})</span>
-                  </h4>
-                  <div style={{ maxHeight: '380px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '12px', paddingRight: '4px' }}>
-                    {importedChapasList.map((chapa) => {
-                      const isExpanded = expandedChapas[chapa.id];
-                      return (
-                        <div 
-                          key={chapa.id} 
-                          style={{ 
-                            background: 'rgba(255, 255, 255, 0.02)', 
-                            border: '1px solid var(--glass-border)', 
-                            borderRadius: '10px', 
-                            overflow: 'hidden',
-                            boxShadow: '0 4px 6px rgba(0,0,0,0.1)'
-                          }}
-                        >
-                          {/* Chapa Header (Click to toggle) */}
-                          <div 
-                            style={{ 
-                              padding: '14px 20px', 
-                              cursor: 'pointer', 
-                              display: 'flex', 
-                              alignItems: 'center', 
-                              justifyContent: 'space-between',
-                              background: isExpanded ? 'rgba(255, 255, 255, 0.05)' : 'transparent',
-                              transition: 'background 0.2s',
-                              borderBottom: isExpanded ? '1px solid var(--glass-border)' : 'none'
-                            }}
-                            onClick={() => toggleChapaExpand(chapa.id)}
-                          >
-                            <div>
-                              <div style={{ fontWeight: 600, fontSize: '1rem', color: '#fff', letterSpacing: '0.3px' }}>
-                                {chapa.chapa} — <span style={{ color: 'var(--accent-cyan)' }}>{chapa.acabamento}</span>
-                              </div>
-                              <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '4px', display: 'flex', gap: '16px' }}>
-                                <span><strong>Projeto:</strong> {chapa.projeto}</span>
-                                <span><strong>Cliente:</strong> {chapa.cliente}</span>
-                                <span><strong>Peças:</strong> {chapa.pecas?.length || 0}</span>
-                              </div>
-                            </div>
-                            <div style={{ color: 'var(--text-muted)' }}>
-                              {isExpanded ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
-                            </div>
-                          </div>
-
-                          {/* Pieces List (Accordion child) */}
-                          {isExpanded && (
-                            <div style={{ padding: '14px 20px', background: 'rgba(0, 0, 0, 0.15)', borderTop: '1px solid var(--glass-border)' }}>
-                              {(!chapa.pecas || chapa.pecas.length === 0) ? (
-                                <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>Nenhuma peça nesta chapa.</div>
-                              ) : (
-                                <div className="table-container" style={{ margin: 0 }}>
-                                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem', textAlign: 'left' }}>
-                                    <thead>
-                                      <tr>
-                                        <th style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.1)', color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', fontSize: '0.75rem', letterSpacing: '0.5px' }}>Item</th>
-                                        <th style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.1)', color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', fontSize: '0.75rem', letterSpacing: '0.5px' }}>Descrição</th>
-                                        <th style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.1)', color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', fontSize: '0.75rem', letterSpacing: '0.5px' }}>Dimensão</th>
-                                        <th style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.1)', color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', fontSize: '0.75rem', letterSpacing: '0.5px' }}>Descrição do Pai</th>
-                                      </tr>
-                                    </thead>
-                                    <tbody>
-                                      {chapa.pecas.map((peca) => (
-                                        <tr key={peca.id} style={{ borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
-                                          <td style={{ padding: '10px 12px', fontWeight: 700, color: 'var(--text-main)', lineHeight: '1.4' }}>{peca.item}</td>
-                                          <td style={{ padding: '10px 12px', color: 'var(--text-main)', lineHeight: '1.4' }}>{peca.descricao}</td>
-                                          <td style={{ padding: '10px 12px', color: 'var(--text-main)', lineHeight: '1.4' }}>{peca.dimensao}</td>
-                                          <td style={{ padding: '10px 12px', color: 'var(--text-main)', lineHeight: '1.4' }}>{peca.descricao_pai}</td>
-                                        </tr>
-                                      ))}
-                                    </tbody>
-                                  </table>
-                                </div>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-
-              {/* Action Buttons */}
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div>
-                  {importChapasError && (
-                    <div style={{ color: '#ef4444', fontSize: '0.9rem', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                      <span>⚠️ {importChapasError}</span>
-                    </div>
-                  )}
-                </div>
-                <div className="flex-gap-2">
-                  <button 
-                    type="button" 
-                    onClick={() => setShowImportChapasModal(false)} 
-                    className="btn btn-secondary"
-                    style={{ padding: '8px 16px' }}
-                  >
-                    Cancelar
-                  </button>
-                  <button 
-                    type="button" 
-                    onClick={handleImportChapasPdf} 
-                    className="btn btn-primary"
-                    style={{ padding: '8px 20px', display: 'flex', alignItems: 'center', gap: '8px' }}
-                    disabled={!importChapasFile || importingChapas}
-                  >
-                    {importingChapas ? (
-                      <span>Processando...</span>
-                    ) : (
-                      <>
-                        <Upload size={16} />
-                        <span>Importar Chapas</span>
-                      </>
-                    )}
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* MODAL: Detalhes / Gerenciamento de OS */}
-      {showDetailModal && selectedOs && (
-        <div className="modal-overlay">
-          <div className="glass-card modal-content" style={{ maxWidth: '800px' }}>
-            <div className="modal-header">
-              <h3 className="modal-title">Gerenciar OS #{selectedOs.numero}</h3>
-              <button onClick={() => setShowDetailModal(false)} className="close-btn">&times;</button>
-            </div>
-            
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px', marginBottom: '24px' }}>
-              <div>
-                {isEditingOs ? (
-                  <>
-                    <div className="form-group" style={{ marginBottom: '12px' }}>
-                      <label className="form-label" style={{ marginBottom: '4px' }}>Cliente</label>
-                      <input 
-                        type="text" 
-                        className="form-control" 
-                        value={editCliente} 
-                        onChange={(e) => setEditCliente(e.target.value)}
-                        placeholder="Nome do cliente"
-                        required
-                      />
-                    </div>
-                    <div className="form-group" style={{ marginBottom: '12px' }}>
-                      <label className="form-label" style={{ marginBottom: '4px' }}>Nome do Ambiente</label>
-                      <input 
-                        type="text" 
-                        className="form-control" 
-                        value={editAmbiente} 
-                        onChange={(e) => setEditAmbiente(e.target.value)} 
-                        placeholder="Ex: Cozinha Industrial, Sala de Reunião"
-                      />
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <div style={{ marginBottom: '8px' }}><span style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>Cliente: </span><strong>{selectedOs.cliente_nome}</strong></div>
-                    <div style={{ marginBottom: '8px' }}><span style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>Ambiente: </span><strong>{selectedOs.ambiente || 'Não informado'}</strong></div>
-                  </>
-                )}
-                <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginTop: '8px' }}>
-                  Abertura: <strong style={{ color: 'var(--text-body)' }}>{new Date(selectedOs.data_abertura).toLocaleString('pt-BR')}</strong>
-                  {selectedOs.data_fechamento && (
-                    <div style={{ marginTop: '4px' }}>
-                      Fechamento: <strong style={{ color: 'var(--text-body)' }}>{new Date(selectedOs.data_fechamento).toLocaleString('pt-BR')}</strong>
-                    </div>
-                  )}
+                <div className="form-group">
+                  <label className="form-label">Responsável (Login)</label>
+                  <input
+                    type="text"
+                    maxLength={20}
+                    value={modalNovo.Responsavel}
+                    onChange={e => setModalNovo(prev => ({ ...prev, Responsavel: e.target.value }))}
+                    className="form-control"
+                    placeholder="Ex: admin"
+                  />
                 </div>
               </div>
 
-              <div>
-                {isEditingOs ? (
-                  <div className="form-group" style={{ marginBottom: '12px' }}>
-                    <label className="form-label" style={{ marginBottom: '4px' }}>Situação da OS</label>
-                    <select 
-                      className="form-control" 
-                      value={editStatus} 
-                      onChange={(e) => setEditStatus(e.target.value)}
-                    >
-                      <option value="Aberta">Aberta</option>
-                      <option value="EmProducao">Em Produção</option>
-                      <option value="Suspensa">Suspensa</option>
-                      <option value="Fechada">Fechada (Concluir)</option>
-                    </select>
-                  </div>
-                ) : (
-                  <div style={{ marginBottom: '12px' }}><span style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>Situação da OS: </span><strong className={`badge ${getStatusBadgeClass(selectedOs.status)}`}>{selectedOs.status === 'EmProducao' ? 'Em Produção' : selectedOs.status}</strong></div>
-                )}
-                <div style={{ display: 'flex', gap: '20px', marginTop: '20px' }}>
-                  <div><span style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>Tempo Previsto: </span><br/><strong style={{ fontSize: '1.1rem', color: 'var(--accent-cyan)' }}>{calculateTotalPredictedTime()} min</strong></div>
-                  <div><span style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>Tempo Real Acumulado: </span><br/><strong style={{ fontSize: '1.1rem', color: 'var(--color-success)' }}>{selectedOs.tempo_real || 0} min</strong></div>
-                </div>
-              </div>
-            </div>
-
-            <h4 style={{ marginBottom: '12px', fontWeight: 600, borderTop: '1px solid var(--glass-border)', paddingTop: '16px' }}>Serviços & Tempos de Produção</h4>
-            
-            <div className="table-container" style={{ maxHeight: '280px', overflowY: 'auto' }}>
-              <table className="data-table">
-                <thead>
-                  <tr>
-                    <th>Serviço</th>
-                    <th>Qtd</th>
-                    <th>Forma de Medição</th>
-                    <th>Previsto</th>
-                    <th>Realizado</th>
-                    <th style={{ textAlign: 'right' }}>Ação Cronômetro</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {selectedOs.servicos && selectedOs.servicos.map((item) => (
-                    <tr key={item.servico_id}>
-                      <td style={{ fontWeight: 600 }}>{item.servico_nome}</td>
-                      <td>
-                        {isEditingOs ? (
-                          <input 
-                            type="number" 
-                            min="1" 
-                            className="form-control" 
-                            style={{ width: '80px', padding: '4px 8px' }}
-                            value={editQuantidades[item.servico_id] || ''} 
-                            onChange={(e) => setEditQuantidades({
-                              ...editQuantidades,
-                              [item.servico_id]: e.target.value
-                            })}
-                          />
-                        ) : (
-                          item.quantidade
-                        )}
-                      </td>
-                      <td style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>{getUnidadeLabel(item.unidade)}</td>
-                      <td>{getRowPredictedTime(item)} min</td>
-                      <td>
-                        {item.tempo_real !== null ? (
-                          <span style={{ color: 'var(--color-success)', fontWeight: 600 }}>{item.tempo_real} min</span>
-                        ) : item.data_inicio ? (
-                          <span style={{ color: 'var(--color-warning)', animation: 'pulse 1.5s infinite' }}>⚡ Em andamento</span>
-                        ) : (
-                          <span style={{ color: 'var(--text-muted)' }}>Pendente</span>
-                        )}
-                      </td>
-                      <td style={{ textAlign: 'right' }}>
-                        {!item.data_fim ? (
-                          <button 
-                            type="button" 
-                            onClick={() => handleServiceAction(item.servico_id, 'end')} 
-                            className="btn btn-primary" 
-                            style={{ padding: '4px 10px', fontSize: '0.75rem' }}
-                            disabled={selectedOs.status === 'Fechada'}
-                          >
-                            Concluir
-                          </button>
-                        ) : (
-                          <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Concluído</span>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '24px', borderTop: '1px solid var(--glass-border)', paddingTop: '16px' }}>
-              {isEditingOs ? (
-                <>
-                  <button 
-                    type="button" 
-                    onClick={() => {
-                      setEditClienteId(selectedOs.cliente_id || '');
-                      setEditAmbiente(selectedOs.ambiente || '');
-                      setEditStatus(selectedOs.status || 'Aberta');
-                      // Reset quantities too
-                      const initialQuantities = {};
-                      if (selectedOs.servicos) {
-                        selectedOs.servicos.forEach(item => {
-                          initialQuantities[item.servico_id] = item.quantidade;
-                        });
-                      }
-                      setEditQuantidades(initialQuantities);
-                      setIsEditingOs(false);
-                    }} 
-                    className="btn btn-secondary"
-                  >
-                    Cancelar
-                  </button>
-                  <button type="button" onClick={handleSaveChanges} className="btn btn-primary">Salvar Alterações</button>
-                </>
-              ) : (
-                <>
-                  <button 
-                    type="button" 
-                    onClick={() => handleDeleteOs(selectedOs.numero)} 
-                    className="btn btn-danger"
-                  >
-                    Excluir OS
-                  </button>
-                  <div className="flex-gap-2">
-                    <button type="button" onClick={() => { setShowDetailModal(false); navigate(`/ordens-servico/${selectedOs.numero}/cronograma`); }} className="btn btn-secondary" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                      <Calendar size={14} />
-                      <span>Cronograma</span>
-                    </button>
-                    <button type="button" onClick={() => setShowDetailModal(false)} className="btn btn-secondary">Fechar Janela</button>
-                    <button type="button" onClick={() => setIsEditingOs(true)} className="btn btn-primary">Alterar Dados</button>
-                  </div>
-                </>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* MODAL: Visualizar Peças da OS */}
-      {showImportModal && (
-        <div className="modal-overlay">
-          <div className="glass-card modal-content" style={{ maxWidth: '850px', width: '95%' }}>
-            <div className="modal-header">
-              <h3 className="modal-title" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <ClipboardList size={20} style={{ color: '#3b82f6' }} />
-                <span>Peças da OS #{importOsNumero}</span>
-              </h3>
-              <button onClick={() => setShowImportModal(false)} className="close-btn">&times;</button>
-            </div>
-
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', marginTop: '16px' }}>
-              <div>
-                <h4 style={{ marginBottom: '16px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <span>Peças Registradas (Agrupadas por Módulo)</span>
-                  <span style={{ fontSize: '0.8rem', background: 'rgba(255,255,255,0.1)', padding: '2px 8px', borderRadius: '10px' }}>
-                    {importedPecas.length}
-                  </span>
-                </h4>
-                
-                <div style={{ maxHeight: '420px', overflowY: 'auto', paddingRight: '4px' }}>
-                  {importedPecas.length === 0 ? (
-                    <div style={{ textAlign: 'center', color: 'rgba(255,255,255,0.4)', padding: '30px', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '8px' }}>
-                      Nenhuma peça importada para esta ordem de serviço.
-                    </div>
-                  ) : (() => {
-                    // Group pieces by modulo
-                    const grouped = {};
-                    importedPecas.forEach(p => {
-                      const modName = p.modulo || 'Sem Módulo';
-                      if (!grouped[modName]) {
-                        grouped[modName] = [];
-                      }
-                      grouped[modName].push(p);
-                    });
-
-                    return Object.keys(grouped).map(modName => {
-                      const piecesInMod = grouped[modName];
-                      const isExpanded = !!expandedModules[modName];
-                      return (
-                        <div key={modName} style={{ marginBottom: '12px', border: '1px solid rgba(255,255,255,0.07)', borderRadius: '8px', overflow: 'hidden', background: 'rgba(255,255,255,0.01)' }}>
-                          {/* Header Accordion */}
-                          <div 
-                            onClick={() => {
-                              setExpandedModules(prev => ({
-                                ...prev,
-                                [modName]: !prev[modName]
-                              }));
-                            }}
-                            style={{
-                              background: isExpanded ? 'rgba(59, 130, 246, 0.08)' : 'rgba(255,255,255,0.02)',
-                              padding: '12px 16px',
-                              display: 'flex',
-                              justifyContent: 'space-between',
-                              alignItems: 'center',
-                              cursor: 'pointer',
-                              transition: 'all 0.2s',
-                              fontWeight: 600,
-                              borderBottom: isExpanded ? '1px solid rgba(255,255,255,0.07)' : 'none'
-                            }}
-                          >
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                              <span style={{ color: isExpanded ? '#60a5fa' : '#fff', fontSize: '0.95rem' }}>{modName}</span>
-                              <span style={{ fontSize: '0.75rem', background: 'rgba(255,255,255,0.1)', padding: '2px 8px', borderRadius: '10px', fontWeight: 500, color: 'rgba(255,255,255,0.7)' }}>
-                                {piecesInMod.length} {piecesInMod.length === 1 ? 'peça' : 'peças'}
-                              </span>
-                            </div>
-                            <div style={{ color: isExpanded ? '#60a5fa' : 'rgba(255,255,255,0.5)' }}>
-                              {isExpanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-                            </div>
-                          </div>
-
-                          {/* Nested Table */}
-                          {isExpanded && (
-                            <div className="table-container" style={{ margin: 0, border: 'none', borderRadius: 0 }}>
-                              <table className="data-table" style={{ margin: 0, width: '100%' }}>
-                                <thead>
-                                  <tr style={{ background: 'rgba(0,0,0,0.15)' }}>
-                                    <th>Cód. Item</th>
-                                    <th>Peça (Descrição)</th>
-                                    <th>Posição/Etiqueta</th>
-                                    <th>Dimensões</th>
-                                    <th>Chapa (Material/Espessura)</th>
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  {piecesInMod.map((p, idx) => (
-                                    <tr key={p.id || idx}>
-                                      <td style={{ fontWeight: 700, color: '#3b82f6' }}>{p.codigo}</td>
-                                      <td style={{ fontWeight: 500 }}>{p.descricao}</td>
-                                      <td style={{ textAlign: 'center', fontWeight: 600 }}>{p.posicao}</td>
-                                      <td>{p.dimensoes}</td>
-                                      <td style={{ fontSize: '0.9rem', color: 'rgba(255,255,255,0.7)' }}>{p.chapa}</td>
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    });
-                  })()}
-                </div>
-              </div>
-
-              {/* Botões de Ação */}
-              <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '10px' }}>
-                <button 
-                  type="button" 
-                  onClick={() => setShowImportModal(false)} 
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '20px' }}>
+                <button
+                  type="button"
+                  onClick={() => setModalNovo({ isOpen: false, Numero: '', ProjetoID: '1', NomeProjeto: '', Tempo: '', DataCriacao: new Date().toISOString().split('T')[0], DataConclusao: '', Situacao: 'Aberta', Responsavel: '' })}
                   className="btn btn-secondary"
-                  style={{ padding: '8px 24px' }}
+                  disabled={salvando}
                 >
-                  Fechar
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={salvando}
+                  className="btn btn-primary"
+                  style={{ fontWeight: 700 }}
+                >
+                  {salvando ? 'Criando...' : 'Criar Ordem'}
                 </button>
               </div>
-            </div>
+            </form>
           </div>
         </div>
       )}
@@ -8325,706 +7729,1657 @@ function OrdensServico() {
   );
 }
 
-// 4.7. Cronograma & Diagrama de Gantt Page
-function CronogramaOS() {
-  const { numero } = useParams();
-  const navigate = useNavigate();
-  const [os, setOs] = useState(null);
-  const [tasks, setTasks] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState('');
 
-  const fetchOsData = async () => {
-    setLoading(true);
+// ============================================================================
+// 4.7.6. TELA DE REVISÃO TÉCNICA DA ORDEM DE SERVIÇO
+// ============================================================================
+const TAREFAS_REVISAO_PADRAO = [
+  {
+    key: 'a',
+    letra: 'a',
+    titulo: 'Duplicar o projeto no Promob (Versão Fábrica)',
+    descricao: 'Duplicar o projeto no promob e gerar a versão Fábrica, sem alterar a versão comercial',
+    detalhes: 'Garante que a versão comercial aprovada com o cliente permaneça intacta para referência futura e orçamentária.',
+    icone: Copy
+  },
+  {
+    key: 'b',
+    letra: 'b',
+    titulo: 'Fazer os ajustes necessários no projeto',
+    descricao: 'Fazer os ajustes necessários no projeto (folgas, fitas de borda, usinagens e furações)',
+    detalhes: 'Adequação técnica de espessuras de chapas, recuos de rodapés, folgas de portas/gavetas e sentidos de veios/fibras.',
+    icone: Wrench
+  },
+  {
+    key: 'c',
+    letra: 'c',
+    titulo: 'Gerar o Projeto Executivo',
+    descricao: 'Gerar o Projeto Executivo - com as plantas, vistas, cotas, etc',
+    detalhes: 'Emissão de plantas baixas, vistas explodidas, cortes técnicos, detalhamento de pontos elétricos/hidráulicos e cotas de instalação.',
+    icone: FileText,
+    acaoTab: 'imagens'
+  },
+  {
+    key: 'd',
+    letra: 'd',
+    titulo: 'Gerar os arquivos Gcode',
+    descricao: 'Gerar os arquivos Gcode para o centro de usinagem e furação CNC',
+    detalhes: 'Exportação dos programas numéricos (CNC/Gcode) para as estações de usinagem, furação e nesting do parque fabril.',
+    icone: Factory
+  },
+  {
+    key: 'e',
+    letra: 'e',
+    titulo: 'Imprimir as etiquetas das peças',
+    descricao: 'Imprimir as etiquetas com códigos de barras para cada peça cortada',
+    detalhes: 'Etiquetas para identificação individual no corte, fitamento, usinagem e agrupamento de peças.',
+    icone: Printer
+  },
+  {
+    key: 'f',
+    letra: 'f',
+    titulo: 'Gerar etiquetas dos módulos e itens especiais',
+    descricao: 'Gerar as etiquetas dos módulos e itens especiais para expedição e montagem',
+    detalhes: 'Etiquetagem de volumes embalados, caixas montadas, gavetas e ferragens especiais destinadas à montagem no cliente.',
+    icone: Package
+  },
+  {
+    key: 'g',
+    letra: 'g',
+    titulo: 'Gerar a lista de materiais do projeto',
+    descricao: 'Gerar a lista de materiais que serão utilizados no projeto',
+    detalhes: 'Quantitativo completo de chapas MDF, fitas de borda, ferragens, corrediças, dobradiças, parafusos e insumos.',
+    icone: ClipboardList,
+    acaoRelatorio: true
+  },
+  {
+    key: 'h',
+    letra: 'h',
+    titulo: 'Gerar ordem de compra e enviar para fornecedores',
+    descricao: 'Gerar ordem de compra e enviar para fornecedores (MDF, ferragens, vidros)',
+    detalhes: 'Emissão de solicitações de compra e pedidos de fornecimento de MDFs, vidros, perfis e ferragens não estocadas.',
+    icone: DollarSign
+  },
+  {
+    key: 'i',
+    letra: 'i',
+    titulo: 'Importar no sistema de gestão e atualizar quantidades',
+    descricao: 'Importar arquivos no sistema de gestão e atualizar as quantidades informadas na fase comercial',
+    detalhes: 'Sincronizar a lista final de corte e peças gerada pela engenharia com as ordens e estoques do sistema de gestão.',
+    icone: Upload,
+    acaoRota: '/importar'
+  }
+];
+
+function RevisaoTecnica() {
+  const { numero, projetoId } = useParams();
+  const navigate = useNavigate();
+
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [successMsg, setSuccessMsg] = useState('');
+  
+  const [ordemServico, setOrdemServico] = useState(null);
+  const [orcamento, setOrcamento] = useState(null);
+  const [projeto, setProjeto] = useState(null);
+  const [projetos, setProjetos] = useState([]);
+  const [anexos, setAnexos] = useState([]);
+  const [itens, setItens] = useState([]);
+  const [checklistMap, setChecklistMap] = useState({});
+  const [observacoesMap, setObservacoesMap] = useState({});
+
+  const [activeTab, setActiveTab] = useState('checklist'); // 'checklist', 'imagens', 'gantt', 'materiais'
+  const [showGanttModal, setShowGanttModal] = useState(false);
+  const [previewImage, setPreviewImage] = useState(null);
+  const [uploadingAnexo, setUploadingAnexo] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+  const [salvandoChecklist, setSalvandoChecklist] = useState(false);
+  const [filtroMaterial, setFiltroMaterial] = useState('');
+
+  const targetProjId = projetoId || (ordemServico ? ordemServico.ProjetoID : 1);
+
+  // Carregar todos os dados da Revisão Técnica do backend
+  const carregarDados = async (overrideProjId = null) => {
     try {
-      const res = await api.get(`/ordens-servico/${numero}`);
-      setOs(res.data);
-      if (res.data.cronograma) {
-        // Sync durations of service tasks with os.servicos tempo_previsto
-        const syncedTasks = res.data.cronograma.map(t => {
-          const match = t.id.match(/^task-(\d+)-/);
-          if (match) {
-            const servicoId = parseInt(match[1]);
-            const sItem = res.data.servicos?.find(s => s.servico_id === servicoId);
-            if (sItem) {
-              const serviceDuration = Math.max(1, Math.ceil(sItem.tempo_previsto / 60));
-              return { ...t, tempo: serviceDuration };
-            }
-          }
-          return t;
-        });
-        setTasks(syncedTasks);
-      } else {
-        setTasks([]);
-      }
-      setLoading(false);
+      setLoading(true);
+      setError('');
+      const pid = overrideProjId !== null ? overrideProjId : targetProjId;
+      const res = await api.get(`/ordem-servico/${numero}/${pid}/revisao`);
+      const { ordemServico: os, orcamento: orc, projeto: proj, projetos: projs, anexos: anx, itens: its, checklist: chk } = res.data;
+
+      setOrdemServico(os);
+      setOrcamento(orc);
+      setProjeto(proj);
+      setProjetos(projs || []);
+      setAnexos(anx || []);
+      setItens(its || []);
+
+      // Montar mapa do checklist a partir dos dados do banco
+      const map = {};
+      const obsMap = {};
+      TAREFAS_REVISAO_PADRAO.forEach(t => {
+        const found = (chk || []).find(c => c.tarefa_key === t.key);
+        if (found) {
+          map[t.key] = {
+            concluido: found.concluido === 1 || found.concluido === true,
+            data_conclusao: found.data_conclusao,
+            responsavel: found.responsavel,
+            observacao: found.observacao || ''
+          };
+          obsMap[t.key] = found.observacao || '';
+        } else {
+          map[t.key] = {
+            concluido: false,
+            data_conclusao: null,
+            responsavel: null,
+            observacao: ''
+          };
+          obsMap[t.key] = '';
+        }
+      });
+      setChecklistMap(map);
+      setObservacoesMap(obsMap);
     } catch (err) {
-      setError('Erro ao carregar detalhes da ordem de serviço.');
+      console.error('Erro ao carregar dados da revisão técnica:', err);
+      setError(err.response?.data?.error || 'Não foi possível carregar os dados da revisão técnica.');
+    } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchOsData();
-  }, [numero]);
+    carregarDados();
+  }, [numero, projetoId]);
 
-  const resolverCronograma = (tasksList) => {
-    const list = tasksList.map(t => ({ ...t }));
-    let changed = true;
-    let iterations = 0;
-    
-    while (changed && iterations < 100) {
-      changed = false;
-      iterations++;
-      
-      for (let i = 0; i < list.length; i++) {
-        const task = list[i];
-        const predId = task.dependencies[0];
-        if (predId) {
-          const pred = list.find(t => t.id === predId);
-          if (pred) {
-            const predStart = new Date(pred.data_inicio);
-            const predEnd = somarHorasUteis(predStart, parseInt(pred.tempo) || 1);
-            
-            const pad = (num) => String(num).padStart(2, '0');
-            const predEndStr = `${predEnd.getFullYear()}-${pad(predEnd.getMonth() + 1)}-${pad(predEnd.getDate())}T${pad(predEnd.getHours())}:${pad(predEnd.getMinutes())}`;
-            
-            if (task.data_inicio !== predEndStr) {
-              task.data_inicio = predEndStr;
-              changed = true;
-            }
-          }
-        }
-      }
-    }
-    return list;
-  };
-
-  const handleTaskChange = (id, field, value) => {
-    const updated = tasks.map(t => {
-      if (t.id === id) {
-        let val = value;
-        if (field === 'tempo') {
-          if (/^task-\d+-/.test(id)) {
-            return t; // do not allow editing tempo for service tasks
-          }
-          val = Math.max(1, parseInt(value) || 1);
-        } else if (field === 'sequencia') {
-          val = parseInt(value) || 0;
-        }
-        return { ...t, [field]: val };
-      }
-      return t;
-    });
-    const resolved = resolverCronograma(updated);
-    setTasks(resolved);
-  };
-
-  const handlePredecessorChange = (id, predId) => {
-    const updated = tasks.map(t => {
-      if (t.id === id) {
-        return {
-          ...t,
-          dependencies: predId ? [predId] : []
-        };
-      }
-      return t;
-    });
-    const resolved = resolverCronograma(updated);
-    setTasks(resolved);
-  };
-
-  const handleAddTask = () => {
-    const now = avancarProximaHoraUtil(new Date());
-    const pad = (num) => String(num).padStart(2, '0');
-    const nowStr = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}`;
-    
-    const maxSeq = tasks.reduce((max, t) => Math.max(max, t.sequencia || 0), 0);
-    const newTask = {
-      id: `task-manual-${Date.now()}`,
-      titulo: `Nova Tarefa ${tasks.length + 1}`,
-      data_inicio: nowStr,
-      tempo: 2,
-      sequencia: maxSeq + 10,
-      dependencies: []
-    };
-    setTasks([...tasks, newTask]);
-  };
-
-  const handleRemoveTask = (id) => {
-    const updated = tasks
-      .filter(t => t.id !== id)
-      .map(t => ({
-        ...t,
-        dependencies: t.dependencies.filter(depId => depId !== id)
-      }));
-    const resolved = resolverCronograma(updated);
-    setTasks(resolved);
-  };
-
-  const handleGerarWBS = () => {
-    if (!os || !os.servicos || os.servicos.length === 0) {
-      alert('Esta OS não possui serviços cadastrados para gerar o cronograma.');
-      return;
-    }
-
-    if (tasks.length > 0 && !window.confirm('Isto irá sobrescrever o cronograma atual. Deseja continuar?')) {
-      return;
-    }
-
-    const novasTarefas = os.servicos
-      .sort((a, b) => (a.sequencia || 0) - (b.sequencia || 0))
-      .map((item, index) => {
-        const duration = Math.max(1, Math.ceil(item.tempo_previsto / 60)); // duration in hours
-
-        const task = {
-          id: `task-${item.servico_id}-${index}`,
-          titulo: item.servico_nome,
-          data_inicio: '', 
-          tempo: duration,
-          sequencia: item.sequencia !== undefined ? item.sequencia : (index + 1) * 10,
-          dependencies: []
-        };
-        return task;
-      });
-
-    // Schedule sequentially in useful hours starting from OS data_inicio (or today if null)
-    let currentDate = os && os.data_inicio ? new Date(os.data_inicio) : new Date();
-    if (!os || !os.data_inicio) {
-      currentDate.setHours(8, 0, 0, 0);
-    }
-    currentDate = avancarProximaHoraUtil(currentDate);
-
-    novasTarefas.forEach((task, index) => {
-      const pad = (num) => String(num).padStart(2, '0');
-      const startStr = `${currentDate.getFullYear()}-${pad(currentDate.getMonth() + 1)}-${pad(currentDate.getDate())}T${pad(currentDate.getHours())}:${pad(currentDate.getMinutes())}`;
-      task.data_inicio = startStr;
-
-      if (index > 0) {
-        task.dependencies = [novasTarefas[index - 1].id];
-      }
-
-      currentDate = somarHorasUteis(currentDate, task.tempo);
-    });
-
-    setTasks(novasTarefas);
-  };
-
-  const handleSaveCronograma = async () => {
-    setSaving(true);
-    setError('');
+  // Alterar situação da ordem de serviço
+  const handleAlterarSituacao = async (novaSituacao) => {
     try {
-      await api.put(`/ordens-servico/${numero}`, {
-        cronograma: tasks
+      await api.put(`/ordem-servico/${numero}/${targetProjId}/situacao`, {
+        Situacao: novaSituacao
       });
-      alert('Cronograma salvo com sucesso!');
-      fetchOsData();
+      setOrdemServico(prev => prev ? { ...prev, Situacao: novaSituacao } : null);
+      setSuccessMsg(`Situação da Ordem alterada para "${novaSituacao}" com sucesso!`);
+      setTimeout(() => setSuccessMsg(''), 3500);
     } catch (err) {
-      setError('Erro ao salvar o cronograma.');
-    } finally {
-      setSaving(false);
+      console.error('Erro ao alterar situação da OS:', err);
+      alert('Erro ao atualizar situação da Ordem de Serviço.');
     }
   };
 
-  // Sort tasks by sequence ascending
-  const sortedTasks = [...tasks].sort((a, b) => {
-    const seqA = a.sequencia !== undefined ? parseInt(a.sequencia) : 0;
-    const seqB = b.sequencia !== undefined ? parseInt(b.sequencia) : 0;
-    return seqA - seqB;
+  // Alternar conclusão de uma tarefa do checklist
+  const handleToggleTarefa = async (tarefaKey) => {
+    const atual = checklistMap[tarefaKey] || { concluido: false };
+    const novoConcluido = !atual.concluido;
+    const nowIso = new Date().toISOString();
+    
+    const novoItem = {
+      ...atual,
+      concluido: novoConcluido,
+      data_conclusao: novoConcluido ? nowIso : null,
+      responsavel: novoConcluido ? (ordemServico?.Responsavel || 'Usuário') : null,
+      observacao: observacoesMap[tarefaKey] || ''
+    };
+
+    const novoMap = { ...checklistMap, [tarefaKey]: novoItem };
+    setChecklistMap(novoMap);
+
+    // Salvar no backend
+    try {
+      setSalvandoChecklist(true);
+      const tarefaDef = TAREFAS_REVISAO_PADRAO.find(t => t.key === tarefaKey);
+      await api.put(`/ordem-servico/${numero}/${targetProjId}/checklist`, {
+        tarefa_key: tarefaKey,
+        tarefa_texto: tarefaDef?.descricao || '',
+        concluido: novoConcluido ? 1 : 0,
+        data_conclusao: novoConcluido ? nowIso : null,
+        responsavel: novoItem.responsavel,
+        observacao: novoItem.observacao
+      });
+
+      // Verificar se agora todas as 9 estão concluídas
+      const totalConcluidas = Object.values(novoMap).filter(t => t.concluido).length;
+      if (totalConcluidas === TAREFAS_REVISAO_PADRAO.length && novoConcluido) {
+        setSuccessMsg('🎉 Todas as 9 tarefas da Revisão Técnica foram concluídas com sucesso!');
+      } else {
+        setSuccessMsg(`Tarefa "${tarefaDef?.letra}) ${tarefaDef?.titulo}" ${novoConcluido ? 'concluída' : 'reaberta'}!`);
+      }
+      setTimeout(() => setSuccessMsg(''), 3000);
+    } catch (err) {
+      console.error('Erro ao salvar tarefa do checklist:', err);
+      // Reverter estado se falhar
+      setChecklistMap(checklistMap);
+      alert('Erro ao sincronizar tarefa com o servidor.');
+    } finally {
+      setSalvandoChecklist(false);
+    }
+  };
+
+  // Salvar anotação/observação de uma tarefa
+  const handleSalvarObservacao = async (tarefaKey) => {
+    const tarefaDef = TAREFAS_REVISAO_PADRAO.find(t => t.key === tarefaKey);
+    const item = checklistMap[tarefaKey] || { concluido: false };
+    const obs = observacoesMap[tarefaKey] || '';
+
+    try {
+      setSalvandoChecklist(true);
+      await api.put(`/ordem-servico/${numero}/${targetProjId}/checklist`, {
+        tarefa_key: tarefaKey,
+        tarefa_texto: tarefaDef?.descricao || '',
+        concluido: item.concluido ? 1 : 0,
+        data_conclusao: item.data_conclusao,
+        responsavel: item.responsavel,
+        observacao: obs
+      });
+      setChecklistMap(prev => ({
+        ...prev,
+        [tarefaKey]: { ...prev[tarefaKey], observacao: obs }
+      }));
+      setSuccessMsg(`Anotação da tarefa "${tarefaDef?.letra})" salva com sucesso!`);
+      setTimeout(() => setSuccessMsg(''), 2500);
+    } catch (err) {
+      console.error('Erro ao salvar anotação:', err);
+      alert('Erro ao salvar anotação da tarefa.');
+    } finally {
+      setSalvandoChecklist(false);
+    }
+  };
+
+  // Marcar todas / desmarcar todas
+  const handleMarcarTodas = async (marcar) => {
+    const nowIso = new Date().toISOString();
+    const novoMap = {};
+    const payloadTarefas = [];
+
+    TAREFAS_REVISAO_PADRAO.forEach(t => {
+      const obs = observacoesMap[t.key] || '';
+      novoMap[t.key] = {
+        concluido: marcar,
+        data_conclusao: marcar ? nowIso : null,
+        responsavel: marcar ? (ordemServico?.Responsavel || 'Usuário') : null,
+        observacao: obs
+      };
+      payloadTarefas.push({
+        tarefa_key: t.key,
+        tarefa_texto: t.descricao,
+        concluido: marcar ? 1 : 0,
+        data_conclusao: marcar ? nowIso : null,
+        responsavel: marcar ? (ordemServico?.Responsavel || 'Usuário') : null,
+        observacao: obs
+      });
+    });
+
+    setChecklistMap(novoMap);
+
+    try {
+      setSalvandoChecklist(true);
+      await api.put(`/ordem-servico/${numero}/${targetProjId}/checklist`, {
+        tarefas: payloadTarefas
+      });
+      setSuccessMsg(marcar ? 'Todas as tarefas foram marcadas como concluídas!' : 'Todas as tarefas foram desmarcadas.');
+      setTimeout(() => setSuccessMsg(''), 3000);
+    } catch (err) {
+      console.error('Erro ao atualizar todas as tarefas:', err);
+      setChecklistMap(checklistMap);
+      alert('Erro ao atualizar checklist no servidor.');
+    } finally {
+      setSalvandoChecklist(false);
+    }
+  };
+
+  // Upload de novos arquivos/anexos técnicos diretamente desta tela
+  const handleFileUpload = async (files) => {
+    if (!projeto?.id || !files || files.length === 0) return;
+    setUploadingAnexo(true);
+    setError('');
+
+    const formData = new FormData();
+    for (let i = 0; i < files.length; i++) {
+      formData.append('arquivos', files[i]);
+    }
+
+    try {
+      const res = await api.post(`/projetos/${projeto.id}/anexos`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      });
+      const count = Array.isArray(res.data) ? res.data.length : 1;
+      setSuccessMsg(`${count} ${count === 1 ? 'imagem/arquivo anexado' : 'imagens/arquivos anexados'} com sucesso!`);
+      // Recarregar anexos do projeto
+      const anxRes = await api.get(`/projetos/${projeto.id}/anexos`);
+      setAnexos(Array.isArray(anxRes.data) ? anxRes.data : []);
+      setTimeout(() => setSuccessMsg(''), 3000);
+    } catch (err) {
+      console.error('Erro no upload de anexos:', err);
+      setError(err.response?.data?.error || 'Erro ao anexar arquivo ao projeto.');
+    } finally {
+      setUploadingAnexo(false);
+    }
+  };
+
+  // Helpers de formatação
+  const formatDataBr = (dt) => {
+    if (!dt) return '-';
+    const str = String(dt).split('T')[0];
+    const parts = str.split('-');
+    if (parts.length === 3) return `${parts[2]}/${parts[1]}/${parts[0]}`;
+    return str;
+  };
+
+  const formatDataHoraBr = (dt) => {
+    if (!dt) return '-';
+    const d = new Date(dt);
+    return isNaN(d.getTime()) ? String(dt) : d.toLocaleString('pt-BR');
+  };
+
+  const formatMinutos = (min) => {
+    const m = parseInt(min, 10) || 0;
+    const h = Math.floor(m / 60);
+    const rem = m % 60;
+    if (h === 0) return `${rem} min`;
+    if (rem === 0) return `${h}h`;
+    return `${h}h ${rem}min (${m} min)`;
+  };
+
+  const formatCurrency = (val) => {
+    const num = parseFloat(val || 0);
+    return num.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+  };
+
+  // Cálculo de progresso do checklist
+  const totalTarefas = TAREFAS_REVISAO_PADRAO.length;
+  const concluidasCount = TAREFAS_REVISAO_PADRAO.filter(t => checklistMap[t.key]?.concluido).length;
+  const percConcluido = Math.round((concluidasCount / totalTarefas) * 100);
+
+  // Filtragem de imagens e outros anexos
+  const imagensAnexadas = anexos.filter(a => {
+    const ext = (a.nome_original?.split('.').pop() || '').toLowerCase();
+    const mime = (a.tipo_mime || '').toLowerCase();
+    return ['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg', 'bmp'].includes(ext) || mime.startsWith('image/');
+  });
+  const outrosAnexos = anexos.filter(a => !imagensAnexadas.includes(a));
+
+  // Filtragem e agrupamento de serviços para o Gantt
+  const servicosItens = itens.filter(i => {
+    if (i.MaterialTipo !== 'Serviço' && !i.MaterialReferencia?.startsWith('FAB.')) return false;
+    if (i.MaterialReferencia === 'FAB.MON.CLI' || i.MaterialReferencia === 'FAB.QTD.PCA') return false;
+    const desc = (i.MaterialDescricao || '').toLowerCase();
+    if (desc.includes('quantidade de peças') || desc.includes('qtd de peças')) return false;
+    return true;
+  }).map(i => {
+    const tempoUnit = parseInt(i.ProjetoItemTempo, 10) || 0;
+    const qtd = parseFloat(i.ProjetoItemQtd) || 0;
+    const duracao = parseInt(i.ProjetoItemDuracao, 10) || Math.round(tempoUnit * qtd);
+    return {
+      ...i,
+      tempoUnit,
+      qtd,
+      duracao,
+      sequencia: i.sequencia !== undefined && i.sequencia !== null ? i.sequencia : (i.servico_sequencia || 999)
+    };
+  }).sort((a, b) => a.sequencia - b.sequencia);
+
+  const tempoTotalServicosMin = servicosItens.reduce((sum, s) => sum + s.duracao, 0) || ordemServico?.Tempo || 0;
+
+  // Filtragem de produtos e materiais
+  const produtosItens = itens.filter(i => {
+    const isProd = i.MaterialTipo === 'Produto' || !i.MaterialTipo;
+    if (!isProd) return false;
+    if (!filtroMaterial) return true;
+    const term = filtroMaterial.toLowerCase();
+    return (i.MaterialDescricao || '').toLowerCase().includes(term) ||
+           (i.MaterialReferencia || '').toLowerCase().includes(term);
   });
 
-  // Math for Gantt Timeline plotting
-  const getTimelineRange = () => {
-    if (sortedTasks.length === 0) {
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      const range = [];
-      for (let i = 0; i < 7; i++) {
-        const d = new Date(today);
-        d.setDate(today.getDate() + i);
-        range.push(d);
-      }
-      return { range, startDate: today, totalDays: 7 };
+  const getSituacaoColor = (sit) => {
+    switch (sit) {
+      case 'Aberta': return { bg: 'rgba(56, 189, 248, 0.15)', color: '#38bdf8', border: 'rgba(56, 189, 248, 0.4)' };
+      case 'Producao': return { bg: 'rgba(251, 191, 36, 0.15)', color: '#fbbf24', border: 'rgba(251, 191, 36, 0.4)' };
+      case 'Suspensa': return { bg: 'rgba(248, 113, 113, 0.15)', color: '#f87171', border: 'rgba(248, 113, 113, 0.4)' };
+      case 'Concluida': return { bg: 'rgba(52, 211, 153, 0.15)', color: '#34d399', border: 'rgba(52, 211, 153, 0.4)' };
+      default: return { bg: 'rgba(148, 163, 184, 0.15)', color: '#94a3b8', border: 'rgba(148, 163, 184, 0.4)' };
     }
-
-    let minDate = null;
-    let maxDate = null;
-
-    sortedTasks.forEach(t => {
-      const start = new Date(t.data_inicio);
-      const end = somarHorasUteis(start, parseInt(t.tempo) || 1);
-      if (isNaN(start.getTime()) || isNaN(end.getTime())) return;
-
-      if (!minDate || start < minDate) minDate = start;
-      if (!maxDate || end > maxDate) maxDate = end;
-    });
-
-    if (!minDate || isNaN(minDate.getTime())) {
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      const range = [];
-      for (let i = 0; i < 7; i++) {
-        const d = new Date(today);
-        d.setDate(today.getDate() + i);
-        range.push(d);
-      }
-      return { range, startDate: today, totalDays: 7 };
-    }
-
-    const startDate = new Date(minDate);
-    startDate.setHours(0, 0, 0, 0);
-    startDate.setDate(startDate.getDate() - 1); // 1 day padding
-
-    const endDate = new Date(maxDate);
-    endDate.setHours(23, 59, 59, 999);
-    endDate.setDate(endDate.getDate() + 2); // 2 days padding
-
-    const diffTime = Math.abs(endDate - startDate);
-    const totalDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) || 1;
-
-    const finalDays = Math.min(30, totalDays);
-
-    const range = [];
-    for (let i = 0; i < finalDays; i++) {
-      const d = new Date(startDate);
-      d.setDate(startDate.getDate() + i);
-      range.push(d);
-    }
-
-    return { range, startDate, totalDays: finalDays };
   };
 
-  const { range: timelineDays, startDate: timelineStart, totalDays: timelineTotalDays } = getTimelineRange();
-  const dayWidth = 180; // Pixels per day in timeline grid (7.5px per hour)
-  const weekendWidth = 50;
-  const rowHeight = 56; 
-  const detailLayout = getTimelineLayout(timelineDays, dayWidth, weekendWidth);
+  const sitColor = getSituacaoColor(ordemServico?.Situacao);
 
-  if (loading) {
-    return <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '80vh' }}>Carregando Cronograma da OS...</div>;
+  if (loading && !ordemServico) {
+    return (
+      <div style={{ padding: '60px 20px', textAlign: 'center', color: 'var(--text-muted)' }}>
+        <RefreshCw size={36} className="animate-spin" style={{ margin: '0 auto 16px auto', display: 'block', color: 'var(--accent-cyan)' }} />
+        <h3 style={{ fontSize: '1.2rem', fontWeight: 600, color: 'var(--text-main)', marginBottom: '8px' }}>
+          Carregando Revisão Técnica...
+        </h3>
+        <p style={{ fontSize: '0.9rem' }}>Buscando dados da ordem #{numero}, projeto e itens...</p>
+      </div>
+    );
   }
 
   return (
-    <div>
-      <div className="content-header" style={{ marginBottom: '16px' }}>
-        <div>
-          <h1 className="page-title">Cronograma: OS #{numero}</h1>
-          <div style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginTop: '4px' }}>
-            Cliente: <strong style={{ color: 'var(--text-main)' }}>{os?.cliente_nome}</strong> | 
-            Ambiente: <strong style={{ color: 'var(--text-main)' }}>{os?.ambiente || 'Não informado'}</strong>
+    <div className="revisao-tecnica-page" style={{ paddingBottom: '40px' }}>
+      {/* Top Breadcrumb & Navigation */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '18px', flexWrap: 'wrap', gap: '12px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <button
+            type="button"
+            onClick={() => navigate('/ordem-servico')}
+            className="btn btn-secondary"
+            style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '7px 14px', fontSize: '0.86rem' }}
+            title="Voltar para a lista de Ordens de Serviço"
+          >
+            <ArrowLeft size={16} />
+            <span>Voltar para Ordens</span>
+          </button>
+          
+          <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+            <span>Ordens de Serviço</span>
+            <span style={{ margin: '0 6px' }}>/</span>
+            <span style={{ color: 'var(--accent-cyan)', fontWeight: 600 }}>OS #{numero} (Item {targetProjId})</span>
+            <span style={{ margin: '0 6px' }}>/</span>
+            <span style={{ color: 'var(--text-main)', fontWeight: 700 }}>Revisão Técnica</span>
           </div>
         </div>
-        <div className="flex-gap-2">
-          <button onClick={() => navigate('/ordens-servico')} className="btn btn-secondary">
-            Voltar para OS
+
+        {/* Quick Actions in Header */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <button
+            type="button"
+            onClick={() => imprimirMateriaisProjeto(orcamento, projeto, itens)}
+            className="btn btn-secondary"
+            style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '7px 14px', fontSize: '0.84rem' }}
+            title="Abrir e imprimir o Relatório de Materiais e Serviços do Projeto"
+          >
+            <Printer size={15} color="var(--accent-cyan)" />
+            <span>Relatório de Materiais</span>
           </button>
-          <button onClick={handleGerarWBS} className="btn btn-secondary" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-            ⚙️ Gerar do WBS
-          </button>
-          <button onClick={handleSaveCronograma} className="btn btn-primary" disabled={saving}>
-            {saving ? 'Salvando...' : 'Salvar Cronograma'}
+
+          <button
+            type="button"
+            onClick={() => setShowGanttModal(true)}
+            className="btn btn-secondary"
+            style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '7px 14px', fontSize: '0.84rem' }}
+            title="Abrir o Gráfico de Gantt Completo em Popup"
+          >
+            <Calendar size={15} color="#34d399" />
+            <span>Gráfico de Gantt</span>
           </button>
         </div>
       </div>
 
-      {error && <div className="alert alert-danger" style={{ marginBottom: '20px' }}>{error}</div>}
+      {/* Error / Success Notifications */}
+      {error && (
+        <div className="alert alert-danger" style={{ marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <AlertCircle size={18} />
+          <span>{error}</span>
+        </div>
+      )}
 
-      {tasks.length === 0 ? (
-        <div className="gantt-empty-state">
-          <Calendar size={48} style={{ color: 'var(--text-muted)', marginBottom: '16px' }} />
-          <h3>Nenhuma tarefa no cronograma</h3>
-          <p style={{ color: 'var(--text-muted)', marginBottom: '24px', maxWidth: '400px' }}>
-            Você pode adicionar tarefas manualmente ou gerar automaticamente a partir da lista de serviços previstos para esta ordem de serviço.
-          </p>
-          <div className="flex-gap-2">
-            <button onClick={handleAddTask} className="btn btn-secondary">
-              + Adicionar Tarefa Manual
-            </button>
-            <button onClick={handleGerarWBS} className="btn btn-primary">
-              ⚙️ Importar Serviços (WBS)
-            </button>
+      {successMsg && (
+        <div className="alert alert-success" style={{ marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px', background: 'rgba(16, 185, 129, 0.15)', border: '1px solid rgba(16, 185, 129, 0.4)', color: '#34d399' }}>
+          <CheckCircle2 size={18} />
+          <span>{successMsg}</span>
+        </div>
+      )}
+
+      {/* Main Header Card with Project & OS Info */}
+      <div className="glass-card" style={{ padding: '22px 24px', marginBottom: '22px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '16px' }}>
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+              <div style={{ 
+                width: '38px', 
+                height: '38px', 
+                borderRadius: '8px', 
+                background: 'rgba(16, 185, 129, 0.15)', 
+                border: '1px solid rgba(16, 185, 129, 0.35)', 
+                display: 'flex', 
+                alignItems: 'center', 
+                justifyContent: 'center',
+                color: '#10b981'
+              }}>
+                <ClipboardCheck size={22} />
+              </div>
+
+              <div>
+                <h1 style={{ margin: 0, fontSize: '1.45rem', fontWeight: 800, color: 'var(--text-main)', letterSpacing: '-0.02em' }}>
+                  Revisão Técnica & Preparação Fabril
+                </h1>
+                <div style={{ fontSize: '0.9rem', color: 'var(--text-muted)', marginTop: '2px' }}>
+                  Ambiente: <strong style={{ color: 'var(--text-main)' }}>{projeto?.nome || ordemServico?.NomeProjeto || 'Projeto Geral'}</strong> • Orçamento: <strong style={{ color: 'var(--accent-cyan)' }}>#{numero}</strong>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Quick Situation Changer */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)', fontWeight: 600 }}>Situação da OS:</span>
+            <select
+              value={ordemServico?.Situacao || 'Aberta'}
+              onChange={(e) => handleAlterarSituacao(e.target.value)}
+              style={{
+                background: sitColor.bg,
+                color: sitColor.color,
+                border: `1px solid ${sitColor.border}`,
+                borderRadius: '8px',
+                padding: '6px 14px',
+                fontSize: '0.88rem',
+                fontWeight: 700,
+                cursor: 'pointer',
+                outline: 'none'
+              }}
+              title="Clique para alterar a situação desta ordem de serviço"
+            >
+              <option value="Aberta" style={{ background: '#1e293b', color: '#38bdf8' }}>Aberta</option>
+              <option value="Producao" style={{ background: '#1e293b', color: '#fbbf24' }}>Produção</option>
+              <option value="Suspensa" style={{ background: '#1e293b', color: '#f87171' }}>Suspensa</option>
+              <option value="Concluida" style={{ background: '#1e293b', color: '#34d399' }}>Concluída</option>
+            </select>
           </div>
         </div>
-      ) : (
-        <div className="gantt-layout" style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
-          {/* TOP: Task Editor Table */}
-          <div className="glass-card gantt-editor-panel" style={{ width: '100%' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-              <h3 style={{ fontWeight: 700 }}>Editar Tarefas</h3>
-              <button onClick={handleAddTask} className="btn btn-primary" style={{ padding: '6px 12px', fontSize: '0.8rem' }}>
-                + Nova Tarefa
-              </button>
+
+        {/* Ambient/Project Switcher if Budget has multiple projects */}
+        {projetos && projetos.length > 1 && (
+          <div style={{ marginTop: '18px', paddingTop: '16px', borderTop: '1px solid var(--glass-border)', display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+            <span style={{ fontSize: '0.82rem', color: 'var(--text-muted)', fontWeight: 600 }}>Ambientes deste Orçamento:</span>
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+              {projetos.map((p, idx) => {
+                const itemNum = idx + 1;
+                const isSelected = p.id === projeto?.id || String(itemNum) === String(targetProjId);
+                return (
+                  <button
+                    key={p.id}
+                    type="button"
+                    onClick={() => {
+                      navigate(`/ordem-servico/${numero}/${itemNum}/revisao-tecnica`);
+                      carregarDados(itemNum);
+                    }}
+                    style={{
+                      background: isSelected ? 'var(--accent-cyan)' : 'rgba(255, 255, 255, 0.04)',
+                      color: isSelected ? '#000' : 'var(--text-main)',
+                      border: isSelected ? '1px solid var(--accent-cyan)' : '1px solid var(--glass-border)',
+                      padding: '4px 12px',
+                      borderRadius: '6px',
+                      fontSize: '0.8rem',
+                      fontWeight: isSelected ? 800 : 500,
+                      cursor: 'pointer',
+                      transition: 'all 0.15s ease'
+                    }}
+                  >
+                    Item {itemNum}: {p.nome}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* 4 Summary Cards (KPIs) */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(230px, 1fr))', gap: '16px', marginBottom: '22px' }}>
+        {/* Card 1: Checklist Progress */}
+        <div className="glass-card" style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+            <div>
+              <div style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                Check-list Técnico
+              </div>
+              <div style={{ fontSize: '1.45rem', fontWeight: 800, color: percConcluido === 100 ? '#34d399' : 'var(--text-main)', marginTop: '4px' }}>
+                {concluidasCount} / {totalTarefas} <span style={{ fontSize: '0.9rem', color: 'var(--text-muted)', fontWeight: 500 }}>tarefas</span>
+              </div>
+            </div>
+            <div style={{ 
+              width: '40px', 
+              height: '40px', 
+              borderRadius: '50%', 
+              background: percConcluido === 100 ? 'rgba(52, 211, 153, 0.15)' : 'rgba(56, 189, 248, 0.15)', 
+              display: 'flex', 
+              alignItems: 'center', 
+              justifyContent: 'center',
+              color: percConcluido === 100 ? '#34d399' : 'var(--accent-cyan)',
+              fontWeight: 800,
+              fontSize: '0.82rem'
+            }}>
+              {percConcluido}%
+            </div>
+          </div>
+          
+          <div style={{ marginTop: '12px' }}>
+            <div style={{ width: '100%', height: '6px', background: 'rgba(255, 255, 255, 0.08)', borderRadius: '3px', overflow: 'hidden' }}>
+              <div style={{ 
+                width: `${percConcluido}%`, 
+                height: '100%', 
+                background: percConcluido === 100 ? 'linear-gradient(90deg, #10b981, #34d399)' : 'linear-gradient(90deg, var(--accent-cyan), #38bdf8)', 
+                borderRadius: '3px',
+                transition: 'width 0.4s ease'
+              }} />
+            </div>
+            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '4px', textAlign: 'right' }}>
+              {percConcluido === 100 ? 'Revisão Concluída' : `${totalTarefas - concluidasCount} pendente(s)`}
+            </div>
+          </div>
+        </div>
+
+        {/* Card 2: Tempo Alocado (Gantt) */}
+        <div className="glass-card" style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+          <div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+              <div style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                Tempo de Fabricação
+              </div>
+              <Clock size={18} color="#fbbf24" />
+            </div>
+            <div style={{ fontSize: '1.45rem', fontWeight: 800, color: 'var(--text-main)', marginTop: '4px' }}>
+              {tempoTotalServicosMin} <span style={{ fontSize: '0.9rem', color: 'var(--text-muted)', fontWeight: 500 }}>minutos</span>
+            </div>
+          </div>
+
+          <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '10px' }}>
+            Aproximadamente <strong>{formatMinutos(tempoTotalServicosMin)}</strong> distribuídos em <strong>{servicosItens.length}</strong> etapas fabris.
+          </div>
+        </div>
+
+        {/* Card 3: Imagens e Documentos */}
+        <div className="glass-card" style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+          <div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+              <div style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                Imagens & Projetos
+              </div>
+              <ImageIcon size={18} color="var(--accent-cyan)" />
+            </div>
+            <div style={{ fontSize: '1.45rem', fontWeight: 800, color: 'var(--text-main)', marginTop: '4px' }}>
+              {imagensAnexadas.length} <span style={{ fontSize: '0.9rem', color: 'var(--text-muted)', fontWeight: 500 }}>{imagensAnexadas.length === 1 ? 'imagem' : 'imagens'}</span>
+            </div>
+          </div>
+
+          <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '10px' }}>
+            {outrosAnexos.length > 0 ? `+ ${outrosAnexos.length} documento(s) técnico(s) anexado(s)` : 'Plantas, vistas e imagens 3D'}
+          </div>
+        </div>
+
+        {/* Card 4: Cliente e Detalhes */}
+        <div className="glass-card" style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+          <div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+              <div style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                Cliente / Orçamento
+              </div>
+              <User size={18} color="#a78bfa" />
+            </div>
+            <div style={{ fontSize: '1.05rem', fontWeight: 700, color: 'var(--text-main)', marginTop: '4px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={orcamento?.cliente_nome}>
+              {orcamento?.cliente_nome || 'Sem cliente associado'}
+            </div>
+          </div>
+
+          <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '10px' }}>
+            {orcamento?.cliente_cidade ? `${orcamento.cliente_cidade} - ${orcamento.cliente_uf || ''}` : 'Cidade não informada'} • Total: <strong>{formatCurrency(orcamento?.total_venda)}</strong>
+          </div>
+        </div>
+      </div>
+
+      {/* Tabs Navigation */}
+      <div style={{ 
+        display: 'flex', 
+        gap: '4px', 
+        borderBottom: '1px solid var(--glass-border)', 
+        marginBottom: '20px',
+        overflowX: 'auto'
+      }}>
+        <button
+          type="button"
+          onClick={() => setActiveTab('checklist')}
+          style={{
+            padding: '12px 18px',
+            background: 'transparent',
+            border: 'none',
+            borderBottom: activeTab === 'checklist' ? '3px solid var(--accent-cyan)' : '3px solid transparent',
+            color: activeTab === 'checklist' ? 'var(--accent-cyan)' : 'var(--text-muted)',
+            fontWeight: activeTab === 'checklist' ? 800 : 600,
+            fontSize: '0.92rem',
+            cursor: 'pointer',
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '8px',
+            whiteSpace: 'nowrap'
+          }}
+        >
+          <ClipboardCheck size={17} />
+          <span>Check-list de Tarefas</span>
+          <span style={{ 
+            fontSize: '0.72rem', 
+            padding: '2px 7px', 
+            borderRadius: '9999px', 
+            background: percConcluido === 100 ? 'rgba(52, 211, 153, 0.2)' : 'rgba(56, 189, 248, 0.2)',
+            color: percConcluido === 100 ? '#34d399' : 'var(--accent-cyan)',
+            fontWeight: 700
+          }}>
+            {concluidasCount}/{totalTarefas}
+          </span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveTab('imagens')}
+          style={{
+            padding: '12px 18px',
+            background: 'transparent',
+            border: 'none',
+            borderBottom: activeTab === 'imagens' ? '3px solid var(--accent-cyan)' : '3px solid transparent',
+            color: activeTab === 'imagens' ? 'var(--accent-cyan)' : 'var(--text-muted)',
+            fontWeight: activeTab === 'imagens' ? 800 : 600,
+            fontSize: '0.92rem',
+            cursor: 'pointer',
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '8px',
+            whiteSpace: 'nowrap'
+          }}
+        >
+          <ImageIcon size={17} />
+          <span>Imagens Anexadas</span>
+          <span style={{ 
+            fontSize: '0.72rem', 
+            padding: '2px 7px', 
+            borderRadius: '9999px', 
+            background: 'rgba(255, 255, 255, 0.08)',
+            color: 'var(--text-main)',
+            fontWeight: 700
+          }}>
+            {imagensAnexadas.length}
+          </span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveTab('gantt')}
+          style={{
+            padding: '12px 18px',
+            background: 'transparent',
+            border: 'none',
+            borderBottom: activeTab === 'gantt' ? '3px solid var(--accent-cyan)' : '3px solid transparent',
+            color: activeTab === 'gantt' ? 'var(--accent-cyan)' : 'var(--text-muted)',
+            fontWeight: activeTab === 'gantt' ? 800 : 600,
+            fontSize: '0.92rem',
+            cursor: 'pointer',
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '8px',
+            whiteSpace: 'nowrap'
+          }}
+        >
+          <Calendar size={17} />
+          <span>Gráfico de Gantt – Alocação de Tempos</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveTab('materiais')}
+          style={{
+            padding: '12px 18px',
+            background: 'transparent',
+            border: 'none',
+            borderBottom: activeTab === 'materiais' ? '3px solid var(--accent-cyan)' : '3px solid transparent',
+            color: activeTab === 'materiais' ? 'var(--accent-cyan)' : 'var(--text-muted)',
+            fontWeight: activeTab === 'materiais' ? 800 : 600,
+            fontSize: '0.92rem',
+            cursor: 'pointer',
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '8px',
+            whiteSpace: 'nowrap'
+          }}
+        >
+          <ClipboardList size={17} />
+          <span>Relatório de Materiais e Serviços</span>
+          <span style={{ 
+            fontSize: '0.72rem', 
+            padding: '2px 7px', 
+            borderRadius: '9999px', 
+            background: 'rgba(255, 255, 255, 0.08)',
+            color: 'var(--text-main)',
+            fontWeight: 700
+          }}>
+            {itens.length}
+          </span>
+        </button>
+      </div>
+
+      {/* ==================================================================== */}
+      {/* ABA 1: CHECK-LIST DE TAREFAS TÉCNICAS */}
+      {/* ==================================================================== */}
+      {activeTab === 'checklist' && (
+        <div>
+          {/* Top Checklist Controls */}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', flexWrap: 'wrap', gap: '12px' }}>
+            <div style={{ fontSize: '0.92rem', color: 'var(--text-muted)' }}>
+              Assinale as etapas cumpridas durante a conferência técnica antes da liberação para produção fabril:
             </div>
             
-            <div className="gantt-tasks-table">
-              <table className="gantt-table">
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <button
+                type="button"
+                onClick={() => handleMarcarTodas(true)}
+                className="btn btn-secondary"
+                style={{ padding: '6px 12px', fontSize: '0.8rem' }}
+                disabled={salvandoChecklist}
+              >
+                Marcar Todas
+              </button>
+              <button
+                type="button"
+                onClick={() => handleMarcarTodas(false)}
+                className="btn btn-secondary"
+                style={{ padding: '6px 12px', fontSize: '0.8rem' }}
+                disabled={salvandoChecklist}
+              >
+                Desmarcar Todas
+              </button>
+            </div>
+          </div>
+
+          {/* Celebration banner when 100% complete */}
+          {percConcluido === 100 && (
+            <div style={{
+              background: 'linear-gradient(135deg, rgba(16, 185, 129, 0.2), rgba(6, 182, 212, 0.15))',
+              border: '1px solid rgba(16, 185, 129, 0.45)',
+              borderRadius: '10px',
+              padding: '16px 20px',
+              marginBottom: '20px',
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              flexWrap: 'wrap',
+              gap: '12px'
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                <CheckCircle2 size={28} color="#34d399" />
+                <div>
+                  <div style={{ fontWeight: 800, color: '#34d399', fontSize: '1rem' }}>
+                    Revisão Técnica Finalizada com Sucesso!
+                  </div>
+                  <div style={{ fontSize: '0.85rem', color: 'var(--text-main)', marginTop: '2px' }}>
+                    Todas as 9 etapas obrigatórias foram concluídas. Você pode avançar o status da Ordem de Serviço para <strong>Produção</strong>.
+                  </div>
+                </div>
+              </div>
+
+              {ordemServico?.Situacao !== 'Producao' && ordemServico?.Situacao !== 'Concluida' && (
+                <button
+                  type="button"
+                  onClick={() => handleAlterarSituacao('Producao')}
+                  className="btn btn-primary"
+                  style={{ fontWeight: 700, padding: '8px 16px', background: 'linear-gradient(135deg, #10b981, #059669)' }}
+                >
+                  Mudar para Produção
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* Tasks List Cards */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            {TAREFAS_REVISAO_PADRAO.map((t) => {
+              const itemState = checklistMap[t.key] || { concluido: false, observacao: '' };
+              const IconComp = t.icone || ClipboardList;
+              const isChecked = itemState.concluido;
+
+              return (
+                <div
+                  key={t.key}
+                  className="glass-card"
+                  style={{
+                    padding: '18px 20px',
+                    borderRadius: '10px',
+                    border: isChecked ? '1px solid rgba(16, 185, 129, 0.4)' : '1px solid var(--glass-border)',
+                    background: isChecked ? 'rgba(16, 185, 129, 0.04)' : 'rgba(255, 255, 255, 0.02)',
+                    transition: 'all 0.2s ease'
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: '14px' }}>
+                    {/* Checkbox Button */}
+                    <div
+                      onClick={() => handleToggleTarefa(t.key)}
+                      style={{
+                        width: '26px',
+                        height: '26px',
+                        borderRadius: '6px',
+                        border: isChecked ? '2px solid #10b981' : '2px solid rgba(255, 255, 255, 0.3)',
+                        background: isChecked ? '#10b981' : 'rgba(255, 255, 255, 0.05)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        cursor: 'pointer',
+                        marginTop: '2px',
+                        flexShrink: 0,
+                        transition: 'all 0.15s ease'
+                      }}
+                      title={isChecked ? 'Clique para desmarcar' : 'Clique para marcar como concluído'}
+                    >
+                      {isChecked && <Check size={16} color="#ffffff" strokeWidth={3} />}
+                    </div>
+
+                    {/* Task Content */}
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          <span style={{
+                            fontSize: '0.8rem',
+                            fontWeight: 800,
+                            padding: '2px 8px',
+                            borderRadius: '4px',
+                            background: isChecked ? 'rgba(16, 185, 129, 0.2)' : 'rgba(6, 182, 212, 0.15)',
+                            color: isChecked ? '#34d399' : 'var(--accent-cyan)',
+                            textTransform: 'uppercase'
+                          }}>
+                            Item {t.letra}
+                          </span>
+
+                          <span style={{
+                            fontSize: '1rem',
+                            fontWeight: 700,
+                            color: isChecked ? '#34d399' : 'var(--text-main)',
+                            textDecoration: isChecked ? 'line-through' : 'none'
+                          }}>
+                            {t.titulo}
+                          </span>
+                        </div>
+
+                        {/* Status Tag */}
+                        {isChecked ? (
+                          <span style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '5px',
+                            fontSize: '0.78rem',
+                            color: '#34d399',
+                            fontWeight: 600,
+                            background: 'rgba(52, 211, 153, 0.12)',
+                            padding: '3px 9px',
+                            borderRadius: '9999px'
+                          }}>
+                            <CheckCircle2 size={13} />
+                            Concluído {itemState.data_conclusao ? `em ${formatDataBr(itemState.data_conclusao)}` : ''}
+                            {itemState.responsavel ? ` (${itemState.responsavel})` : ''}
+                          </span>
+                        ) : (
+                          <span style={{
+                            fontSize: '0.76rem',
+                            color: 'var(--text-muted)',
+                            background: 'rgba(255, 255, 255, 0.04)',
+                            padding: '3px 8px',
+                            borderRadius: '9999px'
+                          }}>
+                            Pendente
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Full description */}
+                      <p style={{
+                        fontSize: '0.88rem',
+                        color: 'var(--text-muted)',
+                        margin: '6px 0 8px 0',
+                        lineHeight: 1.45
+                      }}>
+                        {t.descricao}
+                      </p>
+
+                      {/* Contextual Action Shortcuts */}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap', marginTop: '8px' }}>
+                        {t.acaoTab === 'imagens' && (
+                          <button
+                            type="button"
+                            onClick={() => setActiveTab('imagens')}
+                            className="btn btn-secondary"
+                            style={{ padding: '4px 10px', fontSize: '0.76rem', color: 'var(--accent-cyan)' }}
+                          >
+                            <ImageIcon size={12} style={{ marginRight: '4px' }} />
+                            Ver Imagens & Plantas
+                          </button>
+                        )}
+
+                        {t.acaoRelatorio && (
+                          <button
+                            type="button"
+                            onClick={() => imprimirMateriaisProjeto(orcamento, projeto, itens)}
+                            className="btn btn-secondary"
+                            style={{ padding: '4px 10px', fontSize: '0.76rem', color: '#38bdf8' }}
+                          >
+                            <Printer size={12} style={{ marginRight: '4px' }} />
+                            Abrir Relatório de Materiais
+                          </button>
+                        )}
+
+                        {t.acaoRota && (
+                          <button
+                            type="button"
+                            onClick={() => navigate(t.acaoRota)}
+                            className="btn btn-secondary"
+                            style={{ padding: '4px 10px', fontSize: '0.76rem', color: '#a78bfa' }}
+                          >
+                            <Upload size={12} style={{ marginRight: '4px' }} />
+                            Ir para Importar Layouts
+                          </button>
+                        )}
+                      </div>
+
+                      {/* Observation field */}
+                      <div style={{ marginTop: '10px', display: 'flex', gap: '8px', alignItems: 'center' }}>
+                        <input
+                          type="text"
+                          value={observacoesMap[t.key] !== undefined ? observacoesMap[t.key] : ''}
+                          onChange={(e) => setObservacoesMap({ ...observacoesMap, [t.key]: e.target.value })}
+                          placeholder="Adicionar anotação técnica (ex: caminho do arquivo, fornecedor, número do pedido...)"
+                          style={{
+                            flex: 1,
+                            background: 'rgba(0, 0, 0, 0.25)',
+                            border: '1px solid var(--glass-border)',
+                            borderRadius: '6px',
+                            padding: '6px 10px',
+                            color: 'var(--text-main)',
+                            fontSize: '0.8rem'
+                          }}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => handleSalvarObservacao(t.key)}
+                          className="btn btn-secondary"
+                          style={{ padding: '6px 12px', fontSize: '0.78rem' }}
+                          disabled={salvandoChecklist}
+                          title="Salvar observação desta tarefa"
+                        >
+                          Salvar
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* ==================================================================== */}
+      {/* ABA 2: IMAGENS ANEXADAS AO PROJETO */}
+      {/* ==================================================================== */}
+      {activeTab === 'imagens' && (
+        <div>
+          {/* Upload Drop Zone */}
+          <div
+            onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setDragOver(false);
+              if (e.dataTransfer?.files?.length > 0) {
+                handleFileUpload(e.dataTransfer.files);
+              }
+            }}
+            style={{
+              border: dragOver ? '2px dashed var(--accent-cyan)' : '2px dashed var(--glass-border)',
+              background: dragOver ? 'rgba(6, 182, 212, 0.08)' : 'rgba(255, 255, 255, 0.02)',
+              borderRadius: '10px',
+              padding: '24px 20px',
+              textAlign: 'center',
+              marginBottom: '22px',
+              cursor: 'pointer',
+              transition: 'all 0.2s ease'
+            }}
+            onClick={() => document.getElementById('file-upload-revisao')?.click()}
+          >
+            <input
+              id="file-upload-revisao"
+              type="file"
+              multiple
+              accept="image/*,application/pdf"
+              style={{ display: 'none' }}
+              onChange={(e) => {
+                if (e.target.files?.length > 0) {
+                  handleFileUpload(e.target.files);
+                }
+              }}
+            />
+            <Upload size={32} color="var(--accent-cyan)" style={{ margin: '0 auto 10px auto', display: 'block' }} />
+            <div style={{ fontSize: '0.95rem', fontWeight: 700, color: 'var(--text-main)' }}>
+              {uploadingAnexo ? 'Fazendo upload dos arquivos...' : 'Clique ou arraste imagens e plantas técnicas para anexar ao projeto'}
+            </div>
+            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '4px' }}>
+              Suporta PNG, JPG, JPEG, WEBP, SVG e PDFs de plantas executivas
+            </div>
+          </div>
+
+          {/* Imagens Grid */}
+          <div style={{ marginBottom: '24px' }}>
+            <h3 style={{ fontSize: '1.05rem', fontWeight: 700, color: 'var(--text-main)', marginBottom: '14px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <ImageIcon size={18} color="var(--accent-cyan)" />
+              <span>Imagens Técnicas do Ambiente ({imagensAnexadas.length})</span>
+            </h3>
+
+            {imagensAnexadas.length === 0 ? (
+              <div className="glass-card" style={{ padding: '36px 20px', textAlign: 'center', color: 'var(--text-muted)' }}>
+                <ImageIcon size={40} style={{ opacity: 0.3, margin: '0 auto 12px auto', display: 'block' }} />
+                <div style={{ fontSize: '0.95rem', fontWeight: 600, color: 'var(--text-main)' }}>
+                  Nenhuma imagem anexada a este projeto ainda.
+                </div>
+                <div style={{ fontSize: '0.82rem', marginTop: '4px' }}>
+                  Utilize o campo de upload acima para anexar fotos do ambiente, renders 3D e imagens das vistas do Promob.
+                </div>
+              </div>
+            ) : (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: '16px' }}>
+                {imagensAnexadas.map((img) => {
+                  const url = getMediaUrl(img.caminho);
+                  return (
+                    <div
+                      key={img.id}
+                      className="glass-card"
+                      style={{
+                        padding: 0,
+                        overflow: 'hidden',
+                        borderRadius: '10px',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        transition: 'transform 0.2s ease, box-shadow 0.2s ease'
+                      }}
+                    >
+                      {/* Image Thumbnail */}
+                      <div
+                        onClick={() => setPreviewImage(img)}
+                        style={{
+                          height: '180px',
+                          background: '#090d16',
+                          cursor: 'pointer',
+                          position: 'relative',
+                          overflow: 'hidden',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center'
+                        }}
+                        title="Clique para ampliar em tela cheia"
+                      >
+                        <img
+                          src={url}
+                          alt={img.nome_original}
+                          style={{ width: '100%', height: '100%', objectFit: 'cover', transition: 'transform 0.3s ease' }}
+                        />
+                        <div style={{
+                          position: 'absolute',
+                          bottom: '8px',
+                          right: '8px',
+                          background: 'rgba(0,0,0,0.65)',
+                          borderRadius: '4px',
+                          padding: '3px 8px',
+                          fontSize: '0.72rem',
+                          color: '#fff',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '4px'
+                        }}>
+                          <ZoomIn size={12} />
+                          Ampliar
+                        </div>
+                      </div>
+
+                      {/* Info & Details */}
+                      <div style={{ padding: '12px 14px', flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+                        <div>
+                          <div style={{ fontSize: '0.88rem', fontWeight: 700, color: 'var(--text-main)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={img.nome_original}>
+                            {img.nome_original}
+                          </div>
+                          <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '3px' }}>
+                            {formatDataHoraBr(img.criado_em)} {img.criado_por_nome ? `• ${img.criado_por_nome}` : ''}
+                          </div>
+                        </div>
+
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '10px', paddingTop: '8px', borderTop: '1px solid rgba(255, 255, 255, 0.05)' }}>
+                          <button
+                            type="button"
+                            onClick={() => setPreviewImage(img)}
+                            className="btn btn-secondary"
+                            style={{ padding: '4px 10px', fontSize: '0.76rem' }}
+                          >
+                            <ZoomIn size={12} style={{ marginRight: '4px' }} />
+                            Ver Imagem
+                          </button>
+
+                          <a
+                            href={url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            download={img.nome_original}
+                            className="btn btn-secondary"
+                            style={{ padding: '4px 10px', fontSize: '0.76rem', textDecoration: 'none' }}
+                            title="Baixar imagem original"
+                          >
+                            <Download size={12} style={{ marginRight: '4px' }} />
+                            Download
+                          </a>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Outros Anexos (PDFs, Planilhas, Documentos) */}
+          {outrosAnexos.length > 0 && (
+            <div>
+              <h3 style={{ fontSize: '1.05rem', fontWeight: 700, color: 'var(--text-main)', marginBottom: '14px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <FileText size={18} color="#a78bfa" />
+                <span>Documentos Técnicos e Plantas PDF ({outrosAnexos.length})</span>
+              </h3>
+
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '14px' }}>
+                {outrosAnexos.map((doc) => {
+                  const url = getMediaUrl(doc.caminho);
+                  return (
+                    <div
+                      key={doc.id}
+                      className="glass-card"
+                      style={{ padding: '14px', display: 'flex', alignItems: 'center', gap: '12px' }}
+                    >
+                      <div style={{
+                        width: '42px',
+                        height: '42px',
+                        borderRadius: '8px',
+                        background: 'rgba(239, 68, 68, 0.15)',
+                        border: '1px solid rgba(239, 68, 68, 0.3)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        color: '#f87171',
+                        flexShrink: 0
+                      }}>
+                        <FileText size={20} />
+                      </div>
+
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: '0.86rem', fontWeight: 700, color: 'var(--text-main)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={doc.nome_original}>
+                          {doc.nome_original}
+                        </div>
+                        <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)', marginTop: '2px' }}>
+                          {formatDataHoraBr(doc.criado_em)}
+                        </div>
+                      </div>
+
+                      <a
+                        href={url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="btn btn-secondary"
+                        style={{ padding: '5px 10px', fontSize: '0.78rem' }}
+                        title="Abrir arquivo"
+                      >
+                        <ExternalLink size={13} />
+                      </a>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ==================================================================== */}
+      {/* ABA 3: GRÁFICO DE GANTT – ALOCAÇÃO DE TEMPOS POR SERVIÇO */}
+      {/* ==================================================================== */}
+      {activeTab === 'gantt' && (
+        <div>
+          {/* Header with CTA to open full Gantt Modal */}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '18px', flexWrap: 'wrap', gap: '12px' }}>
+            <div>
+              <h3 style={{ margin: 0, fontSize: '1.15rem', fontWeight: 800, color: 'var(--text-main)' }}>
+                Alocação de Tempos por Posto de Serviço
+              </h3>
+              <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginTop: '3px' }}>
+                Sequenciamento operacional de produção e cronograma fabril estimado.
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setShowGanttModal(true)}
+              className="btn btn-primary"
+              style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', padding: '8px 16px', fontWeight: 700 }}
+            >
+              <Calendar size={16} />
+              <span>Visualizar Diagrama de Gantt Completo</span>
+            </button>
+          </div>
+
+          {/* Visual Gantt Allocation Timeline */}
+          <div className="glass-card" style={{ padding: '22px', marginBottom: '22px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+              <span style={{ fontSize: '0.85rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase' }}>
+                Cronograma de Produção dos Serviços
+              </span>
+              <span style={{ fontSize: '0.85rem', color: 'var(--accent-cyan)', fontWeight: 700 }}>
+                Tempo Total: {tempoTotalServicosMin} min ({formatMinutos(tempoTotalServicosMin)})
+              </span>
+            </div>
+
+            {servicosItens.length === 0 ? (
+              <div style={{ textAlign: 'center', padding: '30px', color: 'var(--text-muted)' }}>
+                Nenhum serviço de fabricação cadastrado para este projeto.
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                {servicosItens.map((srv, idx) => {
+                  const perc = tempoTotalServicosMin > 0 ? Math.round((srv.duracao / tempoTotalServicosMin) * 100) : 0;
+                  const colors = [
+                    { bar: 'linear-gradient(90deg, #38bdf8, #0284c7)', text: '#38bdf8' },
+                    { bar: 'linear-gradient(90deg, #34d399, #059669)', text: '#34d399' },
+                    { bar: 'linear-gradient(90deg, #a78bfa, #7c3aed)', text: '#a78bfa' },
+                    { bar: 'linear-gradient(90deg, #fbbf24, #d97706)', text: '#fbbf24' },
+                    { bar: 'linear-gradient(90deg, #f472b6, #db2777)', text: '#f472b6' },
+                    { bar: 'linear-gradient(90deg, #60a5fa, #2563eb)', text: '#60a5fa' }
+                  ];
+                  const c = colors[idx % colors.length];
+
+                  return (
+                    <div key={srv.ProjetoItemID || idx}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px', fontSize: '0.86rem' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          <span style={{
+                            fontSize: '0.74rem',
+                            fontWeight: 800,
+                            padding: '2px 7px',
+                            borderRadius: '4px',
+                            background: 'rgba(255, 255, 255, 0.08)',
+                            color: 'var(--text-main)'
+                          }}>
+                            Etapa {idx + 1}
+                          </span>
+                          <strong style={{ color: 'var(--text-main)' }}>{srv.MaterialDescricao || srv.MaterialReferencia}</strong>
+                          <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>({srv.qtd} {srv.ProjetoItemUnidade || 'UN'})</span>
+                        </div>
+
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                          <span style={{ fontWeight: 700, color: c.text }}>{srv.duracao} min</span>
+                          <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>({perc}%)</span>
+                        </div>
+                      </div>
+
+                      <div style={{ width: '100%', height: '14px', background: 'rgba(255, 255, 255, 0.05)', borderRadius: '7px', overflow: 'hidden' }}>
+                        <div style={{
+                          width: `${Math.max(perc, 3)}%`,
+                          height: '100%',
+                          background: c.bar,
+                          borderRadius: '7px',
+                          transition: 'width 0.4s ease'
+                        }} />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Detailed Table of Services */}
+          <div className="glass-card" style={{ padding: 0, overflow: 'hidden' }}>
+            <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--glass-border)' }}>
+              <h4 style={{ margin: 0, fontSize: '0.98rem', fontWeight: 700, color: 'var(--text-main)' }}>
+                Detalhamento dos Serviços Cadastrados
+              </h4>
+            </div>
+
+            <div className="table-responsive">
+              <table className="data-table" style={{ margin: 0 }}>
                 <thead>
                   <tr>
-                    <th style={{ width: '10%' }}>Sequência</th>
-                    <th style={{ width: '35%' }}>Título / Tarefa</th>
-                    <th style={{ width: '25%' }}>Início (Data & Hora)</th>
-                    <th style={{ width: '15%' }}>Duração (Horas)</th>
-                    <th style={{ width: '15%' }}>Predecessor</th>
-                    <th style={{ width: '40px' }}></th>
+                    <th style={{ width: '80px' }}>Seq.</th>
+                    <th style={{ width: '130px' }}>Código</th>
+                    <th>Descrição do Serviço</th>
+                    <th style={{ width: '120px', textAlign: 'center' }}>Qtd. / Unid.</th>
+                    <th style={{ width: '130px', textAlign: 'right' }}>Tempo Unit.</th>
+                    <th style={{ width: '130px', textAlign: 'right' }}>Duração Total</th>
+                    <th style={{ width: '110px', textAlign: 'right' }}>% Alocada</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {sortedTasks.map((task) => (
-                    <tr key={task.id}>
-                      <td>
-                        <input
-                          type="number"
-                          className="gantt-input"
-                          value={task.sequencia || 0}
-                          onChange={(e) => handleTaskChange(task.id, 'sequencia', e.target.value)}
-                        />
-                      </td>
-                      <td>
-                        <input
-                          type="text"
-                          className="gantt-input"
-                          value={task.titulo}
-                          onChange={(e) => handleTaskChange(task.id, 'titulo', e.target.value)}
-                        />
-                      </td>
-                      <td>
-                        <input
-                          type="datetime-local"
-                          className="gantt-input"
-                          value={task.data_inicio}
-                          onChange={(e) => handleTaskChange(task.id, 'data_inicio', e.target.value)}
-                        />
-                      </td>
-                      <td>
-                        <input
-                          type="number"
-                          min="1"
-                          className="gantt-input"
-                          value={task.tempo}
-                          onChange={(e) => handleTaskChange(task.id, 'tempo', e.target.value)}
-                          disabled={/^task-\d+-/.test(task.id)}
-                          title={/^task-\d+-/.test(task.id) ? "Duração baseada no tempo previsto do serviço da OS" : ""}
-                        />
-                      </td>
-                      <td>
-                        <select
-                          className="gantt-input"
-                          value={task.dependencies[0] || ''}
-                          onChange={(e) => handlePredecessorChange(task.id, e.target.value)}
-                        >
-                          <option value="">Nenhum</option>
-                          {sortedTasks
-                            .filter(t => t.id !== task.id)
-                            .map(t => (
-                              <option key={t.id} value={t.id}>{t.titulo}</option>
-                            ))
-                          }
-                        </select>
-                      </td>
-                      <td>
-                        <button
-                          type="button"
-                          onClick={() => handleRemoveTask(task.id)}
-                          className="btn btn-danger"
-                          style={{ padding: '6px' }}
-                          title="Remover"
-                        >
-                          <Trash2 size={12} />
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
+                  {servicosItens.map((srv, idx) => {
+                    const perc = tempoTotalServicosMin > 0 ? ((srv.duracao / tempoTotalServicosMin) * 100).toFixed(1) : '0.0';
+                    return (
+                      <tr key={srv.ProjetoItemID || idx}>
+                        <td>
+                          <span style={{ fontWeight: 700, color: 'var(--accent-cyan)' }}>#{idx + 1}</span>
+                        </td>
+                        <td style={{ fontWeight: 600, color: 'var(--text-muted)' }}>{srv.MaterialReferencia}</td>
+                        <td style={{ fontWeight: 700, color: 'var(--text-main)' }}>{srv.MaterialDescricao || srv.MaterialReferencia}</td>
+                        <td style={{ textAlign: 'center' }}>{srv.qtd} {srv.ProjetoItemUnidade}</td>
+                        <td style={{ textAlign: 'right' }}>{srv.tempoUnit} min</td>
+                        <td style={{ textAlign: 'right', fontWeight: 700, color: '#38bdf8' }}>{srv.duracao} min</td>
+                        <td style={{ textAlign: 'right', color: 'var(--text-muted)' }}>{perc}%</td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
           </div>
+        </div>
+      )}
 
-          {/* BOTTOM: Gantt Chart Plotter */}
-          <div className="glass-card gantt-chart-panel" style={{ width: '100%', overflow: 'hidden' }}>
-            <h3 style={{ fontWeight: 700, marginBottom: '16px' }}>Gráfico de Gantt (Horas Úteis: 8h/dia, Seg-Sex)</h3>
-            
-            <div className="gantt-timeline-container">
-              <div style={{ width: `${detailLayout.totalWidth}px`, position: 'relative' }}>
-                {/* Vertical current time indicator line */}
-                {(() => {
-                  const now = new Date();
-                  const currentNowPx = getPixelOffsetForDate(now, detailLayout.dayLayouts);
-                  const isNowInTimeline = currentNowPx >= 0 && currentNowPx <= detailLayout.totalWidth;
-                  if (!isNowInTimeline) return null;
-                  return (
-                    <div
-                      style={{
-                        position: 'absolute',
-                        top: 0,
-                        bottom: 0,
-                        left: `${currentNowPx}px`,
-                        width: '2px',
-                        background: '#22c55e',
-                        boxShadow: '0 0 8px #22c55e',
-                        zIndex: 100,
-                        pointerEvents: 'none'
-                      }}
-                    >
-                      {/* Circle glowing indicator at the top of the header */}
-                      <div
-                        style={{
-                          position: 'absolute',
-                          top: 0,
-                          left: '50%',
-                          transform: 'translateX(-50%)',
-                          width: '8px',
-                          height: '8px',
-                          borderRadius: '50%',
-                          background: '#22c55e',
-                          boxShadow: '0 0 12px #22c55e'
-                        }}
-                      />
-                    </div>
-                  );
-                })()}
+      {/* ==================================================================== */}
+      {/* ABA 4: RELATÓRIO DE MATERIAIS E SERVIÇOS DO PROJETO */}
+      {/* ==================================================================== */}
+      {activeTab === 'materiais' && (
+        <div>
+          {/* Banner with Direct Print Button */}
+          <div style={{
+            background: 'linear-gradient(135deg, rgba(6, 182, 212, 0.15), rgba(59, 130, 246, 0.1))',
+            border: '1px solid rgba(6, 182, 212, 0.35)',
+            borderRadius: '10px',
+            padding: '20px 24px',
+            marginBottom: '20px',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            flexWrap: 'wrap',
+            gap: '14px'
+          }}>
+            <div>
+              <h3 style={{ margin: 0, fontSize: '1.15rem', fontWeight: 800, color: 'var(--text-main)' }}>
+                Relatório de Materiais e Serviços do Projeto
+              </h3>
+              <p style={{ margin: '4px 0 0 0', fontSize: '0.86rem', color: 'var(--text-muted)' }}>
+                Consulte ou imprima o relatório oficial com a discriminação dos MDFs, fitas de borda, ferragens e insumos deste ambiente.
+              </p>
+            </div>
 
-                {/* Timeline Header Days */}
-                <div className="gantt-timeline-header" style={{ width: '100%' }}>
-                {detailLayout.dayLayouts.map((item, index) => {
-                  return (
-                    <div
-                      key={index}
-                      className="gantt-header-cell"
-                      style={{
-                        width: `${item.width}px`,
-                        background: item.isWeekend ? 'rgba(255, 255, 255, 0.05)' : 'transparent',
-                        color: item.isWeekend ? 'var(--text-muted)' : 'var(--text-main)',
-                        padding: 0,
-                        height: '52px',
-                        display: 'flex',
-                        flexDirection: 'column',
-                        justifyContent: 'stretch'
-                      }}
-                    >
-                      {/* Top Line: Date */}
-                      <div style={{
-                        flex: 1,
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        borderBottom: '1px solid rgba(255, 255, 255, 0.1)',
-                        fontSize: '0.75rem',
-                        fontWeight: 700
-                      }}>
-                        {formatarDiaGantt(item.date)}
-                      </div>
-                      
-                      {/* Bottom Line: Hours */}
-                      <div style={{
-                        flex: 1,
-                        display: 'flex',
-                        background: 'rgba(0, 0, 0, 0.1)'
-                      }}>
-                        {item.isWeekend ? (
-                          <div style={{
-                            width: '100%',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            fontSize: '0.6rem',
-                            color: 'rgba(255, 255, 255, 0.3)',
-                            fontWeight: 600
-                          }}>
-                            Folga
-                          </div>
-                        ) : (
-                          ['1', '2', '3', '4', '5', '6', '7', '8'].map((hr, hrIdx) => (
-                            <div
-                              key={hrIdx}
-                              style={{
-                                flex: 1,
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent: 'center',
-                                fontSize: '0.55rem',
-                                color: 'rgba(255, 255, 255, 0.5)',
-                                borderRight: hrIdx === 7 ? 'none' : '1px solid rgba(255, 255, 255, 0.05)'
-                              }}
-                            >
-                              {hr}
-                            </div>
-                          ))
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
+            <button
+              type="button"
+              onClick={() => imprimirMateriaisProjeto(orcamento, projeto, itens)}
+              className="btn btn-primary"
+              style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', padding: '9px 18px', fontWeight: 700 }}
+            >
+              <Printer size={16} />
+              <span>Imprimir Relatório Oficial</span>
+            </button>
+          </div>
+
+          {/* Filter Bar */}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px', flexWrap: 'wrap', gap: '10px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', width: '320px' }}>
+              <div style={{ position: 'relative', width: '100%' }}>
+                <Search size={15} style={{ position: 'absolute', left: '10px', top: '10px', color: 'var(--text-muted)' }} />
+                <input
+                  type="text"
+                  value={filtroMaterial}
+                  onChange={(e) => setFiltroMaterial(e.target.value)}
+                  placeholder="Buscar material por código ou descrição..."
+                  style={{
+                    width: '100%',
+                    padding: '7px 10px 7px 32px',
+                    background: 'rgba(255, 255, 255, 0.04)',
+                    border: '1px solid var(--glass-border)',
+                    borderRadius: '6px',
+                    color: 'var(--text-main)',
+                    fontSize: '0.84rem'
+                  }}
+                />
               </div>
+            </div>
 
-              {/* Gantt Rows and Bars */}
-              <div className="gantt-rows-container" style={{ width: `${detailLayout.totalWidth}px`, height: `${sortedTasks.length * rowHeight}px` }}>
-                
-                {/* Vertical Grid Lines */}
-                <div className="gantt-grid-lines">
-                  {detailLayout.dayLayouts.map((item, index) => {
-                    return (
-                      <div
-                        key={index}
-                        className="gantt-grid-line"
-                        style={{
-                          width: `${item.width}px`,
-                          background: item.isWeekend ? 'rgba(255, 255, 255, 0.03)' : 'transparent',
-                          display: 'flex'
-                        }}
-                      >
-                        {!item.isWeekend && Array.from({ length: 8 }).map((_, colIdx) => (
-                          <div
-                            key={colIdx}
-                            style={{
-                              flex: 1,
-                              height: '100%',
-                              borderRight: colIdx === 7 ? 'none' : '1px solid rgba(255, 255, 255, 0.03)'
-                            }}
-                          />
-                        ))}
-                      </div>
-                    );
-                  })}
-                </div>
+            <div style={{ fontSize: '0.84rem', color: 'var(--text-muted)' }}>
+              Exibindo <strong>{produtosItens.length}</strong> produto(s) e <strong>{servicosItens.length}</strong> serviço(s)
+            </div>
+          </div>
 
-                {/* SVG Connections for Predecessors */}
-                <svg className="gantt-connections-svg">
-                  <defs>
-                    <marker
-                      id="gantt-arrow"
-                      viewBox="0 0 10 10"
-                      refX="6"
-                      refY="5"
-                      markerWidth="6"
-                      markerHeight="6"
-                      orient="auto-start-reverse"
-                    >
-                      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="var(--accent-cyan)" />
-                    </marker>
-                  </defs>
+          {/* Table of Products */}
+          <div className="glass-card" style={{ padding: 0, overflow: 'hidden', marginBottom: '20px' }}>
+            <div style={{ padding: '14px 20px', borderBottom: '1px solid var(--glass-border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <h4 style={{ margin: 0, fontSize: '0.98rem', fontWeight: 700, color: 'var(--text-main)' }}>
+                1. Produtos, Chapas e Insumos
+              </h4>
+            </div>
 
-                  {sortedTasks.map((task, indexCurr) => {
-                    const predId = task.dependencies[0];
-                    if (!predId) return null;
-
-                    const indexPrev = sortedTasks.findIndex(t => t.id === predId);
-                    if (indexPrev === -1) return null;
-
-                    const predTask = sortedTasks[indexPrev];
-
-                    // Math for predecessor End point in hours
-                    const prevStart = new Date(predTask.data_inicio);
-                    const prevEnd = somarHorasUteis(prevStart, parseInt(predTask.tempo) || 1);
-                    const xPrevEnd = getPixelOffsetForDate(prevEnd, detailLayout.dayLayouts);
-                    const yPrev = indexPrev * rowHeight + rowHeight / 2;
-
-                    // Math for current task Start point in hours
-                    const currStart = new Date(task.data_inicio);
-                    const xCurrStart = getPixelOffsetForDate(currStart, detailLayout.dayLayouts);
-                    const yCurr = indexCurr * rowHeight + rowHeight / 2;
-
-                    // Compute clean path
-                    let pathData = '';
-                    if (xCurrStart >= xPrevEnd) {
-                      const xMid = xPrevEnd + (xCurrStart - xPrevEnd) / 2;
-                      pathData = `M ${xPrevEnd} ${yPrev} L ${xMid} ${yPrev} L ${xMid} ${yCurr} L ${xCurrStart} ${yCurr}`;
-                    } else {
-                      const xOffset = xPrevEnd + 8;
-                      const yMid = yPrev + (yCurr - yPrev) / 2;
-                      pathData = `M ${xPrevEnd} ${yPrev} L ${xOffset} ${yPrev} L ${xOffset} ${yMid} L ${xCurrStart - 8} ${yMid} L ${xCurrStart - 8} ${yCurr} L ${xCurrStart} ${yCurr}`;
-                    }
-
-                    return (
-                      <path
-                        key={`link-${task.id}`}
-                        d={pathData}
-                        className="gantt-connection-line"
-                        markerEnd="url(#gantt-arrow)"
-                      />
-                    );
-                  })}
-                </svg>
-
-                {/* Bars Rendering */}
-                {sortedTasks.map((task, index) => {
-                  const tStart = new Date(task.data_inicio);
-                  const tEnd = somarHorasUteis(tStart, parseInt(task.tempo) || 1);
-                  const hasPredecessor = task.dependencies.length > 0;
-
-                  // Absolute position for the total duration label
-                  const labelLeftPx = getPixelOffsetForDate(tEnd, detailLayout.dayLayouts) + 8;
-
-                  return (
-                    <div key={task.id} className="gantt-row" style={{ width: '100%' }}>
-                      {timelineDays.map((d, dIdx) => {
-                        const isWeekend = d.getDay() === 0 || d.getDay() === 6;
-                        if (isWeekend) return null;
-
-                        const dayStart = new Date(d);
-                        dayStart.setHours(0, 0, 0, 0);
-                        const dayEnd = new Date(d);
-                        dayEnd.setHours(23, 59, 59, 999);
-
-                        const overlapStart = new Date(Math.max(tStart.getTime(), dayStart.getTime()));
-                        const overlapEnd = new Date(Math.min(tEnd.getTime(), dayEnd.getTime()));
-
-                        if (overlapStart < overlapEnd) {
-                          const leftPx = getPixelOffsetForDate(overlapStart, detailLayout.dayLayouts);
-                          const widthPx = getPixelOffsetForDate(overlapEnd, detailLayout.dayLayouts) - leftPx;
-                          const durationHours = (overlapEnd.getTime() - overlapStart.getTime()) / (1000 * 60 * 60);
-
-                          return (
-                            <div
-                              key={dIdx}
-                              className="gantt-bar-wrapper"
-                              style={{
-                                left: `${leftPx}px`,
-                                width: `${widthPx}px`
-                              }}
-                            >
-                              <div
-                                className={`gantt-bar ${hasPredecessor ? 'has-predecessor' : ''}`}
-                                title={`${task.titulo} (${task.tempo}h)`}
-                                style={{
-                                  display: 'flex',
-                                  alignItems: 'center',
-                                  justifyContent: 'center',
-                                  fontSize: '0.7rem',
-                                  borderRadius: 0
-                                }}
-                              >
-                                {task.titulo} ({task.tempo}h)
-                              </div>
-                            </div>
-                          );
-                        }
-                        return null;
-                      })}
-
-                      {/* Single overall duration label positioned after the end of task */}
-                      <span
-                        className="gantt-bar-label"
-                        style={{
-                          position: 'absolute',
-                          left: `${labelLeftPx}px`,
-                          whiteSpace: 'nowrap'
-                        }}
-                      >
-                        {task.tempo} h
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
+            <div className="table-responsive">
+              <table className="data-table" style={{ margin: 0 }}>
+                <thead>
+                  <tr>
+                    <th style={{ width: '140px' }}>Código / Ref.</th>
+                    <th>Descrição do Material</th>
+                    <th style={{ width: '80px', textAlign: 'center' }}>Unid.</th>
+                    <th style={{ width: '110px', textAlign: 'right' }}>Qtd.</th>
+                    <th style={{ width: '130px', textAlign: 'right' }}>Valor Unit.</th>
+                    <th style={{ width: '140px', textAlign: 'right' }}>Total</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {produtosItens.length === 0 ? (
+                    <tr>
+                      <td colSpan="6" style={{ textAlign: 'center', padding: '30px', color: 'var(--text-muted)' }}>
+                        Nenhum material encontrado com o filtro informado.
+                      </td>
+                    </tr>
+                  ) : (
+                    produtosItens.map((item, idx) => (
+                      <tr key={item.ProjetoItemID || idx}>
+                        <td style={{ fontWeight: 600, color: 'var(--accent-cyan)', fontSize: '0.84rem' }}>
+                          {item.MaterialReferencia}
+                        </td>
+                        <td style={{ fontWeight: 600, color: 'var(--text-main)' }}>
+                          {item.MaterialDescricao || item.MaterialReferencia}
+                        </td>
+                        <td style={{ textAlign: 'center', fontSize: '0.82rem' }}>
+                          {item.ProjetoItemUnidade || 'UN'}
+                        </td>
+                        <td style={{ textAlign: 'right', fontWeight: 700 }}>
+                          {parseFloat(item.ProjetoItemQtd || 0).toLocaleString('pt-BR')}
+                        </td>
+                        <td style={{ textAlign: 'right', fontSize: '0.84rem', color: 'var(--text-muted)' }}>
+                          {formatCurrency(item.ProjetoItemVlrUnit)}
+                        </td>
+                        <td style={{ textAlign: 'right', fontWeight: 700, color: '#34d399' }}>
+                          {formatCurrency(item.ProjetoItemTotal)}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
             </div>
           </div>
         </div>
-      </div>
       )}
+
+      {/* Lightbox Modal de Visualização de Imagem em Alta Resolução */}
+      {previewImage && (
+        <div
+          className="modal-overlay"
+          style={{ zIndex: 1300, background: 'rgba(0, 0, 0, 0.88)' }}
+          onClick={() => setPreviewImage(null)}
+        >
+          <div
+            style={{
+              position: 'relative',
+              maxWidth: '90vw',
+              maxHeight: '90vh',
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              justifyContent: 'center'
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              type="button"
+              onClick={() => setPreviewImage(null)}
+              style={{
+                position: 'absolute',
+                top: '-40px',
+                right: '0',
+                background: 'transparent',
+                border: 'none',
+                color: '#fff',
+                fontSize: '28px',
+                cursor: 'pointer'
+              }}
+            >
+              &times;
+            </button>
+
+            <img
+              src={getMediaUrl(previewImage.caminho)}
+              alt={previewImage.nome_original}
+              style={{
+                maxWidth: '90vw',
+                maxHeight: '80vh',
+                objectFit: 'contain',
+                borderRadius: '8px',
+                boxShadow: '0 20px 40px rgba(0,0,0,0.8)'
+              }}
+            />
+
+            <div style={{
+              marginTop: '12px',
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              width: '100%',
+              color: '#fff',
+              fontSize: '0.88rem'
+            }}>
+              <div>
+                <strong>{previewImage.nome_original}</strong>
+                <span style={{ color: 'rgba(255,255,255,0.6)', marginLeft: '8px' }}>
+                  {formatDataHoraBr(previewImage.criado_em)}
+                </span>
+              </div>
+
+              <a
+                href={getMediaUrl(previewImage.caminho)}
+                target="_blank"
+                rel="noopener noreferrer"
+                download={previewImage.nome_original}
+                className="btn btn-primary"
+                style={{ fontSize: '0.8rem', padding: '6px 12px' }}
+              >
+                <Download size={13} style={{ marginRight: '4px' }} />
+                Baixar Imagem Original
+              </a>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Popup de Gráfico de Gantt dos Serviços */}
+      <GanttServicosModal
+        isOpen={showGanttModal}
+        onClose={() => setShowGanttModal(false)}
+        projetoNome={projeto?.nome || ordemServico?.NomeProjeto}
+        itens={itens}
+        totalDuracaoMinutos={projeto?.DuracaoFabricacao || ordemServico?.Tempo || tempoTotalServicosMin}
+      />
     </div>
   );
 }
+
 
 // 4.8. Planta Baixa / Chão de Fábrica Floor Plan Page
 function PlantaBaixa() {
@@ -11481,6 +11836,10 @@ function GanttServicosModal({ isOpen, onClose, projetoNome, itens = [], totalDur
       const qtdFormatada = formatQtdComUnidade(qtd, unidade);
       const nomeComQtd = qtdFormatada ? `${nomeBase} - ${qtdFormatada}` : nomeBase;
 
+      const seqVal = i.sequencia !== undefined && i.sequencia !== null
+        ? parseInt(i.sequencia, 10)
+        : (i.servico_sequencia !== undefined && i.servico_sequencia !== null ? parseInt(i.servico_sequencia, 10) : null);
+
       return {
         id: i.ProjetoItemID,
         referencia: i.MaterialReferencia,
@@ -11489,11 +11848,12 @@ function GanttServicosModal({ isOpen, onClose, projetoNome, itens = [], totalDur
         unidade: unidade,
         qtd: qtd,
         tempoUnit: tempoUnit,
-        duracao: duracao
+        duracao: duracao,
+        sequencia: seqVal
       };
     });
 
-  // Identificação e classificação dos processos produtivos
+  // Identificação e classificação dos processos produtivos com fallback de sequencia padrão
   const getServiceKey = (item) => {
     const ref = (item.referencia || '').toUpperCase();
     const desc = (item.nome || '').toLowerCase();
@@ -11506,20 +11866,20 @@ function GanttServicosModal({ isOpen, onClose, projetoNome, itens = [], totalDur
     return 'outro';
   };
 
-  const serviceOrderRank = {
-    corte: 1,
-    usinagem: 2,
-    fitagem: 3,
-    montagem: 4,
-    especial: 5,
-    embalagem: 6,
-    outro: 7
+  const defaultServiceSequencia = {
+    corte: 5,
+    usinagem: 10,
+    fitagem: 20,
+    montagem: 30,
+    especial: 40,
+    embalagem: 50,
+    outro: 999
   };
 
   const sortedServicos = [...servicosItens].sort((a, b) => {
-    const rankA = serviceOrderRank[getServiceKey(a)] || 99;
-    const rankB = serviceOrderRank[getServiceKey(b)] || 99;
-    if (rankA !== rankB) return rankA - rankB;
+    const seqA = a.sequencia !== null && a.sequencia !== undefined ? a.sequencia : (defaultServiceSequencia[getServiceKey(a)] || 999);
+    const seqB = b.sequencia !== null && b.sequencia !== undefined ? b.sequencia : (defaultServiceSequencia[getServiceKey(b)] || 999);
+    if (seqA !== seqB) return seqA - seqB;
     return (a.id || 0) - (b.id || 0);
   });
 
@@ -12820,8 +13180,6 @@ function ModalConclusaoProposta({ isOpen, onClose, orcamento, projetos = [], par
       };
     });
   };
-
-  // Inicialização de valores ao abrir o modal
   useEffect(() => {
     const carregarFormas = async () => {
       try {
@@ -12950,6 +13308,49 @@ function ModalConclusaoProposta({ isOpen, onClose, orcamento, projetos = [], par
   }
 
   const condicoesArray = Array.isArray(selectedFormaObj?.condicoes) ? selectedFormaObj.condicoes : [];
+
+  // Sincronizar condição selecionada quando formas carregadas
+  useEffect(() => {
+    if (formasPagamento.length === 0) return;
+    const base = precoBaseOriginal > 0 ? precoBaseOriginal : (parseFloat(orcamento.total_venda) || 0);
+    const descVlr = parsePtBrToFloat(descontoValor) || parseFloat(orcamento.desconto_valor) || 0;
+    const finalVlr = parsePtBrToFloat(precoFinal) || ((orcamento.total_venda !== null && orcamento.total_venda !== undefined) ? parseFloat(orcamento.total_venda) : Math.max(0, base - descVlr));
+    const dtEntrInit = dataEntrada || (orcamento.data_entrada ? String(orcamento.data_entrada).split('T')[0].split(' ')[0] : dataHojeStr);
+
+    const allConds = [];
+    formasPagamento.forEach(fp => {
+      (fp.condicoes || []).forEach(c => {
+        allConds.push({ ...c, formaNome: fp.nome });
+      });
+    });
+
+    const fpTarget = (formaPagamento || orcamento.forma_pagamento_selecionada || '').trim();
+    let matchedCond = null;
+    if (fpTarget && allConds.length > 0) {
+      matchedCond = allConds.find(c => {
+        const descCompleta = `${c.formaNome} - ${c.descricao || c.meio_pagamento || ''}`.trim().toLowerCase();
+        const fpLower = fpTarget.toLowerCase();
+        const descLower = (c.descricao || '').toLowerCase();
+        return descCompleta === fpLower || descLower === fpLower || fpLower.includes(descLower);
+      });
+    }
+
+    if (!matchedCond && condicoesArray.length > 0) {
+      matchedCond = { ...condicoesArray[0], formaNome: selectedFormaObj?.nome || '' };
+    }
+
+    if (matchedCond) {
+      setCondicaoSelecionada(matchedCond);
+      if (!formaPagamento) {
+        const desc = `${matchedCond.formaNome} - ${matchedCond.descricao || matchedCond.meio_pagamento || ''}`.trim();
+        setFormaPagamento(desc);
+      }
+      if (!orcamento.fluxo_financeiro || fluxoFinanceiro.length === 0) {
+        const generated = calcularFluxoDefault(matchedCond, finalVlr, dtEntrInit);
+        setFluxoFinanceiro(generated);
+      }
+    }
+  }, [formasPagamento.length, orcamento?.numero]);
 
   // Manipulador ao clicar numa condição de pagamento da tabela (define a forma e gera o fluxo financeiro)
   const handleSelecionarCondicao = (cond, formaNome) => {
@@ -14713,7 +15114,7 @@ function ModalCadastroClienteContrato({ isOpen, onClose, cliente, orcamento, onS
 }
 
 // Modal de Apresentação e Impressão da Minuta do Contrato
-function ModalMinutaContrato({ isOpen, onClose, orcamento, cliente, projetos = [], onEditarCliente }) {
+function ModalMinutaContrato({ isOpen, onClose, orcamento, cliente, projetos = [], onEditarCliente, onAssinado }) {
   if (!isOpen || !orcamento || !cliente) return null;
 
   const { user } = useAuth();
@@ -14881,6 +15282,10 @@ function ModalMinutaContrato({ isOpen, onClose, orcamento, cliente, projetos = [
         orcamento.data_assinatura = dtAss;
         orcamento.assinatura_responsavel = assResp;
         orcamento.usuario_assinatura_nome = userNome;
+      }
+
+      if (onAssinado) {
+        onAssinado(res.data || { data_assinatura: dtAss, assinatura_responsavel: assResp, usuario_assinatura_nome: userNome });
       }
 
       setFeedbackAssinatura(`Contrato assinado digitalmente por ${userNome}!`);
@@ -15970,6 +16375,11 @@ function ModalVisualizarFluxoFinanceiro({ isOpen, onClose, orcamento, projetos =
   const totalSomaParcelas = parcelasFluxo.reduce((acc, p) => acc + (typeof p.valor === 'number' ? p.valor : parsePtBrToFloat(p.valor) || 0), 0);
 
   const handleEfetivarFluxo = async () => {
+    if (!isContratoAssinado) {
+      alert('Não é possível efetivar o fluxo: o contrato do projeto precisa estar assinado antes da efetivação.');
+      return;
+    }
+
     try {
       setEfetivando(true);
       setFeedback('');
@@ -16134,11 +16544,18 @@ function ModalVisualizarFluxoFinanceiro({ isOpen, onClose, orcamento, projetos =
               <span>Cliente: <strong style={{ color: '#0f172a' }}>{orcamento.cliente_nome}</strong></span>
               <span>&bull;</span>
               <span>Status: <span style={{ color: '#059669', fontWeight: 700 }}>{efetivado || orcamento.status === 'Efetivado' ? 'Efetivado' : (orcamento.status || 'Aprovado')}</span></span>
-              {isContratoAssinado && (
+              {isContratoAssinado ? (
                 <>
                   <span>&bull;</span>
                   <span style={{ color: '#0284c7', fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
                     <FileSignature size={13} /> Contrato Assinado
+                  </span>
+                </>
+              ) : (
+                <>
+                  <span>&bull;</span>
+                  <span style={{ color: '#d97706', fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                    <FileSignature size={13} /> Contrato Pendente
                   </span>
                 </>
               )}
@@ -16185,33 +16602,38 @@ function ModalVisualizarFluxoFinanceiro({ isOpen, onClose, orcamento, projetos =
                   gap: '6px',
                   fontWeight: 600
                 }}
-                title={`Contrato assinado em ${formatarDataBr(orcamento.data_assinatura)}. Edição do fluxo bloqueada (somente efetivação permitida).`}
+                title={`Contrato assinado em ${formatarDataBr(orcamento.data_assinatura)}. Edição do fluxo bloqueada.`}
               >
                 <FileSignature size={15} />
                 <span>Fluxo Bloqueado</span>
               </button>
             )}
 
-            {/* Botão Efetivar Fluxo */}
+            {/* Botão Efetivar Fluxo (habilitado apenas se o contrato estiver assinado) */}
             <button 
               type="button" 
               onClick={handleEfetivarFluxo}
-              disabled={efetivando}
+              disabled={efetivando || !isContratoAssinado}
               style={{ 
                 fontSize: '0.84rem', 
                 padding: '6px 14px', 
-                background: efetivado ? '#059669' : '#2563eb',
+                background: !isContratoAssinado ? '#94a3b8' : (efetivado ? '#059669' : '#2563eb'),
                 color: '#ffffff',
                 border: 'none',
                 borderRadius: '6px',
-                cursor: efetivando ? 'not-allowed' : 'pointer',
+                cursor: (!isContratoAssinado || efetivando) ? 'not-allowed' : 'pointer',
                 display: 'inline-flex', 
                 alignItems: 'center', 
                 gap: '6px',
                 fontWeight: 700,
-                boxShadow: efetivado ? '0 2px 4px rgba(5, 150, 105, 0.3)' : '0 2px 4px rgba(37, 99, 235, 0.3)'
+                opacity: !isContratoAssinado ? 0.65 : 1,
+                boxShadow: !isContratoAssinado ? 'none' : (efetivado ? '0 2px 4px rgba(5, 150, 105, 0.3)' : '0 2px 4px rgba(37, 99, 235, 0.3)')
               }}
-              title="Gravar as parcelas no Fluxo de Recebimento"
+              title={
+                !isContratoAssinado 
+                  ? 'O contrato precisa estar assinado para efetivar o fluxo financeiro.' 
+                  : (efetivado ? 'Fluxo já efetivado no Contas a Receber' : 'Gravar as parcelas no Fluxo de Recebimento')
+              }
             >
               {efetivando ? <RefreshCw size={15} className="animate-spin" /> : <CheckCircle2 size={15} />}
               <span>{efetivado ? 'Fluxo Efetivado' : 'Efetivar Fluxo'}</span>
@@ -16261,7 +16683,7 @@ function ModalVisualizarFluxoFinanceiro({ isOpen, onClose, orcamento, projetos =
         {/* Body Content */}
         <div style={{ overflowY: 'auto', padding: '20px 24px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
           {/* Banner de Contrato Assinado */}
-          {isContratoAssinado && (
+          {isContratoAssinado ? (
             <div style={{ 
               background: '#eff6ff', 
               border: '1px solid #bfdbfe', 
@@ -16279,12 +16701,38 @@ function ModalVisualizarFluxoFinanceiro({ isOpen, onClose, orcamento, projetos =
                 <div>
                   <strong>Contrato Assinado Digitalmente:</strong> Assinatura registrada em <strong>{formatarDataBr(orcamento.data_assinatura)}</strong> por <strong>{orcamento.usuario_assinatura_nome || 'Responsável'}</strong>.
                   <div style={{ fontSize: '0.80rem', color: '#3b82f6', marginTop: '1px' }}>
-                    O fluxo financeiro está bloqueado para alterações e pronto para ser efetivado.
+                    O fluxo financeiro está bloqueado para alterações e pronto para ser efetivado no contas a receber.
                   </div>
                 </div>
               </div>
               <span style={{ fontSize: '0.78rem', background: '#dbeafe', color: '#1e40af', padding: '3px 10px', borderRadius: '4px', fontWeight: 700, whiteSpace: 'nowrap' }}>
-                Somente Efetivação
+                Contrato Assinado
+              </span>
+            </div>
+          ) : (
+            <div style={{ 
+              background: '#fffbeb', 
+              border: '1px solid #fde68a', 
+              color: '#92400e', 
+              padding: '10px 16px', 
+              borderRadius: '8px', 
+              fontSize: '0.86rem', 
+              display: 'flex', 
+              alignItems: 'center', 
+              justifyContent: 'space-between',
+              gap: '12px'
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <FileSignature size={20} color="#d97706" style={{ flexShrink: 0 }} />
+                <div>
+                  <strong>Aguardando Assinatura do Contrato:</strong> Este projeto ainda não possui assinatura de contrato registrada.
+                  <div style={{ fontSize: '0.80rem', color: '#b45309', marginTop: '1px' }}>
+                    O botão <strong>Efetivar Fluxo</strong> permanecerá bloqueado até que o contrato seja formalizado e assinado.
+                  </div>
+                </div>
+              </div>
+              <span style={{ fontSize: '0.78rem', background: '#fef3c7', color: '#92400e', padding: '3px 10px', borderRadius: '4px', fontWeight: 700, whiteSpace: 'nowrap' }}>
+                Assinatura Pendente
               </span>
             </div>
           )}
@@ -16555,7 +17003,16 @@ function Orcamentos() {
 
   const handleAbrirFluxoFinanceiro = async (orc) => {
     try {
-      setFluxoOrcamento(orc);
+      let orcAtualizado = orc;
+      try {
+        const orcRes = await api.get(`/orcamentos/${orc.numero || orc.id}`);
+        if (orcRes.data) {
+          orcAtualizado = orcRes.data;
+        }
+      } catch (e) {
+        // fallback
+      }
+      setFluxoOrcamento(orcAtualizado);
       let projs = [];
       try {
         const projRes = await api.get(`/projetos?orcamento_numero=${orc.numero}`);
@@ -16661,6 +17118,18 @@ function Orcamentos() {
   const [selectedCliente, setSelectedCliente] = useState(null);
   const [descricao, setDescricao] = useState('');
   const [showDropdown, setShowDropdown] = useState(false);
+
+  // States para Modal Rápida de Novo Cliente
+  const [showNovoClienteModal, setShowNovoClienteModal] = useState(false);
+  const [novoClienteTipo, setNovoClienteTipo] = useState('Física');
+  const [novoClienteNome, setNovoClienteNome] = useState('');
+  const [novoClienteDoc, setNovoClienteDoc] = useState('');
+  const [novoClienteTelefone, setNovoClienteTelefone] = useState('');
+  const [novoClienteEmail, setNovoClienteEmail] = useState('');
+  const [novoClienteCidade, setNovoClienteCidade] = useState('Belém');
+  const [novoClienteUf, setNovoClienteUf] = useState('PA');
+  const [novoClienteLoading, setNovoClienteLoading] = useState(false);
+  const [novoClienteError, setNovoClienteError] = useState('');
 
   // States para Projetos do Orçamento selecionado
   const [selectedOrcamento, setSelectedOrcamento] = useState(null);
@@ -16960,6 +17429,91 @@ function Orcamentos() {
     setSelectedCliente(client);
     setClienteSearch(client.nome);
     setShowDropdown(false);
+  };
+
+  const formatarDocClienteRapido = (val, tipo) => {
+    if (!val) return '';
+    const digits = val.replace(/\D/g, '');
+    if (tipo === 'Jurídica') {
+      const d = digits.slice(0, 14);
+      if (d.length <= 2) return d;
+      if (d.length <= 5) return `${d.slice(0, 2)}.${d.slice(2)}`;
+      if (d.length <= 8) return `${d.slice(0, 2)}.${d.slice(2, 5)}.${d.slice(5)}`;
+      if (d.length <= 12) return `${d.slice(0, 2)}.${d.slice(2, 5)}.${d.slice(5, 8)}/${d.slice(8)}`;
+      return `${d.slice(0, 2)}.${d.slice(2, 5)}.${d.slice(5, 8)}/${d.slice(8, 12)}-${d.slice(12, 14)}`;
+    } else {
+      const d = digits.slice(0, 11);
+      if (d.length <= 3) return d;
+      if (d.length <= 6) return `${d.slice(0, 3)}.${d.slice(3)}`;
+      if (d.length <= 9) return `${d.slice(0, 3)}.${d.slice(3, 6)}.${d.slice(6)}`;
+      return `${d.slice(0, 3)}.${d.slice(3, 6)}.${d.slice(6, 9)}-${d.slice(9, 11)}`;
+    }
+  };
+
+  const formatarTelClienteRapido = (val) => {
+    if (!val) return '';
+    const digits = val.replace(/\D/g, '').slice(0, 11);
+    if (digits.length === 0) return '';
+    if (digits.length <= 2) return `(${digits}`;
+    if (digits.length <= 6) return `(${digits.slice(0, 2)}) ${digits.slice(2)}`;
+    if (digits.length <= 10) return `(${digits.slice(0, 2)}) ${digits.slice(2, 6)}-${digits.slice(6)}`;
+    return `(${digits.slice(0, 2)}) ${digits.slice(2, 7)}-${digits.slice(7, 11)}`;
+  };
+
+  const handleAbrirNovoClienteModal = (sugestaoNome = '') => {
+    setNovoClienteTipo('Física');
+    setNovoClienteNome(sugestaoNome || (clienteSearch && !selectedCliente ? clienteSearch : ''));
+    setNovoClienteDoc('');
+    setNovoClienteTelefone('');
+    setNovoClienteEmail('');
+    setNovoClienteCidade('Belém');
+    setNovoClienteUf('PA');
+    setNovoClienteError('');
+    setShowNovoClienteModal(true);
+  };
+
+  const handleSalvarNovoCliente = async (e) => {
+    if (e) e.preventDefault();
+    if (!novoClienteNome || !novoClienteNome.trim()) {
+      setNovoClienteError('O nome do cliente é obrigatório.');
+      return;
+    }
+
+    setNovoClienteLoading(true);
+    setNovoClienteError('');
+
+    try {
+      const res = await api.post('/clientes', {
+        nome: novoClienteNome.trim(),
+        tipo_pessoa: novoClienteTipo,
+        documento: novoClienteDoc ? novoClienteDoc.trim() : null,
+        telefone: novoClienteTelefone ? novoClienteTelefone.trim() : null,
+        email: novoClienteEmail ? novoClienteEmail.trim() : null,
+        cidade: novoClienteCidade ? novoClienteCidade.trim() : null,
+        uf: novoClienteUf ? novoClienteUf.trim() : null,
+        status: 'Ativo'
+      });
+
+      const created = res.data;
+
+      // Atualiza lista de clientes
+      setClientes(prev => {
+        const updated = [...prev.filter(c => c.id !== created.id), created];
+        return updated.sort((a, b) => (a.nome || '').localeCompare(b.nome || ''));
+      });
+
+      // Seleciona o cliente recém criado no formulário de orçamento se aplicável
+      setSelectedCliente(created);
+      setClienteSearch(created.nome);
+      setShowDropdown(false);
+
+      setShowNovoClienteModal(false);
+    } catch (err) {
+      console.error('Erro ao cadastrar novo cliente:', err);
+      setNovoClienteError(err.response?.data?.error || 'Erro ao cadastrar novo cliente.');
+    } finally {
+      setNovoClienteLoading(false);
+    }
   };
 
   const handleSubmit = async (e) => {
@@ -17593,6 +18147,18 @@ function Orcamentos() {
   }, []);
 
   const [activeTabOrcamento, setActiveTabOrcamento] = useState('Em aberto');
+  const [searchOrcamento, setSearchOrcamento] = useState('');
+  const [isOrcamentosCollapsed, setIsOrcamentosCollapsed] = useState(false);
+  const projetosSectionRef = React.useRef(null);
+
+  const handleSelectOrcamento = (orc) => {
+    setSelectedOrcamento(orc);
+    setTimeout(() => {
+      if (projetosSectionRef.current) {
+        projetosSectionRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    }, 120);
+  };
 
   const isEmAberto = (o) => !o.status || o.status === 'Em Aberto' || o.status === 'Em Negociação' || o.status === 'Pendente';
   const isAprovadoStatus = (o) => (o.status === 'Aprovado' || o.status === 'Aprovada') && o.status !== 'Efetivado';
@@ -17607,12 +18173,21 @@ function Orcamentos() {
   const countConcluido = orcamentos.filter(isConcluidoStatus).length;
 
   const filteredOrcamentos = orcamentos.filter((o) => {
-    if (activeTabOrcamento === 'Em aberto') return isEmAberto(o);
-    if (activeTabOrcamento === 'Aprovado') return isAprovadoStatus(o);
-    if (activeTabOrcamento === 'Efetivados') return isEfetivadoStatus(o);
-    if (activeTabOrcamento === 'Recusado') return isRecusadoStatus(o);
-    if (activeTabOrcamento === 'Concluido') return isConcluidoStatus(o);
-    return true;
+    let matchTab = true;
+    if (activeTabOrcamento === 'Em aberto') matchTab = isEmAberto(o);
+    else if (activeTabOrcamento === 'Aprovado') matchTab = isAprovadoStatus(o);
+    else if (activeTabOrcamento === 'Efetivados') matchTab = isEfetivadoStatus(o);
+    else if (activeTabOrcamento === 'Recusado') matchTab = isRecusadoStatus(o);
+    else if (activeTabOrcamento === 'Concluido') matchTab = isConcluidoStatus(o);
+
+    if (!matchTab) return false;
+
+    if (!searchOrcamento.trim()) return true;
+    const q = searchOrcamento.toLowerCase().trim();
+    const matchNumero = String(o.numero || '').toLowerCase().includes(q);
+    const matchCliente = String(o.cliente_nome || '').toLowerCase().includes(q);
+    const matchDesc = String(o.descricao || '').toLowerCase().includes(q);
+    return matchNumero || matchCliente || matchDesc;
   });
 
   const renderStatusBadge = (status) => {
@@ -17729,27 +18304,141 @@ function Orcamentos() {
 
       {error && <div className="alert alert-danger">{error}</div>}
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px', alignItems: 'start' }}>
-        {/* Lado Esquerdo: Grid de Orçamentos com Abas por Situação */}
-        <div className="glass-card">
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
-            <h3 style={{ fontWeight: 700, margin: 0 }}>Orçamentos</h3>
-            <button 
-              onClick={handleOpenAddModal} 
-              className="btn btn-primary" 
-              style={{ padding: '8px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-              title="Novo Orçamento"
-            >
-              <Plus size={18} />
-            </button>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '24px', width: '100%' }}>
+        {/* Painel 1: Orçamentos (Full-Width com Abas, Busca e Ações Rápidas) */}
+        <div className="glass-card" style={{ width: '100%' }}>
+          <div style={{ 
+            display: 'flex', 
+            justifyContent: 'space-between', 
+            alignItems: 'center', 
+            marginBottom: '16px',
+            flexWrap: 'wrap',
+            gap: '12px'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <h3 style={{ fontWeight: 700, margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <DollarSign size={20} style={{ color: 'var(--accent-cyan)' }} />
+                <span>Orçamentos</span>
+              </h3>
+              <span style={{ 
+                background: 'rgba(6, 182, 212, 0.15)', 
+                color: 'var(--accent-cyan)', 
+                fontSize: '0.8rem', 
+                fontWeight: 700, 
+                padding: '2px 10px', 
+                borderRadius: '9999px',
+                border: '1px solid rgba(6, 182, 212, 0.3)'
+              }}>
+                {filteredOrcamentos.length} {filteredOrcamentos.length === 1 ? 'encontrado' : 'encontrados'}
+              </span>
+              {selectedOrcamento && (
+                <span style={{
+                  background: 'rgba(16, 185, 129, 0.12)',
+                  color: 'var(--color-success)',
+                  fontSize: '0.78rem',
+                  fontWeight: 600,
+                  padding: '3px 10px',
+                  borderRadius: '6px',
+                  border: '1px solid rgba(16, 185, 129, 0.3)',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '6px'
+                }}>
+                  <span>Ativo: <strong>#{selectedOrcamento.numero}</strong> ({selectedOrcamento.cliente_nome})</span>
+                </span>
+              )}
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+              {/* Campo de Busca Rápida por Orçamento/Cliente */}
+              <div style={{ position: 'relative', width: '260px' }}>
+                <Search size={15} style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} />
+                <input
+                  type="text"
+                  className="form-control"
+                  style={{ paddingLeft: '32px', height: '36px', fontSize: '0.85rem' }}
+                  placeholder="Buscar cliente, nº ou texto..."
+                  value={searchOrcamento}
+                  onChange={(e) => setSearchOrcamento(e.target.value)}
+                />
+                {searchOrcamento && (
+                  <button
+                    type="button"
+                    onClick={() => setSearchOrcamento('')}
+                    style={{
+                      position: 'absolute',
+                      right: '8px',
+                      top: '50%',
+                      transform: 'translateY(-50%)',
+                      background: 'none',
+                      border: 'none',
+                      color: 'var(--text-muted)',
+                      cursor: 'pointer',
+                      fontSize: '14px'
+                    }}
+                  >
+                    ×
+                  </button>
+                )}
+              </div>
+
+              <button 
+                onClick={handleOpenAddModal} 
+                className="btn btn-primary" 
+                style={{ 
+                  display: 'inline-flex', 
+                  alignItems: 'center', 
+                  gap: '6px', 
+                  padding: '7px 14px', 
+                  fontSize: '0.85rem', 
+                  fontWeight: 600 
+                }}
+                title="Cadastrar Novo Orçamento"
+              >
+                <Plus size={16} />
+                <span>Novo Orçamento</span>
+              </button>
+
+              <button 
+                type="button"
+                onClick={() => handleAbrirNovoClienteModal()} 
+                className="btn btn-secondary" 
+                style={{ 
+                  display: 'inline-flex', 
+                  alignItems: 'center', 
+                  gap: '6px', 
+                  padding: '7px 14px', 
+                  fontSize: '0.85rem', 
+                  fontWeight: 600,
+                  borderColor: 'rgba(6, 182, 212, 0.4)',
+                  color: 'var(--accent-cyan)',
+                  background: 'rgba(6, 182, 212, 0.08)'
+                }}
+                title="Cadastrar Novo Cliente (Popup Modal)"
+              >
+                <UserPlus size={16} />
+                <span>Novo Cliente</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setIsOrcamentosCollapsed(!isOrcamentosCollapsed)}
+                className="btn btn-secondary"
+                style={{ padding: '7px 10px', display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '0.8rem' }}
+                title={isOrcamentosCollapsed ? "Expandir lista de orçamentos" : "Recolher lista de orçamentos"}
+              >
+                {isOrcamentosCollapsed ? <ChevronDown size={15} /> : <ChevronUp size={15} />}
+                <span>{isOrcamentosCollapsed ? 'Expandir' : 'Recolher'}</span>
+              </button>
+            </div>
           </div>
 
           {/* Abas de Situação do Orçamento */}
           <div style={{ 
             display: 'flex', 
-            gap: '4px', 
+            gap: '6px', 
             borderBottom: '1px solid var(--glass-border)', 
-            marginBottom: '14px',
+            marginBottom: '16px',
             paddingBottom: '2px',
             overflowX: 'auto'
           }}>
@@ -17771,13 +18460,13 @@ function Orcamentos() {
                     border: 'none',
                     borderBottom: isActive ? `2.5px solid ${tab.color}` : '2.5px solid transparent',
                     color: isActive ? 'var(--text-main)' : 'var(--text-muted)',
-                    padding: '6px 12px',
-                    fontSize: '0.8rem',
+                    padding: '8px 14px',
+                    fontSize: '0.85rem',
                     fontWeight: isActive ? 700 : 500,
                     cursor: 'pointer',
                     display: 'flex',
                     alignItems: 'center',
-                    gap: '6px',
+                    gap: '8px',
                     transition: 'all 0.2s ease',
                     borderRadius: '6px 6px 0 0',
                     whiteSpace: 'nowrap'
@@ -17785,8 +18474,8 @@ function Orcamentos() {
                 >
                   <span>{tab.label}</span>
                   <span style={{
-                    fontSize: '0.68rem',
-                    padding: '1px 6px',
+                    fontSize: '0.72rem',
+                    padding: '2px 7px',
                     borderRadius: '10px',
                     background: isActive ? tab.color : 'rgba(255, 255, 255, 0.08)',
                     color: isActive ? '#000' : 'var(--text-muted)',
@@ -17799,206 +18488,337 @@ function Orcamentos() {
             })}
           </div>
 
-          <div className="table-container" style={{ margin: 0 }}>
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>Cliente</th>
-                  <th style={{ width: '130px', textAlign: 'center' }}>Situação</th>
-                  <th style={{ textAlign: 'right' }}>Ações</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filteredOrcamentos.length === 0 ? (
+          {!isOrcamentosCollapsed && (
+            <div className="table-container" style={{ margin: 0, maxHeight: '380px', overflowY: 'auto' }}>
+              <table className="data-table">
+                <thead>
                   <tr>
-                    <td colSpan="3" style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '24px 12px' }}>
-                      Nenhum orçamento com situação "{activeTabOrcamento === 'Concluido' ? 'Concluído' : activeTabOrcamento}".
-                    </td>
+                    <th style={{ width: '120px' }}>Orçamento</th>
+                    <th>Cliente</th>
+                    <th style={{ width: '22%' }}>Descrição</th>
+                    <th style={{ width: '150px' }}>Parâmetro</th>
+                    <th style={{ width: '130px', textAlign: 'center' }}>Situação</th>
+                    <th style={{ width: '220px', textAlign: 'right' }}>Ações</th>
                   </tr>
-                ) : (
-                  filteredOrcamentos.map((o) => {
-                    const isSelected = selectedOrcamento && selectedOrcamento.numero === o.numero;
-                    return (
-                      <tr key={o.numero} style={{ background: isSelected ? 'rgba(6, 182, 212, 0.08)' : 'transparent' }}>
-                        <td style={{ fontWeight: 600 }}>{o.cliente_nome}</td>
-                        <td style={{ textAlign: 'center' }}>
-                          {renderStatusBadge(o.status)}
-                        </td>
-                        <td style={{ textAlign: 'right' }}>
-                          <div className="flex-gap-2" style={{ justifyContent: 'flex-end' }}>
-                            {/* Na aba Efetivados, inclui: Proposta, Fluxo Financeiro, Contrato, Projeto e Desfazer */}
-                            {(activeTabOrcamento === 'Efetivados' || isEfetivadoStatus(o)) ? (
-                              <>
-                                <button 
-                                  onClick={() => handleCliqueProposta(o)} 
-                                  className="btn btn-secondary" 
-                                  style={{ padding: '6px', color: 'var(--accent-cyan)', borderColor: 'rgba(6, 182, 212, 0.4)' }} 
-                                  title="Visualizar Proposta Comercial"
-                                >
-                                  <FileText size={14} />
-                                </button>
-                                <button 
-                                  onClick={() => handleAbrirFluxoFinanceiro(o)} 
-                                  className="btn btn-secondary" 
-                                  style={{ padding: '6px', color: '#10B981', borderColor: 'rgba(16, 185, 129, 0.4)' }} 
-                                  title="Fluxo Financeiro (Visualizar Cronograma de Parcelas)"
-                                >
-                                  <DollarSign size={14} />
-                                </button>
-                                <button 
-                                  onClick={() => handleAbrirContrato(o)} 
-                                  className="btn btn-primary" 
-                                  style={{ padding: '6px', background: 'linear-gradient(135deg, #3B82F6, #1D4ED8)', borderColor: '#3B82F6' }} 
-                                  title="Contrato (Gerar Minuta do Contrato)"
-                                >
-                                  <FileSignature size={14} />
-                                </button>
-                                <button 
-                                  onClick={() => setSelectedOrcamento(o)} 
-                                  className={`btn ${isSelected ? 'btn-primary' : 'btn-secondary'}`} 
-                                  style={{ padding: '6px' }} 
-                                  title="Projeto"
-                                >
-                                  <Briefcase size={14} />
-                                </button>
-                                <button 
-                                  onClick={() => handleDesfazerEfetivacao(o.numero)} 
-                                  className="btn btn-secondary" 
-                                  style={{ padding: '6px', color: '#F59E0B' }} 
-                                  title="Desfazer Efetivação (Exclui Fluxo e volta para Em Aberto)"
-                                >
-                                  <RotateCcw size={14} />
-                                </button>
-                              </>
+                </thead>
+                <tbody>
+                  {filteredOrcamentos.length === 0 ? (
+                    <tr>
+                      <td colSpan="6" style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '28px 12px' }}>
+                        Nenhum orçamento encontrado com a situação "{activeTabOrcamento === 'Concluido' ? 'Concluído' : activeTabOrcamento}"{searchOrcamento ? ` e filtro "${searchOrcamento}"` : ''}.
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredOrcamentos.map((o) => {
+                      const isSelected = selectedOrcamento && selectedOrcamento.numero === o.numero;
+                      return (
+                        <tr 
+                          key={o.numero} 
+                          onClick={() => handleSelectOrcamento(o)}
+                          style={{ 
+                            background: isSelected ? 'rgba(6, 182, 212, 0.12)' : 'transparent',
+                            borderLeft: isSelected ? '4px solid var(--accent-cyan)' : '4px solid transparent',
+                            cursor: 'pointer',
+                            transition: 'background 0.15s ease'
+                          }}
+                          title="Clique para visualizar e gerenciar os projetos deste orçamento"
+                        >
+                          <td style={{ fontWeight: 700, color: 'var(--accent-cyan)', fontFamily: 'monospace', fontSize: '0.92rem' }}>
+                            #{o.numero}
+                          </td>
+                          <td style={{ fontWeight: 600 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                              <span>{o.cliente_nome}</span>
+                              {isSelected && (
+                                <span style={{
+                                  fontSize: '0.68rem',
+                                  padding: '1px 6px',
+                                  background: 'var(--accent-cyan)',
+                                  color: '#0a0f1d',
+                                  fontWeight: 800,
+                                  borderRadius: '4px',
+                                  textTransform: 'uppercase'
+                                }}>
+                                  Ativo
+                                </span>
+                              )}
+                            </div>
+                          </td>
+                          <td style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+                            {o.descricao ? (
+                              <span style={{ display: '-webkit-box', WebkitLineClamp: 1, WebkitBoxOrient: 'vertical', overflow: 'hidden' }} title={o.descricao}>
+                                {o.descricao}
+                              </span>
                             ) : (
-                              <>
-                                {/* Na aba Aprovado, inclui os ícones de Fluxo Financeiro e Contrato */}
-                                {(activeTabOrcamento === 'Aprovado' || isAprovadoStatus(o)) && (
-                                  <>
-                                    <button 
-                                      onClick={() => handleAbrirFluxoFinanceiro(o)} 
-                                      className="btn btn-secondary" 
-                                      style={{ padding: '6px', color: '#10B981', borderColor: 'rgba(16, 185, 129, 0.4)' }} 
-                                      title="Fluxo Financeiro (Visualizar Cronograma de Parcelas)"
-                                    >
-                                      <DollarSign size={14} />
-                                    </button>
-                                    <button 
-                                      onClick={() => handleAbrirContrato(o)} 
-                                      className="btn btn-primary" 
-                                      style={{ padding: '6px', background: 'linear-gradient(135deg, #3B82F6, #1D4ED8)', borderColor: '#3B82F6' }} 
-                                      title="Contrato (Gerar Minuta do Contrato)"
-                                    >
-                                      <FileSignature size={14} />
-                                    </button>
-                                  </>
-                                )}
-                                <button 
-                                  onClick={() => setSelectedOrcamento(o)} 
-                                  className={`btn ${isSelected ? 'btn-primary' : 'btn-secondary'}`} 
-                                  style={{ padding: '6px' }} 
-                                  title="Projeto"
-                                >
-                                  <Briefcase size={14} />
-                                </button>
-                                {isSituacaoEmAberto(o.status) && (
+                              <span style={{ opacity: 0.4 }}>-</span>
+                            )}
+                          </td>
+                          <td>
+                            <span style={{ 
+                              fontSize: '0.75rem', 
+                              padding: '2px 8px', 
+                              borderRadius: '4px', 
+                              background: 'rgba(255, 255, 255, 0.05)', 
+                              border: '1px solid var(--glass-border-subtle)',
+                              color: 'var(--text-muted)'
+                            }}>
+                              {o.parametro_nome || 'Padrão'}
+                            </span>
+                          </td>
+                          <td style={{ textAlign: 'center' }}>
+                            {renderStatusBadge(o.status)}
+                          </td>
+                          <td style={{ textAlign: 'right' }} onClick={(e) => e.stopPropagation()}>
+                            <div className="flex-gap-2" style={{ justifyContent: 'flex-end' }}>
+                              {/* Na aba Efetivados, inclui: Proposta, Fluxo Financeiro, Contrato, Projeto e Desfazer */}
+                              {(activeTabOrcamento === 'Efetivados' || isEfetivadoStatus(o)) ? (
+                                <>
                                   <button 
-                                    onClick={() => handleOpenEditOrcamentoModal(o)} 
+                                    onClick={() => handleCliqueProposta(o)} 
                                     className="btn btn-secondary" 
-                                    style={{ padding: '6px' }} 
-                                    title="Editar dados deste Orçamento"
+                                    style={{ padding: '6px 8px', color: 'var(--accent-cyan)', borderColor: 'rgba(6, 182, 212, 0.4)' }} 
+                                    title="Visualizar Proposta Comercial"
                                   >
-                                    <Edit2 size={14} />
+                                    <FileText size={14} />
                                   </button>
-                                )}
-                                {/* Na aba Aprovado, o ícone de exclusão é substituído por Desfazer Aprovação */}
-                                {(activeTabOrcamento === 'Aprovado' || isAprovadoStatus(o)) ? (
                                   <button 
-                                    onClick={() => handleDesfazerAprovacao(o.numero)} 
+                                    onClick={() => handleAbrirFluxoFinanceiro(o)} 
                                     className="btn btn-secondary" 
-                                    style={{ padding: '6px', color: '#F59E0B' }} 
-                                    title="Desfazer Aprovação (Voltar para Em Aberto)"
+                                    style={{ padding: '6px 8px', color: '#10B981', borderColor: 'rgba(16, 185, 129, 0.4)' }} 
+                                    title="Fluxo Financeiro (Visualizar Cronograma de Parcelas)"
+                                  >
+                                    <DollarSign size={14} />
+                                  </button>
+                                  <button 
+                                    onClick={() => handleAbrirContrato(o)} 
+                                    className="btn btn-primary" 
+                                    style={{ padding: '6px 8px', background: 'linear-gradient(135deg, #3B82F6, #1D4ED8)', borderColor: '#3B82F6' }} 
+                                    title="Contrato (Gerar Minuta do Contrato)"
+                                  >
+                                    <FileSignature size={14} />
+                                  </button>
+                                  <button 
+                                    onClick={() => handleSelectOrcamento(o)} 
+                                    className={`btn ${isSelected ? 'btn-primary' : 'btn-secondary'}`} 
+                                    style={{ padding: '6px 10px', display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '0.78rem' }} 
+                                    title="Ver Projetos deste Orçamento"
+                                  >
+                                    <Briefcase size={14} />
+                                    <span>Projetos</span>
+                                  </button>
+                                  <button 
+                                    onClick={() => handleDesfazerEfetivacao(o.numero)} 
+                                    className="btn btn-secondary" 
+                                    style={{ padding: '6px 8px', color: '#F59E0B' }} 
+                                    title="Desfazer Efetivação (Exclui Fluxo e volta para Em Aberto)"
                                   >
                                     <RotateCcw size={14} />
                                   </button>
-                                ) : (
-                                  <button onClick={() => handleDelete(o.numero)} className="btn btn-danger" style={{ padding: '6px' }} title="Excluir Orçamento">
-                                    <Trash2 size={14} />
+                                </>
+                              ) : (
+                                <>
+                                  {/* Na aba Aprovado, inclui os ícones de Fluxo Financeiro e Contrato */}
+                                  {(activeTabOrcamento === 'Aprovado' || isAprovadoStatus(o)) && (
+                                    <>
+                                      <button 
+                                        onClick={() => handleAbrirFluxoFinanceiro(o)} 
+                                        className="btn btn-secondary" 
+                                        style={{ padding: '6px 8px', color: '#10B981', borderColor: 'rgba(16, 185, 129, 0.4)' }} 
+                                        title="Fluxo Financeiro (Visualizar Cronograma de Parcelas)"
+                                      >
+                                        <DollarSign size={14} />
+                                      </button>
+                                      <button 
+                                        onClick={() => handleAbrirContrato(o)} 
+                                        className="btn btn-primary" 
+                                        style={{ padding: '6px 8px', background: 'linear-gradient(135deg, #3B82F6, #1D4ED8)', borderColor: '#3B82F6' }} 
+                                        title="Contrato (Gerar Minuta do Contrato)"
+                                      >
+                                        <FileSignature size={14} />
+                                      </button>
+                                    </>
+                                  )}
+                                  <button 
+                                    onClick={() => handleCliqueProposta(o)} 
+                                    className="btn btn-secondary" 
+                                    style={{ padding: '6px 8px', color: 'var(--accent-cyan)', borderColor: 'rgba(6, 182, 212, 0.4)' }} 
+                                    title="Visualizar Proposta Comercial"
+                                  >
+                                    <FileText size={14} />
                                   </button>
-                                )}
-                              </>
-                            )}
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })
-                )}
-              </tbody>
-            </table>
-          </div>
+                                  <button 
+                                    onClick={() => handleSelectOrcamento(o)} 
+                                    className={`btn ${isSelected ? 'btn-primary' : 'btn-secondary'}`} 
+                                    style={{ padding: '6px 10px', display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '0.78rem' }} 
+                                    title="Ver Projetos deste Orçamento"
+                                  >
+                                    <Briefcase size={14} />
+                                    <span>Projetos</span>
+                                  </button>
+                                  {isSituacaoEmAberto(o.status) && (
+                                    <button 
+                                      onClick={() => handleOpenEditOrcamentoModal(o)} 
+                                      className="btn btn-secondary" 
+                                      style={{ padding: '6px 8px' }} 
+                                      title="Editar dados deste Orçamento"
+                                    >
+                                      <Edit2 size={14} />
+                                    </button>
+                                  )}
+                                  {/* Na aba Aprovado, o ícone de exclusão é substituído por Desfazer Aprovação */}
+                                  {(activeTabOrcamento === 'Aprovado' || isAprovadoStatus(o)) ? (
+                                    <button 
+                                      onClick={() => handleDesfazerAprovacao(o.numero)} 
+                                      className="btn btn-secondary" 
+                                      style={{ padding: '6px 8px', color: '#F59E0B' }} 
+                                      title="Desfazer Aprovação (Voltar para Em Aberto)"
+                                    >
+                                      <RotateCcw size={14} />
+                                    </button>
+                                  ) : (
+                                    <button onClick={() => handleDelete(o.numero)} className="btn btn-danger" style={{ padding: '6px 8px' }} title="Excluir Orçamento">
+                                      <Trash2 size={14} />
+                                    </button>
+                                  )}
+                                </>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
 
-        {/* Lado Direito: Grid de Projetos do Orçamento selecionado */}
-        <div className="glass-card" style={{ minHeight: '350px' }}>
+        {/* Painel 2: Projetos do Orçamento Selecionado (Full-Width, Espaçoso e Fluido) */}
+        <div 
+          ref={projetosSectionRef}
+          className="glass-card" 
+          style={{ 
+            width: '100%', 
+            minHeight: '380px',
+            border: selectedOrcamento ? '1.5px solid rgba(6, 182, 212, 0.4)' : '1px solid var(--glass-border)',
+            boxShadow: selectedOrcamento ? '0 8px 32px 0 rgba(6, 182, 212, 0.08)' : undefined
+          }}
+        >
           {selectedOrcamento ? (
             <div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+              <div style={{ 
+                display: 'flex', 
+                justifyContent: 'space-between', 
+                alignItems: 'center', 
+                marginBottom: '20px',
+                paddingBottom: '14px',
+                borderBottom: '1px solid var(--glass-border)',
+                flexWrap: 'wrap',
+                gap: '12px'
+              }}>
                 <div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '14px', flexWrap: 'wrap' }}>
-                    <h3 style={{ fontWeight: 700, margin: 0 }}>Projetos: #{selectedOrcamento.numero}</h3>
-                    <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+                    <h3 style={{ fontWeight: 700, margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <Briefcase size={20} style={{ color: 'var(--accent-cyan)' }} />
+                      <span>Projetos do Orçamento #{selectedOrcamento.numero}</span>
+                    </h3>
+                    <span style={{ 
+                      background: 'rgba(255, 255, 255, 0.06)', 
+                      padding: '3px 12px', 
+                      borderRadius: '6px', 
+                      fontSize: '0.85rem',
+                      border: '1px solid var(--glass-border-subtle)'
+                    }}>
                       Cliente: <strong style={{ color: 'var(--text-main)' }}>{selectedOrcamento.cliente_nome}</strong>
+                    </span>
+                    {renderStatusBadge(selectedOrcamento.status)}
+                    <span style={{
+                      fontSize: '0.8rem',
+                      color: 'var(--text-muted)',
+                      background: 'rgba(6, 182, 212, 0.08)',
+                      padding: '2px 8px',
+                      borderRadius: '4px'
+                    }}>
+                      {projetos.length} {projetos.length === 1 ? 'projeto cadastrado' : 'projetos cadastrados'}
                     </span>
                   </div>
                 </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                   <button 
                     onClick={handleOpenAddProjectModal} 
                     className="btn btn-primary" 
                     style={{ 
-                      padding: '8px', 
-                      borderRadius: '50%', 
-                      display: 'flex', 
-                      alignItems: 'center', 
-                      justifyContent: 'center',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '6px',
+                      padding: '7px 16px',
+                      fontSize: '0.85rem',
+                      fontWeight: 600,
                       opacity: isSituacaoEmAberto(selectedOrcamento?.status) ? 1 : 0.5,
                       cursor: isSituacaoEmAberto(selectedOrcamento?.status) ? 'pointer' : 'not-allowed'
                     }} 
                     disabled={!isSituacaoEmAberto(selectedOrcamento?.status)}
                     title={isSituacaoEmAberto(selectedOrcamento?.status) ? "Novo Projeto" : "Não permitido: Orçamento não está Em Aberto"}
                   >
-                    <Plus size={18} />
+                    <Plus size={16} />
+                    <span>Novo Projeto</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setSelectedOrcamento(null)}
+                    className="btn btn-secondary"
+                    style={{ padding: '7px 12px', fontSize: '0.8rem' }}
+                    title="Fechar painel de projetos deste orçamento"
+                  >
+                    Desmarcar
                   </button>
                 </div>
               </div>
 
+              {/* Tabela de Projetos Completa Full-Width */}
               <div className="table-container" style={{ margin: 0 }}>
                 <table className="data-table">
                   <thead>
                     <tr>
-                      <th style={{ width: '18%' }}>Projeto</th>
-                      <th style={{ width: '6%', textAlign: 'center' }}>Peças</th>
+                      <th style={{ width: '20%' }}>Projeto</th>
+                      <th style={{ width: '7%', textAlign: 'center' }}>Peças</th>
                       <th style={{ width: '10%', textAlign: 'right' }}>Custo Mat.</th>
                       <th style={{ width: '10%', textAlign: 'right' }}>Custo Prod.</th>
-                      <th style={{ width: '10%', textAlign: 'right' }}>Total Custo</th>
-                      <th style={{ width: '13%', textAlign: 'center' }}>Produção</th>
+                      <th style={{ width: '11%', textAlign: 'right' }}>Total Custo</th>
+                      <th style={{ width: '11%', textAlign: 'center' }}>Produção</th>
                       <th style={{ width: '8%', textAlign: 'center' }}>Montagem</th>
-                      <th style={{ width: '11%', textAlign: 'right', color: 'var(--color-success)' }}>Preço</th>
-                      <th style={{ width: '14%', textAlign: 'right' }}>Ações</th>
+                      <th style={{ width: '11%', textAlign: 'right', color: 'var(--color-success)' }}>Preço Final</th>
+                      <th style={{ width: '12%', textAlign: 'right' }}>Ações</th>
                     </tr>
                   </thead>
                   <tbody>
                     {projetos.length === 0 ? (
                       <tr>
-                        <td colSpan="9" style={{ textAlign: 'center', color: 'var(--text-muted)' }}>Nenhum projeto cadastrado para este orçamento.</td>
+                        <td colSpan="9" style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '36px 12px' }}>
+                          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px' }}>
+                            <Package size={28} style={{ opacity: 0.4 }} />
+                            <span>Nenhum projeto cadastrado para este orçamento.</span>
+                            {isSituacaoEmAberto(selectedOrcamento?.status) && (
+                              <button
+                                onClick={handleOpenAddProjectModal}
+                                className="btn btn-primary"
+                                style={{ marginTop: '8px', fontSize: '0.8rem', padding: '6px 14px' }}
+                              >
+                                Cadastrar Primeiro Projeto
+                              </button>
+                            )}
+                          </div>
+                        </td>
                       </tr>
                     ) : (
                       <>
                         {projetos.map((p) => (
                           <tr key={p.id}>
                             <td style={{ fontWeight: 600 }}>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                                 <span>{p.nome}</span>
                                 {p.ProjetoURL && (
                                   <button 
@@ -18008,17 +18828,21 @@ function Orcamentos() {
                                       handleOpenProjectUrlPopup(p.ProjetoURL);
                                     }}
                                     style={{ 
-                                      background: 'transparent', 
-                                      border: 'none', 
+                                      background: 'rgba(6, 182, 212, 0.1)', 
+                                      border: '1px solid rgba(6, 182, 212, 0.3)', 
+                                      borderRadius: '4px',
                                       cursor: 'pointer', 
                                       color: 'var(--accent-cyan)', 
                                       display: 'inline-flex', 
                                       alignItems: 'center', 
-                                      padding: '2px' 
+                                      padding: '3px 6px',
+                                      fontSize: '0.75rem',
+                                      gap: '4px'
                                     }} 
-                                    title={`Abrir URL do projeto em popup: ${p.ProjetoURL}`}
+                                    title={`Abrir link do projeto: ${p.ProjetoURL}`}
                                   >
-                                    <ExternalLink size={13} />
+                                    <ExternalLink size={12} />
+                                    <span>Link</span>
                                   </button>
                                 )}
                               </div>
@@ -18032,8 +18856,10 @@ function Orcamentos() {
                             <td style={{ textAlign: 'center', fontWeight: 600, color: 'var(--accent-cyan)', whiteSpace: 'nowrap' }}>
                               {formatarDuracaoProducao(p.DuracaoFabricacao || p.Duracao)}
                             </td>
-                            <td style={{ textAlign: 'center', fontWeight: 600, color: 'var(--accent-cyan)' }}>{p.DuracaoMontagem || 0} {p.DuracaoMontagem === 1 ? 'dia' : 'dias'}</td>
-                            <td style={{ textAlign: 'right', fontWeight: 700, color: 'var(--color-success)' }}>
+                            <td style={{ textAlign: 'center', fontWeight: 600, color: 'var(--accent-cyan)' }}>
+                              {p.DuracaoMontagem || 0} {p.DuracaoMontagem === 1 ? 'dia' : 'dias'}
+                            </td>
+                            <td style={{ textAlign: 'right', fontWeight: 700, color: 'var(--color-success)', fontSize: '0.92rem' }}>
                               R$ {formatDecimalPtBr(p.preco_venda_final || 0)}
                             </td>
                             <td style={{ textAlign: 'right' }}>
@@ -18109,9 +18935,9 @@ function Orcamentos() {
                           </tr>
                         ))}
 
-                        {/* Linha de Totalização */}
+                        {/* Linha de Totalização Consolidada */}
                         <tr style={{ background: 'rgba(255, 255, 255, 0.04)', borderTop: '2px solid var(--glass-border)', fontWeight: 700 }}>
-                          <td style={{ fontWeight: 800, color: 'var(--text-main)' }}>Total</td>
+                          <td style={{ fontWeight: 800, color: 'var(--text-main)' }}>Total Consolidado</td>
                           <td style={{ textAlign: 'center', color: 'var(--accent-cyan)', fontWeight: 700 }}>
                             {projetos.reduce((acc, p) => acc + (parseInt(p.ProjetoQtdPecas, 10) || 0), 0)}
                           </td>
@@ -18130,7 +18956,7 @@ function Orcamentos() {
                           <td style={{ textAlign: 'center', color: 'var(--accent-cyan)' }}>
                             {projetos.reduce((acc, p) => acc + (parseInt(p.DuracaoMontagem, 10) || 0), 0)} {projetos.reduce((acc, p) => acc + (parseInt(p.DuracaoMontagem, 10) || 0), 0) === 1 ? 'dia' : 'dias'}
                           </td>
-                          <td style={{ textAlign: 'right', fontWeight: 800, color: 'var(--color-success)' }}>
+                          <td style={{ textAlign: 'right', fontWeight: 800, color: 'var(--color-success)', fontSize: '0.95rem' }}>
                             R$ {formatDecimalPtBr(financeiroConsolidado.precoTotal)}
                           </td>
                           <td></td>
@@ -18141,9 +18967,11 @@ function Orcamentos() {
                 </table>
               </div>
 
-              {/* Barra Inferior: Botões de Ação e Preço Total Destacado */}
+              {/* Barra Inferior de Ações e Preço Total Consolidado */}
               <div style={{ 
-                marginTop: '16px', 
+                marginTop: '20px', 
+                paddingTop: '16px',
+                borderTop: '1px solid var(--glass-border)',
                 display: 'flex', 
                 justifyContent: 'space-between', 
                 alignItems: 'center', 
@@ -18151,7 +18979,7 @@ function Orcamentos() {
                 gap: '16px' 
               }}>
                 {/* Botões de Ação do Orçamento */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
                   <button 
                     onClick={() => imprimirMateriaisConsolidados(selectedOrcamento, projetos)} 
                     className="btn btn-secondary" 
@@ -18271,24 +19099,24 @@ function Orcamentos() {
                   </button>
                 </div>
 
-                {/* Card Preço Total */}
+                {/* Card Preço Total do Orçamento */}
                 <div style={{ display: 'flex', alignItems: 'center', gap: '14px', flexWrap: 'wrap' }}>
                   <div style={{ 
-                    padding: '8px 20px', 
-                    background: 'linear-gradient(135deg, rgba(6, 182, 212, 0.15) 0%, rgba(59, 130, 246, 0.1) 100%)', 
-                    border: '1.5px solid rgba(6, 182, 212, 0.45)', 
+                    padding: '8px 24px', 
+                    background: 'linear-gradient(135deg, rgba(6, 182, 212, 0.2) 0%, rgba(59, 130, 246, 0.15) 100%)', 
+                    border: '1.5px solid rgba(6, 182, 212, 0.5)', 
                     borderRadius: 'var(--border-radius-md)', 
                     display: 'flex', 
                     flexDirection: 'column', 
                     justifyContent: 'center', 
                     alignItems: 'flex-end',
-                    minWidth: '180px',
-                    boxShadow: '0 4px 15px rgba(6, 182, 212, 0.12)'
+                    minWidth: '200px',
+                    boxShadow: '0 4px 20px rgba(6, 182, 212, 0.15)'
                   }}>
                     <span style={{ fontSize: '0.75rem', color: 'var(--accent-cyan)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-                      Preço Total
+                      Preço Total do Orçamento
                     </span>
-                    <span style={{ fontSize: '1.35rem', fontWeight: 800, color: 'var(--accent-cyan)', lineHeight: 1.2, marginTop: '2px' }}>
+                    <span style={{ fontSize: '1.45rem', fontWeight: 800, color: 'var(--accent-cyan)', lineHeight: 1.2, marginTop: '2px' }}>
                       R$ {formatDecimalPtBr(financeiroConsolidado.precoTotal)}
                     </span>
                   </div>
@@ -18296,11 +19124,52 @@ function Orcamentos() {
               </div>
             </div>
           ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '300px', color: 'var(--text-muted)' }}>
-              <Briefcase size={40} style={{ marginBottom: '16px', opacity: 0.4 }} />
-              <p style={{ textAlign: 'center', fontSize: '0.95rem' }}>
-                Selecione um orçamento à esquerda clicando no ícone do projeto para visualizar seus projetos correspondentes.
+            <div style={{ 
+              display: 'flex', 
+              flexDirection: 'column', 
+              alignItems: 'center', 
+              justifyContent: 'center', 
+              minHeight: '280px', 
+              color: 'var(--text-muted)',
+              padding: '32px 16px',
+              textAlign: 'center'
+            }}>
+              <div style={{
+                width: '64px',
+                height: '64px',
+                borderRadius: '50%',
+                background: 'rgba(6, 182, 212, 0.08)',
+                border: '1.5px dashed rgba(6, 182, 212, 0.35)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                marginBottom: '16px'
+              }}>
+                <Briefcase size={30} style={{ color: 'var(--accent-cyan)', opacity: 0.8 }} />
+              </div>
+              <h4 style={{ fontWeight: 700, color: 'var(--text-main)', marginBottom: '6px' }}>
+                Nenhum Orçamento Selecionado
+              </h4>
+              <p style={{ maxWidth: '520px', fontSize: '0.9rem', lineHeight: 1.5, marginBottom: '18px' }}>
+                Clique em qualquer orçamento na tabela acima para visualizar, editar seus projetos integrados, custos de fábrica e emitir a proposta comercial.
               </p>
+              {filteredOrcamentos.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => handleSelectOrcamento(filteredOrcamentos[0])}
+                  className="btn btn-secondary"
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    fontSize: '0.85rem',
+                    color: 'var(--accent-cyan)',
+                    borderColor: 'rgba(6, 182, 212, 0.4)'
+                  }}
+                >
+                  <span>Selecionar primeiro orçamento (#{filteredOrcamentos[0].numero} - {filteredOrcamentos[0].cliente_nome})</span>
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -18317,7 +19186,28 @@ function Orcamentos() {
             <form onSubmit={handleSubmit} autoComplete="off">
               {/* Searchable Combobox for Cliente */}
               <div className="form-group" style={{ position: 'relative' }} onClick={(e) => e.stopPropagation()}>
-                <label className="form-label">Cliente</label>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+                  <label className="form-label" style={{ margin: 0 }}>Cliente</label>
+                  <button
+                    type="button"
+                    onClick={() => handleAbrirNovoClienteModal()}
+                    className="btn btn-secondary"
+                    style={{
+                      padding: '3px 8px',
+                      fontSize: '0.75rem',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '4px',
+                      background: 'rgba(6, 182, 212, 0.1)',
+                      borderColor: 'rgba(6, 182, 212, 0.35)',
+                      color: 'var(--accent-cyan)'
+                    }}
+                    title="Cadastrar novo cliente rapidamente em tela popup / modal"
+                  >
+                    <UserPlus size={13} />
+                    <span>+ Novo Cliente</span>
+                  </button>
+                </div>
                 <input 
                   type="text" 
                   className="form-control" 
@@ -18385,9 +19275,30 @@ function Orcamentos() {
                     zIndex: 100,
                     marginTop: '4px',
                     color: 'var(--text-muted)',
-                    fontSize: '0.85rem'
+                    fontSize: '0.85rem',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '8px'
                   }}>
-                    Nenhum cliente ativo encontrado
+                    <div>Nenhum cliente ativo encontrado</div>
+                    {clienteSearch.trim() && (
+                      <button
+                        type="button"
+                        onClick={() => handleAbrirNovoClienteModal(clienteSearch)}
+                        className="btn btn-primary"
+                        style={{
+                          padding: '4px 10px',
+                          fontSize: '0.78rem',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '6px',
+                          alignSelf: 'flex-start'
+                        }}
+                      >
+                        <UserPlus size={13} />
+                        <span>Cadastrar "{clienteSearch}" como novo cliente</span>
+                      </button>
+                    )}
                   </div>
                 )}
               </div>
@@ -18437,6 +19348,203 @@ function Orcamentos() {
               <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', marginTop: '24px' }}>
                 <button type="button" onClick={() => setShowModal(false)} className="btn btn-secondary">Cancelar</button>
                 <button type="submit" className="btn btn-primary">{orcamentoEditMode ? 'Salvar Alterações' : 'Salvar Orçamento'}</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Popup Rápido de Novo Cliente */}
+      {showNovoClienteModal && (
+        <div 
+          className="modal-overlay" 
+          style={{ zIndex: 1200 }} 
+          onClick={(e) => {
+            e.stopPropagation();
+            setShowNovoClienteModal(false);
+          }}
+        >
+          <div 
+            className="glass-card modal-content" 
+            style={{ maxWidth: '580px', width: '95%' }} 
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="modal-header">
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <div style={{ 
+                  width: '36px', 
+                  height: '36px', 
+                  borderRadius: '8px', 
+                  background: 'rgba(6, 182, 212, 0.15)', 
+                  display: 'flex', 
+                  alignItems: 'center', 
+                  justifyContent: 'center',
+                  color: 'var(--accent-cyan)' 
+                }}>
+                  <UserPlus size={20} />
+                </div>
+                <div>
+                  <h3 className="modal-title" style={{ margin: 0, fontSize: '1.15rem' }}>Novo Cliente</h3>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Cadastro rápido de cliente para o orçamento</span>
+                </div>
+              </div>
+              <button 
+                type="button" 
+                onClick={() => setShowNovoClienteModal(false)} 
+                className="close-btn"
+              >
+                &times;
+              </button>
+            </div>
+
+            {novoClienteError && (
+              <div className="alert alert-danger" style={{ marginBottom: '16px' }}>
+                {novoClienteError}
+              </div>
+            )}
+
+            <form onSubmit={handleSalvarNovoCliente} autoComplete="off">
+              {/* Tipo de Pessoa Selector */}
+              <div className="form-group" style={{ background: 'rgba(255,255,255,0.02)', padding: '10px 14px', borderRadius: '8px', border: '1px solid var(--glass-border)', marginBottom: '16px' }}>
+                <label className="form-label" style={{ marginBottom: '8px', fontWeight: 600, fontSize: '0.85rem' }}>Tipo de Pessoa</label>
+                <div style={{ display: 'flex', gap: '24px' }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', color: 'var(--text-main)', fontSize: '0.88rem' }}>
+                    <input 
+                      type="radio" 
+                      name="novoClienteTipo" 
+                      value="Física" 
+                      checked={novoClienteTipo === 'Física'} 
+                      onChange={() => {
+                        setNovoClienteTipo('Física');
+                        setNovoClienteDoc(formatarDocClienteRapido(novoClienteDoc, 'Física'));
+                      }}
+                      style={{ accentColor: 'var(--accent-cyan)', cursor: 'pointer' }}
+                    />
+                    <span>Pessoa Física (CPF)</span>
+                  </label>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', color: 'var(--text-main)', fontSize: '0.88rem' }}>
+                    <input 
+                      type="radio" 
+                      name="novoClienteTipo" 
+                      value="Jurídica" 
+                      checked={novoClienteTipo === 'Jurídica'} 
+                      onChange={() => {
+                        setNovoClienteTipo('Jurídica');
+                        setNovoClienteDoc(formatarDocClienteRapido(novoClienteDoc, 'Jurídica'));
+                      }}
+                      style={{ accentColor: 'var(--accent-cyan)', cursor: 'pointer' }}
+                    />
+                    <span>Pessoa Jurídica (CNPJ)</span>
+                  </label>
+                </div>
+              </div>
+
+              {/* Nome & Documento */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: '14px' }}>
+                <div className="form-group">
+                  <label className="form-label">
+                    {novoClienteTipo === 'Jurídica' ? 'Razão Social / Nome Fantasia' : 'Nome Completo'} <span style={{ color: 'var(--color-danger)' }}>*</span>
+                  </label>
+                  <input 
+                    type="text" 
+                    className="form-control" 
+                    placeholder={novoClienteTipo === 'Jurídica' ? "Ex: Empresa Exemplo Ltda" : "Ex: Maria Silva"}
+                    value={novoClienteNome}
+                    onChange={(e) => setNovoClienteNome(e.target.value)}
+                    required 
+                    autoFocus
+                  />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">{novoClienteTipo === 'Jurídica' ? 'CNPJ' : 'CPF'}</label>
+                  <input 
+                    type="text" 
+                    className="form-control" 
+                    placeholder={novoClienteTipo === 'Jurídica' ? "00.000.000/0000-00" : "000.000.000-00"}
+                    maxLength={novoClienteTipo === 'Jurídica' ? 18 : 14}
+                    value={novoClienteDoc}
+                    onChange={(e) => setNovoClienteDoc(formatarDocClienteRapido(e.target.value, novoClienteTipo))}
+                  />
+                </div>
+              </div>
+
+              {/* Telefone & Email */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.2fr', gap: '14px' }}>
+                <div className="form-group">
+                  <label className="form-label">Telefone / Celular</label>
+                  <input 
+                    type="text" 
+                    className="form-control" 
+                    placeholder="(00) 00000-0000"
+                    maxLength={15}
+                    value={novoClienteTelefone}
+                    onChange={(e) => setNovoClienteTelefone(formatarTelClienteRapido(e.target.value))}
+                  />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Email de Contato</label>
+                  <input 
+                    type="email" 
+                    className="form-control" 
+                    placeholder="email@dominio.com"
+                    value={novoClienteEmail}
+                    onChange={(e) => setNovoClienteEmail(e.target.value)}
+                  />
+                </div>
+              </div>
+
+              {/* Cidade & UF */}
+              <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '14px' }}>
+                <div className="form-group">
+                  <label className="form-label">Cidade</label>
+                  <input 
+                    type="text" 
+                    className="form-control" 
+                    placeholder="Cidade..."
+                    value={novoClienteCidade}
+                    onChange={(e) => setNovoClienteCidade(e.target.value)}
+                  />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">UF</label>
+                  <input 
+                    type="text" 
+                    className="form-control" 
+                    placeholder="PA"
+                    maxLength={2}
+                    value={novoClienteUf}
+                    onChange={(e) => setNovoClienteUf(e.target.value.toUpperCase())}
+                  />
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', marginTop: '20px' }}>
+                <button 
+                  type="button" 
+                  onClick={() => setShowNovoClienteModal(false)} 
+                  className="btn btn-secondary"
+                  disabled={novoClienteLoading}
+                >
+                  Cancelar
+                </button>
+                <button 
+                  type="submit" 
+                  className="btn btn-primary"
+                  disabled={novoClienteLoading}
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+                >
+                  {novoClienteLoading ? (
+                    <>
+                      <RefreshCw size={15} className="spin" />
+                      <span>Salvando...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Check size={16} />
+                      <span>Salvar Cliente</span>
+                    </>
+                  )}
+                </button>
               </div>
             </form>
           </div>
@@ -18716,7 +19824,14 @@ function Orcamentos() {
                             (prod.codigo || '').toLowerCase().includes(term);
                           return matchesSearch;
                         });
-                        filteredList.sort((a, b) => (a.nome || '').localeCompare(b.nome || ''));
+                        filteredList.sort((a, b) => {
+                          if (filterOnlyServicos || (a.tipo === 'Serviço' && b.tipo === 'Serviço')) {
+                            const seqA = a.sequencia !== undefined && a.sequencia !== null ? parseInt(a.sequencia, 10) : 999;
+                            const seqB = b.sequencia !== undefined && b.sequencia !== null ? parseInt(b.sequencia, 10) : 999;
+                            if (seqA !== seqB) return seqA - seqB;
+                          }
+                          return (a.nome || '').localeCompare(b.nome || '');
+                        });
                         if (filteredList.length === 0) {
                           return (
                             <div style={{ padding: '16px', color: 'var(--text-muted)', fontSize: '0.85rem', textAlign: 'center' }}>
@@ -19014,6 +20129,11 @@ function Orcamentos() {
                                 const isServicoB = b.MaterialTipo === 'Serviço' ? 1 : 0;
                                 if (isServicoA !== isServicoB) {
                                   return isServicoA - isServicoB;
+                                }
+                                if (isServicoA === 1 && isServicoB === 1) {
+                                  const seqA = a.sequencia !== undefined && a.sequencia !== null ? parseInt(a.sequencia, 10) : (a.servico_sequencia !== undefined && a.servico_sequencia !== null ? parseInt(a.servico_sequencia, 10) : 999);
+                                  const seqB = b.sequencia !== undefined && b.sequencia !== null ? parseInt(b.sequencia, 10) : (b.servico_sequencia !== undefined && b.servico_sequencia !== null ? parseInt(b.servico_sequencia, 10) : 999);
+                                  if (seqA !== seqB) return seqA - seqB;
                                 }
                                 return (a.MaterialDescricao || '').localeCompare(b.MaterialDescricao || '');
                               }).map(item => {
@@ -19906,7 +21026,10 @@ function Orcamentos() {
       {showClienteContratoModal && contratoCliente && contratoOrcamento && (
         <ModalCadastroClienteContrato
           isOpen={showClienteContratoModal}
-          onClose={() => setShowClienteContratoModal(false)}
+          onClose={() => {
+            setShowClienteContratoModal(false);
+            fetchOrcamentosAndClientes();
+          }}
           cliente={contratoCliente}
           orcamento={contratoOrcamento}
           onSalvarEAvancar={(updatedCliente) => {
@@ -19922,10 +21045,16 @@ function Orcamentos() {
       {showMinutaContratoModal && contratoOrcamento && contratoCliente && (
         <ModalMinutaContrato
           isOpen={showMinutaContratoModal}
-          onClose={() => setShowMinutaContratoModal(false)}
+          onClose={() => {
+            setShowMinutaContratoModal(false);
+            fetchOrcamentosAndClientes();
+          }}
           orcamento={contratoOrcamento}
           cliente={contratoCliente}
           projetos={contratoProjetos}
+          onAssinado={() => {
+            fetchOrcamentosAndClientes();
+          }}
           onEditarCliente={() => {
             setShowMinutaContratoModal(false);
             setShowClienteContratoModal(true);
@@ -20628,7 +21757,10 @@ function OrcamentosEfetivados() {
       {showClienteContratoModal && contratoCliente && contratoOrcamento && (
         <ModalCadastroClienteContrato
           isOpen={showClienteContratoModal}
-          onClose={() => setShowClienteContratoModal(false)}
+          onClose={() => {
+            setShowClienteContratoModal(false);
+            fetchOrcamentos();
+          }}
           cliente={contratoCliente}
           orcamento={contratoOrcamento}
           onSalvarEAvancar={(updatedCliente) => {
@@ -20644,10 +21776,16 @@ function OrcamentosEfetivados() {
       {showMinutaContratoModal && contratoOrcamento && contratoCliente && (
         <ModalMinutaContrato
           isOpen={showMinutaContratoModal}
-          onClose={() => setShowMinutaContratoModal(false)}
+          onClose={() => {
+            setShowMinutaContratoModal(false);
+            fetchOrcamentos();
+          }}
           orcamento={contratoOrcamento}
           cliente={contratoCliente}
           projetos={contratoProjetos}
+          onAssinado={() => {
+            fetchOrcamentos();
+          }}
           onEditarCliente={() => {
             setShowMinutaContratoModal(false);
             setShowClienteContratoModal(true);
@@ -22055,7 +23193,14 @@ function Projetos() {
                             (prod.codigo || '').toLowerCase().includes(term);
                           return matchesSearch;
                         });
-                        filteredList.sort((a, b) => (a.nome || '').localeCompare(b.nome || ''));
+                        filteredList.sort((a, b) => {
+                          if (filterOnlyServicos || (a.tipo === 'Serviço' && b.tipo === 'Serviço')) {
+                            const seqA = a.sequencia !== undefined && a.sequencia !== null ? parseInt(a.sequencia, 10) : 999;
+                            const seqB = b.sequencia !== undefined && b.sequencia !== null ? parseInt(b.sequencia, 10) : 999;
+                            if (seqA !== seqB) return seqA - seqB;
+                          }
+                          return (a.nome || '').localeCompare(b.nome || '');
+                        });
                         if (filteredList.length === 0) {
                           return (
                             <div style={{ padding: '16px', color: 'var(--text-muted)', fontSize: '0.85rem', textAlign: 'center' }}>
@@ -22089,7 +23234,7 @@ function Projetos() {
                                           borderRadius: '4px', 
                                           color: !isItensModalEmAberto ? 'var(--text-muted)' : 'var(--accent-cyan)', 
                                           cursor: !isItensModalEmAberto ? 'not-allowed' : 'pointer', 
-                                          opacity: !isItensModalEmAberto ? 0.5 : 1,
+                                          opacity: !isItensModalEmAberto ? 0.5 : 1, 
                                           padding: '4px', 
                                           display: 'inline-flex', 
                                           alignItems: 'center', 
@@ -22325,6 +23470,11 @@ function Projetos() {
                                 const isServicoB = b.MaterialTipo === 'Serviço' ? 1 : 0;
                                 if (isServicoA !== isServicoB) {
                                   return isServicoA - isServicoB;
+                                }
+                                if (isServicoA === 1 && isServicoB === 1) {
+                                  const seqA = a.sequencia !== undefined && a.sequencia !== null ? parseInt(a.sequencia, 10) : (a.servico_sequencia !== undefined && a.servico_sequencia !== null ? parseInt(a.servico_sequencia, 10) : 999);
+                                  const seqB = b.sequencia !== undefined && b.sequencia !== null ? parseInt(b.sequencia, 10) : (b.servico_sequencia !== undefined && b.servico_sequencia !== null ? parseInt(b.servico_sequencia, 10) : 999);
+                                  if (seqA !== seqB) return seqA - seqB;
                                 }
                                 return (a.MaterialDescricao || '').localeCompare(b.MaterialDescricao || '');
                               }).map(item => {
@@ -23148,7 +24298,16 @@ function Financeiro() {
 
   const handleAbrirFluxoFinanceiro = async (orc) => {
     try {
-      setFluxoOrcamento(orc);
+      let orcAtualizado = orc;
+      try {
+        const orcRes = await api.get(`/orcamentos/${orc.numero || orc.id}`);
+        if (orcRes.data) {
+          orcAtualizado = orcRes.data;
+        }
+      } catch (e) {
+        // fallback
+      }
+      setFluxoOrcamento(orcAtualizado);
       let projs = [];
       try {
         const projRes = await api.get(`/projetos?orcamento_numero=${orc.numero}`);
@@ -23514,7 +24673,10 @@ function Financeiro() {
       {showClienteContratoModal && contratoCliente && contratoOrcamento && (
         <ModalCadastroClienteContrato
           isOpen={showClienteContratoModal}
-          onClose={() => setShowClienteContratoModal(false)}
+          onClose={() => {
+            setShowClienteContratoModal(false);
+            fetchFin();
+          }}
           cliente={contratoCliente}
           orcamento={contratoOrcamento}
           onSalvarEAvancar={(updatedCliente) => {
@@ -23530,10 +24692,16 @@ function Financeiro() {
       {showMinutaContratoModal && contratoOrcamento && contratoCliente && (
         <ModalMinutaContrato
           isOpen={showMinutaContratoModal}
-          onClose={() => setShowMinutaContratoModal(false)}
+          onClose={() => {
+            setShowMinutaContratoModal(false);
+            fetchFin();
+          }}
           orcamento={contratoOrcamento}
           cliente={contratoCliente}
           projetos={contratoProjetos}
+          onAssinado={() => {
+            fetchFin();
+          }}
           onEditarCliente={() => {
             setShowMinutaContratoModal(false);
             setShowClienteContratoModal(true);
@@ -26117,7 +27285,6 @@ function PropostaPublica() {
   }, [token]);
 
   // Sincronizar índice da condição selecionada a partir dos dados do orçamento
-  // (useEffect movido para antes dos returns condicionais para respeitar Rules of Hooks)
   useEffect(() => {
     if (!data) return;
     const { formas_pagamento } = data;
@@ -26136,11 +27303,14 @@ function PropostaPublica() {
     }
     const conds = Array.isArray(selForma?.condicoes) ? selForma.condicoes : [];
     if (conds.length > 0) {
-      const fpSel = data.orcamento?.forma_pagamento_selecionada || data.compartilhamento?.forma_pagamento_selecionada;
+      const fpSel = (data.orcamento?.forma_pagamento_selecionada || data.compartilhamento?.forma_pagamento_selecionada || '').trim();
       if (fpSel) {
         const idx = conds.findIndex(c => {
-          const descCompleta = `${selForma?.nome || ''} - ${c.descricao || c.meio_pagamento || ''}`.trim();
-          return descCompleta === fpSel || c.descricao === fpSel;
+          const descCompleta = `${selForma?.nome || ''} - ${c.descricao || c.meio_pagamento || ''}`.trim().toLowerCase();
+          const fpLower = fpSel.toLowerCase();
+          const descLower = (c.descricao || '').toLowerCase();
+          const meioLower = (c.meio_pagamento || '').toLowerCase();
+          return descCompleta === fpLower || descLower === fpLower || fpLower.includes(descLower) || (meioLower && fpLower.includes(meioLower));
         });
         if (idx >= 0) {
           setSelectedCondicaoIdx(idx);
@@ -26259,15 +27429,26 @@ function PropostaPublica() {
 
   const handleAprovarProposta = async () => {
     const descForma = getDescricaoFormaSelecionada();
+    const condicaoSelecionada = condicoes[selectedCondicaoIdx];
     setApproving(true);
     setActionStatus(null);
     try {
       const res = await axios.post(`${API_BASE_URL}/public/propostas/${token}/aprovar`, {
         forma_pagamento_descricao: descForma,
+        condicao_id: condicaoSelecionada?.id || null,
         anotacoes: anotacoes
       });
       if (res.data?.orcamento) {
-        setData(prev => ({ ...prev, orcamento: res.data.orcamento }));
+        setData(prev => ({ 
+          ...prev, 
+          orcamento: res.data.orcamento,
+          compartilhamento: {
+            ...prev.compartilhamento,
+            status: 'Aprovado',
+            forma_pagamento_selecionada: descForma,
+            aprovado_em: new Date().toISOString()
+          }
+        }));
       }
       setActionStatus({ 
         type: 'approved', 

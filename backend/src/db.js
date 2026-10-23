@@ -250,84 +250,30 @@ export async function initDb() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
   `);
 
-  // Tabela: ordens_servico
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS ordens_servico (
-      numero BIGINT PRIMARY KEY,
-      data_abertura DATETIME DEFAULT CURRENT_TIMESTAMP,
-      data_fechamento DATETIME DEFAULT NULL,
-      status VARCHAR(50) NOT NULL DEFAULT 'Aberta',
-      ambiente VARCHAR(255) DEFAULT NULL,
-      cliente VARCHAR(255) DEFAULT NULL,
-      qtd_pecas INT DEFAULT 0,
-      qtd_chapas INT DEFAULT 0,
-      qtd_especiais INT DEFAULT 0,
-      qtd_caixa INT DEFAULT 0,
-      tempo_previsto INT DEFAULT 0,
-      tempo_real INT DEFAULT 0,
-      cronograma LONGTEXT DEFAULT NULL,
-      data_inicio DATETIME DEFAULT NULL,
-      data_fim DATETIME DEFAULT NULL
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-  `);
+  // Migração: Renomear Ordem_Controle para Ordem_Servico se existir
+  try {
+    const tableControle = await db.all("SHOW TABLES LIKE 'Ordem_Controle'");
+    const tableServico = await db.all("SHOW TABLES LIKE 'Ordem_Servico'");
+    if (tableControle && tableControle.length > 0 && (!tableServico || tableServico.length === 0)) {
+      await db.exec('RENAME TABLE `Ordem_Controle` TO `Ordem_Servico`');
+      console.log('Tabela Ordem_Controle renomeada para Ordem_Servico com sucesso.');
+    }
+  } catch (renameErr) {
+    console.warn('Aviso ao renomear Ordem_Controle para Ordem_Servico:', renameErr.message);
+  }
 
-  // Tabela: os_servicos
+  // Tabela: Ordem_Servico (PK composta: Numero, ProjetoID)
   await db.exec(`
-    CREATE TABLE IF NOT EXISTS os_servicos (
-      os_numero BIGINT NOT NULL,
-      servico_id INT NOT NULL,
-      quantidade INT NOT NULL,
-      tempo_previsto INT NOT NULL,
-      data_inicio DATETIME DEFAULT NULL,
-      data_fim DATETIME DEFAULT NULL,
-      tempo_real INT DEFAULT NULL,
-      PRIMARY KEY (os_numero, servico_id),
-      FOREIGN KEY (os_numero) REFERENCES ordens_servico(numero) ON DELETE CASCADE,
-      FOREIGN KEY (servico_id) REFERENCES servicos(id) ON DELETE RESTRICT
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-  `);
-
-  // Tabela: os_pecas
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS os_pecas (
-      id INT AUTO_INCREMENT PRIMARY KEY,
-      os_numero BIGINT NOT NULL,
-      modulo VARCHAR(255) DEFAULT NULL,
-      chapa VARCHAR(255) DEFAULT NULL,
-      posicao VARCHAR(255) DEFAULT NULL,
-      dimensoes VARCHAR(255) DEFAULT NULL,
-      descricao VARCHAR(255) NOT NULL,
-      codigo VARCHAR(255) DEFAULT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (os_numero) REFERENCES ordens_servico(numero) ON DELETE CASCADE
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-  `);
-
-  // Tabela: OS_Chapas
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS OS_Chapas (
-      id INT AUTO_INCREMENT PRIMARY KEY,
-      os_numero BIGINT NOT NULL,
-      cliente VARCHAR(255) DEFAULT NULL,
-      projeto VARCHAR(255) DEFAULT NULL,
-      chapa VARCHAR(255) DEFAULT NULL,
-      acabamento VARCHAR(255) DEFAULT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (os_numero) REFERENCES ordens_servico(numero) ON DELETE CASCADE
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-  `);
-
-  // Tabela: OS_ChapasPecas
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS OS_ChapasPecas (
-      id INT AUTO_INCREMENT PRIMARY KEY,
-      chapa_id INT NOT NULL,
-      item VARCHAR(255) DEFAULT NULL,
-      descricao TEXT DEFAULT NULL,
-      dimensao VARCHAR(255) DEFAULT NULL,
-      descricao_pai VARCHAR(255) DEFAULT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (chapa_id) REFERENCES OS_Chapas(id) ON DELETE CASCADE
+    CREATE TABLE IF NOT EXISTS Ordem_Servico (
+      Numero BIGINT NOT NULL,
+      ProjetoID DECIMAL(3,0) NOT NULL DEFAULT 1,
+      DataCriacao DATE DEFAULT (CURRENT_DATE),
+      DataConclusao DATE DEFAULT NULL,
+      Situacao VARCHAR(20) NOT NULL DEFAULT 'Aberta',
+      Responsavel VARCHAR(20) DEFAULT NULL,
+      NomeProjeto VARCHAR(255) DEFAULT NULL,
+      Tempo INT DEFAULT 0,
+      PRIMARY KEY (Numero, ProjetoID)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
   `);
 
@@ -486,14 +432,14 @@ export async function initDb() {
     CREATE TABLE IF NOT EXISTS Projeto_Pecas (
       id INT AUTO_INCREMENT PRIMARY KEY,
       projeto_id INT NOT NULL,
-      peca VARCHAR(255) NOT NULL,
-      etiqueta VARCHAR(255) NOT NULL,
-      dimen VARCHAR(255) NOT NULL,
-      chapa VARCHAR(255) NOT NULL,
-      modulo VARCHAR(255) NOT NULL,
-      cod_item VARCHAR(255) NOT NULL,
+      peca VARCHAR(255) DEFAULT NULL,
+      etiqueta VARCHAR(255) DEFAULT NULL,
+      dimen VARCHAR(255) DEFAULT NULL,
+      chapa VARCHAR(255) DEFAULT NULL,
+      modulo VARCHAR(255) DEFAULT NULL,
+      cod_item VARCHAR(255) DEFAULT NULL,
       imagem LONGTEXT DEFAULT NULL,
-      cor_barras VARCHAR(100) DEFAULT NULL,
+      cor_barras LONGTEXT DEFAULT NULL,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (projeto_id) REFERENCES projetos(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -651,10 +597,29 @@ export async function initDb() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
   `);
 
+  // Tabela: ordem_servico_checklist (Checklist da Revisão Técnica da Ordem de Serviço)
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS ordem_servico_checklist (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      numero BIGINT NOT NULL,
+      projeto_id DECIMAL(3,0) NOT NULL DEFAULT 1,
+      tarefa_key VARCHAR(50) NOT NULL,
+      tarefa_texto TEXT NOT NULL,
+      concluido TINYINT DEFAULT 0,
+      data_conclusao DATETIME DEFAULT NULL,
+      responsavel VARCHAR(255) DEFAULT NULL,
+      observacao TEXT DEFAULT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uk_os_tarefa (numero, projeto_id, tarefa_key),
+      INDEX idx_os_checklist (numero, projeto_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+  `);
+
   // 4. Migrações automáticas de colunas adicionais
   await ensureColumn(db, 'servicos', 'sequencia', 'INT DEFAULT 0');
   await ensureColumn(db, 'clientes', 'tipo_pessoa', "VARCHAR(20) NOT NULL DEFAULT 'Física'");
-  await ensureColumn(db, 'ordens_servico', 'cronograma', 'LONGTEXT DEFAULT NULL');
+
   await ensureColumn(db, 'Material', 'ExibirNaProposta', "VARCHAR(10) DEFAULT 'Nao'");
   await ensureColumn(db, 'Material', 'ProdutoGrupo', 'INT DEFAULT 8');
   await ensureColumn(db, 'Material', 'MaterialTempo', 'INT DEFAULT 0');
@@ -693,8 +658,46 @@ export async function initDb() {
   await ensureColumn(db, 'projeto_anexos', 'exibir_na_proposta', "VARCHAR(10) DEFAULT 'Sim'");
   await ensureColumn(db, 'proposta_compartilhamentos', 'aprovado_em', 'DATETIME DEFAULT NULL');
   await ensureColumn(db, 'proposta_compartilhamentos', 'forma_pagamento_selecionada', 'TEXT DEFAULT NULL');
-  await ensureColumn(db, 'proposta_compartilhamentos', 'anotacoes_cliente', 'TEXT DEFAULT NULL');
   await ensureColumn(db, 'proposta_compartilhamentos', 'proposta_id', 'INT DEFAULT NULL');
+
+  await ensureColumn(db, 'Ordem_Servico', 'ProjetoID', 'DECIMAL(3,0) NOT NULL DEFAULT 1');
+  await ensureColumn(db, 'Ordem_Servico', 'NomeProjeto', 'VARCHAR(255) DEFAULT NULL');
+  await ensureColumn(db, 'Ordem_Servico', 'Tempo', 'INT DEFAULT 0');
+  await ensureColumn(db, 'Ordem_Servico', 'DataCriacao', 'DATE DEFAULT (CURRENT_DATE)');
+  await ensureColumn(db, 'Ordem_Servico', 'DataConclusao', 'DATE DEFAULT NULL');
+  await ensureColumn(db, 'Ordem_Servico', 'Situacao', "VARCHAR(20) NOT NULL DEFAULT 'Aberta'");
+  await ensureColumn(db, 'Ordem_Servico', 'Responsavel', 'VARCHAR(20) DEFAULT NULL');
+
+  // Garantir PK composta (Numero, ProjetoID) em Ordem_Servico
+  try {
+    const pkCols = await db.all(`
+      SELECT COLUMN_NAME 
+      FROM information_schema.KEY_COLUMN_USAGE 
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'Ordem_Servico' AND CONSTRAINT_NAME = 'PRIMARY'
+    `);
+    const pkNames = pkCols ? pkCols.map(c => c.COLUMN_NAME) : [];
+    if (!pkNames.includes('ProjetoID')) {
+      await db.exec('ALTER TABLE `Ordem_Servico` DROP PRIMARY KEY, ADD PRIMARY KEY (`Numero`, `ProjetoID`)');
+      console.log('PK da tabela Ordem_Servico atualizada para (Numero, ProjetoID).');
+    }
+  } catch (pkErr) {
+    console.warn('Aviso ao atualizar PK de Ordem_Servico:', pkErr.message);
+  }
+
+  // Garantir que Projeto_Pecas.cor_barras seja LONGTEXT (para comportar base64 da imagem do código de barras)
+  try {
+    const colInfo = await db.get(`
+      SELECT DATA_TYPE 
+      FROM information_schema.COLUMNS 
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'Projeto_Pecas' AND COLUMN_NAME = 'cor_barras'
+    `);
+    if (colInfo && colInfo.DATA_TYPE !== 'longtext') {
+      await db.exec('ALTER TABLE `Projeto_Pecas` MODIFY COLUMN `cor_barras` LONGTEXT DEFAULT NULL');
+      console.log('Coluna cor_barras da tabela Projeto_Pecas atualizada para LONGTEXT.');
+    }
+  } catch (err) {
+    console.warn('Aviso ao verificar coluna cor_barras de Projeto_Pecas:', err.message);
+  }
 
   // 5. Seeds padrão caso o banco esteja vazio
 
@@ -787,30 +790,7 @@ export async function initDb() {
     console.log('Seeded initial mock services');
   }
 
-  // Seed default Work Orders if empty
-  const osCount = await db.get('SELECT COUNT(*) as count FROM ordens_servico');
-  if (osCount && (osCount.count === 0 || osCount.count === '0')) {
-    const client = await db.get('SELECT id FROM clientes ORDER BY id ASC LIMIT 1');
-    const service1 = await db.get('SELECT id, tempo FROM servicos WHERE nome = ?', ['Usinagem']);
-    const service2 = await db.get('SELECT id, tempo FROM servicos WHERE nome = ?', ['Fitagem']);
 
-    if (client && service1 && service2) {
-      const osNum = 2026000001;
-      await db.run(
-        'INSERT INTO ordens_servico (numero, status, ambiente, cliente, qtd_pecas, qtd_chapas, qtd_especiais, qtd_caixa, tempo_previsto, tempo_real, data_inicio, data_fim) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        [osNum, 'Aberta', 'Planta B - Linha 2', 'Tech Solutions Ltda', 0, 5, 2, 3, 100, 0, null, null]
-      );
-      await db.run(
-        'INSERT INTO os_servicos (os_numero, servico_id, quantidade, tempo_previsto) VALUES (?, ?, ?, ?)',
-        [osNum, service1.id, 2, 90]
-      );
-      await db.run(
-        'INSERT INTO os_servicos (os_numero, servico_id, quantidade, tempo_previsto) VALUES (?, ?, ?, ?)',
-        [osNum, service2.id, 1, 10]
-      );
-      console.log('Seeded initial mock Work Order: 2026000001');
-    }
-  }
 
   // Seed default budgets if empty
   const budgetsCount = await db.get('SELECT COUNT(*) as count FROM orcamentos');

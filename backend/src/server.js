@@ -244,15 +244,15 @@ app.get('/api/clientes/:id', authenticateToken, async (req, res) => {
 });
 
 app.post('/api/clientes', authenticateToken, async (req, res) => {
-  const { nome, documento, email, telefone, status, tipo_pessoa } = req.body;
+  const { nome, documento, email, telefone, status, tipo_pessoa, cidade, uf } = req.body;
   if (!nome || !nome.trim()) {
     return res.status(400).json({ error: 'O nome do cliente é obrigatório.' });
   }
 
   try {
     const result = await db.run(
-      'INSERT INTO clientes (nome, documento, email, telefone, status, tipo_pessoa) VALUES (?, ?, ?, ?, ?, ?)',
-      [nome.trim(), documento || null, email || null, telefone || null, status || 'Ativo', tipo_pessoa || 'Física']
+      'INSERT INTO clientes (nome, documento, email, telefone, status, tipo_pessoa, cidade, uf) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [nome.trim(), documento || null, email || null, telefone || null, status || 'Ativo', tipo_pessoa || 'Física', cidade || null, uf || null]
     );
     const newClient = await db.get('SELECT * FROM clientes WHERE id = ?', [result.lastID]);
     res.status(201).json(newClient);
@@ -522,7 +522,47 @@ app.get('/api/produtos', authenticateToken, async (req, res) => {
       FROM Material 
       ORDER BY MaterialDescricao ASC
     `);
-    res.json(list);
+
+    // Busca tabela de serviços para vincular campo sequencia
+    let servicosList = [];
+    try {
+      servicosList = await db.all('SELECT id, nome, sequencia FROM servicos ORDER BY sequencia ASC, nome ASC');
+    } catch (e) {
+      servicosList = [];
+    }
+
+    const normalize = (str) => (str || '').toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9]/g, ' ')
+      .trim();
+
+    const enriched = list.map(p => {
+      if (p.tipo !== 'Serviço' && !p.codigo?.startsWith('FAB.')) {
+        return { ...p, sequencia: null };
+      }
+      const pNomeNorm = normalize(p.nome);
+      const pCodNorm = normalize(p.codigo);
+
+      const matched = servicosList.find(s => {
+        const sNomeNorm = normalize(s.nome);
+        if (sNomeNorm === pNomeNorm) return true;
+        if (pNomeNorm.includes(sNomeNorm) || sNomeNorm.includes(pNomeNorm)) return true;
+        if ((pCodNorm.includes('cor') || pCodNorm.includes('sep') || pNomeNorm.includes('corte') || pNomeNorm.includes('separacao')) && (sNomeNorm.includes('separacao') || sNomeNorm.includes('corte'))) return true;
+        if ((pCodNorm.includes('usi') || pNomeNorm.includes('usinagem')) && sNomeNorm.includes('usinagem')) return true;
+        if ((pCodNorm.includes('fit') || pNomeNorm.includes('fitagem')) && sNomeNorm.includes('fitagem')) return true;
+        if ((pCodNorm.includes('mon') || pNomeNorm.includes('montagem')) && (sNomeNorm.includes('montagem de caixa') || sNomeNorm.includes('montagem'))) return true;
+        if ((pCodNorm.includes('esp') || pNomeNorm.includes('especial')) && sNomeNorm.includes('especial')) return true;
+        if ((pCodNorm.includes('emb') || pNomeNorm.includes('embalagem')) && sNomeNorm.includes('embalagem')) return true;
+        return false;
+      });
+
+      return {
+        ...p,
+        sequencia: matched && matched.sequencia !== undefined ? matched.sequencia : 999
+      };
+    });
+
+    res.json(enriched);
   } catch (error) {
     res.status(500).json({ error: 'Erro ao buscar produtos.' });
   }
@@ -735,688 +775,423 @@ app.delete('/api/produtos/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// 6. Work Orders (Ordem de Serviço) Routes
-app.get('/api/ordens-servico', authenticateToken, async (req, res) => {
-  try {
-    const list = await db.all(`
-      SELECT ordens_servico.*, ordens_servico.cliente as cliente_nome 
-      FROM ordens_servico 
-      ORDER BY ordens_servico.data_inicio ASC, ordens_servico.numero DESC
-    `);
-    
-    // Parse cronograma JSON if exists
-    const parsedList = list.map(os => {
-      if (os.cronograma) {
-        try {
-          os.cronograma = JSON.parse(os.cronograma);
-        } catch (e) {
-          os.cronograma = null;
-        }
-      }
-      return os;
-    });
 
-    res.json(parsedList);
+
+// Rotas: Ordem_Servico
+async function handleGetOrdemServico(req, res) {
+  try {
+    const { situacao, busca } = req.query;
+    let query = `
+      SELECT 
+        os.Numero, 
+        os.ProjetoID,
+        os.NomeProjeto,
+        os.Tempo,
+        os.DataCriacao, 
+        os.DataConclusao, 
+        os.Situacao, 
+        os.Responsavel,
+        o.descricao AS orcamento_descricao,
+        o.total_venda AS orcamento_total,
+        c.nome AS cliente_nome
+      FROM Ordem_Servico os
+      LEFT JOIN orcamentos o ON os.Numero = o.numero
+      LEFT JOIN clientes c ON o.cliente_id = c.id
+      WHERE 1=1
+    `;
+    const params = [];
+
+    if (situacao && situacao !== 'TODAS' && situacao !== 'Todos') {
+      query += ' AND os.Situacao = ?';
+      params.push(situacao);
+    }
+
+    if (busca) {
+      query += ' AND (os.Numero LIKE ? OR os.Responsavel LIKE ? OR c.nome LIKE ? OR o.descricao LIKE ? OR os.NomeProjeto LIKE ?)';
+      params.push(`%${busca}%`, `%${busca}%`, `%${busca}%`, `%${busca}%`, `%${busca}%`);
+    }
+
+    query += ' ORDER BY os.Numero DESC, os.ProjetoID ASC';
+
+    const items = await db.all(query, params);
+    res.json(items);
   } catch (error) {
+    console.error('GET ORDEM SERVICO ERROR:', error);
     res.status(500).json({ error: 'Erro ao buscar ordens de serviço.' });
   }
-});
-
-app.get('/api/ordens-servico/:numero', authenticateToken, async (req, res) => {
-  const { numero } = req.params;
-  try {
-    const os = await db.get(`
-      SELECT ordens_servico.*, ordens_servico.cliente as cliente_nome 
-      FROM ordens_servico 
-      WHERE ordens_servico.numero = ?
-    `, [numero]);
-
-    if (!os) {
-      return res.status(404).json({ error: 'Ordem de serviço não encontrada.' });
-    }
-
-    if (os.cronograma) {
-      try {
-        os.cronograma = JSON.parse(os.cronograma);
-      } catch (e) {
-        os.cronograma = null;
-      }
-    }
-
-    const items = await db.all(`
-      SELECT os_servicos.*, servicos.nome as servico_nome, servicos.sequencia, servicos.unidade 
-      FROM os_servicos 
-      JOIN servicos ON os_servicos.servico_id = servicos.id 
-      WHERE os_servicos.os_numero = ?
-      ORDER BY servicos.sequencia ASC, servicos.nome ASC
-    `, [numero]);
-
-    res.json({ ...os, servicos: items });
-  } catch (error) {
-    res.status(500).json({ error: 'Erro ao buscar detalhes da ordem de serviço.' });
-  }
-});
-// Helper functions for workday timeline calculations (Monday-Friday 08:00-12:00, 13:30-17:30)
-function avancarProximaHoraUtil(date) {
-  let d = new Date(date);
-  const day = d.getDay();
-  
-  if (day === 6) {
-    d.setDate(d.getDate() + 2);
-    d.setHours(8, 0, 0, 0);
-    return d;
-  }
-  if (day === 0) {
-    d.setDate(d.getDate() + 1);
-    d.setHours(8, 0, 0, 0);
-    return d;
-  }
-  
-  const hour = d.getHours();
-  const minutes = d.getMinutes();
-  const timeInMin = hour * 60 + minutes;
-  
-  if (timeInMin < 8 * 60) {
-    d.setHours(8, 0, 0, 0);
-  } else if (timeInMin >= 12 * 60 && timeInMin < 13 * 60 + 30) {
-    d.setHours(13, 30, 0, 0);
-  } else if (timeInMin >= 17 * 60 + 30) {
-    d.setDate(d.getDate() + 1);
-    d.setHours(8, 0, 0, 0);
-    return avancarProximaHoraUtil(d);
-  }
-  return d;
 }
 
-function somarHorasUteis(startDateObj, durationHours) {
-  let d = new Date(startDateObj);
-  let minutesToAdd = (parseInt(durationHours) || 1) * 60;
-  
-  d = avancarProximaHoraUtil(d);
-  
-  while (minutesToAdd > 0) {
-    const hour = d.getHours();
-    const minutes = d.getMinutes();
-    const timeInMin = hour * 60 + minutes;
+app.get('/api/ordem-servico', authenticateToken, handleGetOrdemServico);
+app.get('/api/ordem-controle', authenticateToken, handleGetOrdemServico);
+
+async function handleGetOrdemServicoById(req, res) {
+  try {
+    const { numero } = req.params;
+    const { projetoId } = req.query;
     
-    if (timeInMin >= 8 * 60 && timeInMin < 12 * 60) {
-      const remainingMorning = 12 * 60 - timeInMin;
-      if (minutesToAdd <= remainingMorning) {
-        d.setMinutes(d.getMinutes() + minutesToAdd);
-        minutesToAdd = 0;
-      } else {
-        minutesToAdd -= remainingMorning;
-        d.setHours(12, 0, 0, 0);
-        d = avancarProximaHoraUtil(d);
+    if (projetoId !== undefined && projetoId !== null && projetoId !== '') {
+      const item = await db.get(
+        'SELECT Numero, ProjetoID, NomeProjeto, Tempo, DataCriacao, DataConclusao, Situacao, Responsavel FROM Ordem_Servico WHERE Numero = ? AND ProjetoID = ?',
+        [numero, projetoId]
+      );
+      if (!item) {
+        return res.status(404).json({ error: 'Ordem de serviço não encontrada.' });
       }
-    } else if (timeInMin >= 13 * 60 + 30 && timeInMin < 17 * 60 + 30) {
-      const remainingAfternoon = (17 * 60 + 30) - timeInMin;
-      if (minutesToAdd <= remainingAfternoon) {
-        d.setMinutes(d.getMinutes() + minutesToAdd);
-        minutesToAdd = 0;
-      } else {
-        minutesToAdd -= remainingAfternoon;
-        d.setHours(17, 30, 0, 0);
-        d = avancarProximaHoraUtil(d);
-      }
+      return res.json(item);
+    }
+
+    const items = await db.all(
+      'SELECT Numero, ProjetoID, NomeProjeto, Tempo, DataCriacao, DataConclusao, Situacao, Responsavel FROM Ordem_Servico WHERE Numero = ? ORDER BY ProjetoID ASC',
+      [numero]
+    );
+    if (!items || items.length === 0) {
+      return res.status(404).json({ error: 'Ordem de serviço não encontrada.' });
+    }
+    res.json(items[0]);
+  } catch (error) {
+    console.error('GET ORDEM SERVICO BY ID ERROR:', error);
+    res.status(500).json({ error: 'Erro ao buscar ordem de serviço.' });
+  }
+}
+
+app.get('/api/ordem-servico/:numero', authenticateToken, handleGetOrdemServicoById);
+app.get('/api/ordem-controle/:numero', authenticateToken, handleGetOrdemServicoById);
+
+async function handlePostOrdemServico(req, res) {
+  try {
+    let { Numero, ProjetoID, DataCriacao, DataConclusao, Situacao, Responsavel, NomeProjeto, Tempo } = req.body;
+
+    if (!Numero) {
+      const maxRow = await db.get('SELECT MAX(Numero) as maxNum FROM Ordem_Servico');
+      Numero = (maxRow && maxRow.maxNum ? maxRow.maxNum : 0) + 1;
+    }
+
+    if (!ProjetoID) {
+      const maxProjRow = await db.get('SELECT MAX(ProjetoID) as maxProj FROM Ordem_Servico WHERE Numero = ?', [Numero]);
+      ProjetoID = (maxProjRow && maxProjRow.maxProj ? parseInt(maxProjRow.maxProj, 10) : 0) + 1;
+    }
+
+    const situacaoVal = Situacao || 'Aberta';
+    const responsavelVal = Responsavel || req.user?.email || req.user?.nome || null;
+    const dataCriacaoVal = DataCriacao || new Date().toISOString().split('T')[0];
+    const dataConclusaoVal = DataConclusao || null;
+    const nomeProjVal = NomeProjeto || null;
+    const tempoVal = parseInt(Tempo, 10) || 0;
+
+    await db.run(
+      'INSERT INTO Ordem_Servico (Numero, ProjetoID, DataCriacao, DataConclusao, Situacao, Responsavel, NomeProjeto, Tempo) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [Numero, ProjetoID, dataCriacaoVal, dataConclusaoVal, situacaoVal, responsavelVal, nomeProjVal, tempoVal]
+    );
+
+    const created = await db.get('SELECT * FROM Ordem_Servico WHERE Numero = ? AND ProjetoID = ?', [Numero, ProjetoID]);
+    res.status(201).json(created);
+  } catch (error) {
+    console.error('CREATE ORDEM SERVICO ERROR:', error);
+    res.status(500).json({ error: 'Erro ao criar ordem de serviço.' });
+  }
+}
+
+app.post('/api/ordem-servico', authenticateToken, handlePostOrdemServico);
+app.post('/api/ordem-controle', authenticateToken, handlePostOrdemServico);
+
+async function handlePutOrdemServico(req, res) {
+  try {
+    const { numero } = req.params;
+    const projetoId = req.query.projetoId || req.body.ProjetoID || req.body.projetoId;
+    
+    let existing;
+    if (projetoId !== undefined && projetoId !== null && projetoId !== '') {
+      existing = await db.get('SELECT * FROM Ordem_Servico WHERE Numero = ? AND ProjetoID = ?', [numero, projetoId]);
     } else {
-      d = avancarProximaHoraUtil(d);
-    }
-  }
-  return d;
-}
-
-app.post('/api/ordens-servico', authenticateToken, async (req, res) => {
-  const { qtd_chapas, qtd_especiais, qtd_caixa } = req.body;
-
-  try {
-    // Generate OS Numero: Year(4) + Sequential(6)
-    const currentYear = new Date().getFullYear();
-    const minRange = currentYear * 1000000;
-    const maxRange = currentYear * 1000000 + 999999;
-    
-    const row = await db.get(
-      'SELECT MAX(numero) as maxNum FROM ordens_servico WHERE numero >= ? AND numero <= ?',
-      [minRange, maxRange]
-    );
-
-    let nextSeq = 1;
-    if (row && row.maxNum) {
-      nextSeq = (row.maxNum % 1000000) + 1;
-    }
-    const osNumero = currentYear * 1000000 + nextSeq;
-
-    // Find the OS with the highest number in situation 'Aberta' with a non-null data_fim
-    const refOs = await db.get(
-      "SELECT data_fim FROM ordens_servico WHERE status = 'Aberta' AND data_fim IS NOT NULL ORDER BY numero DESC LIMIT 1"
-    );
-
-    let computedDataInicio = null;
-    if (refOs && refOs.data_fim) {
-      const d = new Date(refOs.data_fim);
-      d.setDate(d.getDate() + 1);
-      d.setHours(8, 0, 0, 0);
-      const nextWorkday = avancarProximaHoraUtil(d);
-      computedDataInicio = formatDateTimeForMySQL(nextWorkday);
+      existing = await db.get('SELECT * FROM Ordem_Servico WHERE Numero = ? ORDER BY ProjetoID ASC LIMIT 1', [numero]);
     }
 
-    // Insert OS Header with computed data_inicio
-    await db.run(
-      'INSERT INTO ordens_servico (numero, status, ambiente, cliente, qtd_pecas, qtd_chapas, qtd_especiais, qtd_caixa, tempo_previsto, tempo_real, data_inicio, data_fim) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [osNumero, 'Aberta', null, null, 0, parseInt(qtd_chapas) || 0, parseInt(qtd_especiais) || 0, parseInt(qtd_caixa) || 0, 0, 0, computedDataInicio, null]
-    );
-
-    const newOs = await db.get('SELECT * FROM ordens_servico WHERE numero = ?', [osNumero]);
-    res.status(201).json(newOs);
-  } catch (error) {
-    console.error('CREATE OS ERROR:', error);
-    res.status(500).json({ error: 'Erro ao registrar ordem de serviço.' });
-  }
-});
-
-app.put('/api/ordens-servico/:numero', authenticateToken, async (req, res) => {
-  const { numero } = req.params;
-  const { status, ambiente, cliente, qtd_chapas, qtd_especiais, qtd_caixa, servicos, cronograma } = req.body;
-
-  try {
-    const os = await db.get('SELECT * FROM ordens_servico WHERE numero = ?', [numero]);
-    if (!os) {
+    if (!existing) {
       return res.status(404).json({ error: 'Ordem de serviço não encontrada.' });
     }
 
-    let dataFechamento = os.data_fechamento;
-    if (status === 'Fechada' && os.status !== 'Fechada') {
-      dataFechamento = formatDateTimeForMySQL(new Date());
-    } else if (status && status !== 'Fechada') {
-      dataFechamento = null;
-    }
+    const targetProjId = existing.ProjetoID;
+    const { DataCriacao, DataConclusao, Situacao, Responsavel, NomeProjeto, Tempo } = req.body;
 
-
-
-    let computedDataInicio = os.data_inicio;
-    let computedDataFim = os.data_fim;
-
-    if (cronograma !== undefined) {
-      if (cronograma && Array.isArray(cronograma) && cronograma.length > 0) {
-        let minStart = null;
-        let maxEnd = null;
-        cronograma.forEach(t => {
-          if (t.data_inicio) {
-            const sDate = new Date(t.data_inicio);
-            if (!minStart || sDate < minStart) {
-              minStart = sDate;
-            }
-            
-            // Calculate task end date by adding tempo (hours)
-            const duration = parseInt(t.tempo) || 1;
-            const eDate = somarHorasUteis(sDate, duration);
-            if (!maxEnd || eDate > maxEnd) {
-              maxEnd = eDate;
-            }
-          }
-        });
-        computedDataInicio = minStart ? formatDateTimeForMySQL(minStart) : null;
-        computedDataFim = maxEnd ? formatDateTimeForMySQL(maxEnd) : null;
-      } else {
-        computedDataInicio = null;
-        computedDataFim = null;
-      }
-    }
-
-    await db.run('BEGIN TRANSACTION');
-
-    // 1. Update OS header fields
     await db.run(
-      'UPDATE ordens_servico SET status = ?, ambiente = ?, cliente = ?, qtd_chapas = ?, qtd_especiais = ?, qtd_caixa = ?, data_fechamento = ?, cronograma = ?, data_inicio = ?, data_fim = ? WHERE numero = ?',
+      'UPDATE Ordem_Servico SET DataCriacao = ?, DataConclusao = ?, Situacao = ?, Responsavel = ?, NomeProjeto = ?, Tempo = ? WHERE Numero = ? AND ProjetoID = ?',
       [
-        status || os.status,
-        ambiente !== undefined ? ambiente : os.ambiente,
-        cliente !== undefined ? cliente : os.cliente,
-        qtd_chapas !== undefined ? parseInt(qtd_chapas) : os.qtd_chapas,
-        qtd_especiais !== undefined ? parseInt(qtd_especiais) : os.qtd_especiais,
-        qtd_caixa !== undefined ? parseInt(qtd_caixa) : os.qtd_caixa,
-        dataFechamento,
-        cronograma !== undefined ? (cronograma ? JSON.stringify(cronograma) : null) : os.cronograma,
-        computedDataInicio,
-        computedDataFim,
-        numero
+        DataCriacao !== undefined ? DataCriacao : existing.DataCriacao,
+        DataConclusao !== undefined ? DataConclusao : existing.DataConclusao,
+        Situacao !== undefined ? Situacao : existing.Situacao,
+        Responsavel !== undefined ? Responsavel : existing.Responsavel,
+        NomeProjeto !== undefined ? NomeProjeto : existing.NomeProjeto,
+        Tempo !== undefined ? parseInt(Tempo, 10) : existing.Tempo,
+        numero,
+        targetProjId
       ]
     );
 
-    // 2. If servicos array is provided, update service quantities and calculate predicted times
-    if (servicos && Array.isArray(servicos)) {
-      for (const item of servicos) {
-        const qty = parseInt(item.quantidade);
-        if (qty > 0) {
-          const service = await db.get('SELECT tempo FROM servicos WHERE id = ?', [item.servico_id]);
-          if (service) {
-            const itemPrevTime = qty * service.tempo;
-            await db.run(
-              'UPDATE os_servicos SET quantidade = ?, tempo_previsto = ? WHERE os_numero = ? AND servico_id = ?',
-              [qty, itemPrevTime, numero, item.servico_id]
-            );
-          }
-        }
-      }
-
-      // Recalculate OS total tempo_previsto
-      const totalPrevRow = await db.get(
-        'SELECT SUM(tempo_previsto) as total FROM os_servicos WHERE os_numero = ?',
-        [numero]
-      );
-      await db.run(
-        'UPDATE ordens_servico SET tempo_previsto = ? WHERE numero = ?',
-        [totalPrevRow.total || 0, numero]
-      );
-    }
-
-    await db.run('COMMIT');
-
-    const updated = await db.get('SELECT * FROM ordens_servico WHERE numero = ?', [numero]);
+    const updated = await db.get('SELECT * FROM Ordem_Servico WHERE Numero = ? AND ProjetoID = ?', [numero, targetProjId]);
     res.json(updated);
   } catch (error) {
-    try { await db.run('ROLLBACK'); } catch (e) {}
-    console.error('UPDATE OS ERROR:', error);
+    console.error('UPDATE ORDEM SERVICO ERROR:', error);
     res.status(500).json({ error: 'Erro ao atualizar ordem de serviço.' });
   }
-});
-
-app.post('/api/ordens-servico/:numero/servicos/:servico_id/action', authenticateToken, async (req, res) => {
-  const { numero, servico_id } = req.params;
-  const { action } = req.body; // 'start' or 'end'
-
-  try {
-    const item = await db.get(
-      'SELECT * FROM os_servicos WHERE os_numero = ? AND servico_id = ?',
-      [numero, servico_id]
-    );
-
-    if (!item) {
-      return res.status(404).json({ error: 'Item de serviço não encontrado nesta OS.' });
-    }
-
-    const now = new Date().toISOString();
-
-    if (action === 'start') {
-      await db.run(
-        'UPDATE os_servicos SET data_inicio = ?, data_fim = NULL, tempo_real = NULL WHERE os_numero = ? AND servico_id = ?',
-        [now, numero, servico_id]
-      );
-      
-      // Update OS status to "EmProducao" automatically if it was "Aberta"
-      await db.run(
-        "UPDATE ordens_servico SET status = 'EmProducao' WHERE numero = ? AND status = 'Aberta'",
-        [numero]
-      );
-    } else if (action === 'end') {
-      let dataInicio = item.data_inicio;
-      if (!dataInicio) {
-        // If not started manually, fetch OS opening time
-        const os = await db.get('SELECT data_abertura FROM ordens_servico WHERE numero = ?', [numero]);
-        dataInicio = os ? os.data_abertura : now;
-        
-        await db.run(
-          'UPDATE os_servicos SET data_inicio = ? WHERE os_numero = ? AND servico_id = ?',
-          [dataInicio, numero, servico_id]
-        );
-      }
-
-      const diffMs = new Date(now) - new Date(dataInicio);
-      const diffMin = Math.max(1, Math.round(diffMs / 60000)); // minimum 1 minute for representation
-
-      await db.run(
-        'UPDATE os_servicos SET data_fim = ?, tempo_real = ? WHERE os_numero = ? AND servico_id = ?',
-        [now, diffMin, numero, servico_id]
-      );
-
-      // Recalculate OS total real time
-      const sumRow = await db.get(
-        'SELECT SUM(tempo_real) as total FROM os_servicos WHERE os_numero = ? AND tempo_real IS NOT NULL',
-        [numero]
-      );
-      await db.run(
-        'UPDATE ordens_servico SET tempo_real = ? WHERE numero = ?',
-        [sumRow.total || 0, numero]
-      );
-    } else {
-      return res.status(400).json({ error: 'Ação inválida.' });
-    }
-
-    const updatedItem = await db.get(
-      'SELECT * FROM os_servicos WHERE os_numero = ? AND servico_id = ?',
-      [numero, servico_id]
-    );
-    res.json(updatedItem);
-  } catch (error) {
-    res.status(500).json({ error: 'Erro ao atualizar tempo do serviço da OS.' });
-  }
-});
-
-app.delete('/api/ordens-servico/:numero', authenticateToken, async (req, res) => {
-  const { numero } = req.params;
-  try {
-    const os = await db.get('SELECT * FROM ordens_servico WHERE numero = ?', [numero]);
-    if (!os) {
-      return res.status(404).json({ error: 'Ordem de serviço não encontrada.' });
-    }
-    
-    await db.run('BEGIN TRANSACTION');
-    await db.run('DELETE FROM os_pecas WHERE os_numero = ?', [numero]);
-    await db.run('DELETE FROM os_servicos WHERE os_numero = ?', [numero]);
-    await db.run('DELETE FROM ordens_servico WHERE numero = ?', [numero]);
-    await db.run('COMMIT');
-
-    res.json({ message: 'Ordem de serviço removida com sucesso.' });
-  } catch (error) {
-    try { await db.run('ROLLBACK'); } catch (e) {}
-    console.error('DELETE OS ERROR:', error);
-    res.status(500).json({ error: 'Erro ao excluir ordem de serviço.' });
-  }
-});
-
-// Helper: parse pieces labels from PDF text
-function parseLabelsFromText(text) {
-  const pieces = [];
-  
-  // Format A: Labeled fields (Ezattus format)
-  // Matching across lines using multiline logic
-  const blockRegex = /Cliente:\s*(.*?)\r?\nMódulo:\s*(.*?)\r?\nProjeto:\s*(.*?)\r?\nChapa:\s*(.*?)\r?\n(.*?)\r?\nDimen\.:\s*(.*?)\r?\nPeça:\s*(.*?)\r?\nCód\.\s*Item:\s*(.*)/gi;
-  
-  let match;
-  while ((match = blockRegex.exec(text)) !== null) {
-    const [_, cliente, modulo, projeto, chapa, posicao, dimen, peca, codItem] = match;
-    pieces.push({
-      cliente: cliente.trim(),
-      modulo: modulo.trim(),
-      projeto: projeto.trim(),
-      chapa: chapa.trim(),
-      posicao: posicao.trim(),
-      dimensoes: dimen.trim(),
-      descricao: peca.split(' - ').pop().trim(),
-      codigo: codItem.trim()
-    });
-  }
-
-  // Fallback: Heuristic line-by-line parser (supporting comma decimals)
-  if (pieces.length === 0) {
-    const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-    const dimRegex = /\b\d+(?:[.,]\d+)?\s*[xX*]\s*\d+(?:[.,]\d+)?(?:\s*[xX*]\s*\d+(?:[.,]\d+)?)?\b/;
-
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      if (dimRegex.test(line)) {
-        const dimensoes = line.match(dimRegex)[0];
-        
-        let descricao = (i > 0) ? lines[i - 1] : 'Peça Importada';
-        if (descricao.toLowerCase().includes('dimens') || dimRegex.test(descricao)) {
-          descricao = 'Peça Importada';
-        }
-
-        let material = (i < lines.length - 1) ? lines[i + 1] : 'MDF Geral';
-        if (material.toLowerCase().includes('qtd') || material.toLowerCase().includes('cod') || dimRegex.test(material)) {
-          material = 'MDF Geral';
-        }
-
-        let quantidade = 1;
-        let codigo = '';
-
-        for (let j = Math.max(0, i - 3); j <= Math.min(lines.length - 1, i + 3); j++) {
-          const checkLine = lines[j];
-          const qtyMatch = checkLine.match(/(?:qtd|quantidade|quant|qnt)[:.\s]*(\d+)\b/i);
-          if (qtyMatch) {
-            quantidade = parseInt(qtyMatch[1]);
-          }
-
-          const codMatch = checkLine.match(/(?:cód|cod|código|ref|cód\.\s*item)[:.\s]*([A-Z0-9-]+)\b/i);
-          if (codMatch) {
-            codigo = codMatch[1];
-          }
-        }
-
-        pieces.push({
-          cliente: 'Samanta Meneguzi',
-          modulo: 'Módulo Geral',
-          projeto: 'Projeto Geral',
-          chapa: material,
-          posicao: '1.A',
-          dimensoes,
-          descricao,
-          codigo: codigo || null
-        });
-      }
-    }
-  }
-
-  // Seed mock pieces if 0 labels parsed (for testability with arbitrary PDFs)
-  if (pieces.length === 0) {
-    pieces.push(
-      { cliente: 'Samanta Meneguzi', modulo: '5947-Tamponamento Inferior', projeto: 'RecepçãoV2', chapa: 'MDF Branco TX 18mm', posicao: '1.A', dimensoes: '700x350x18', descricao: 'Lateral Esquerda', codigo: 'PEC-001' },
-      { cliente: 'Samanta Meneguzi', modulo: '5947-Tamponamento Inferior', projeto: 'RecepçãoV2', chapa: 'MDF Branco TX 18mm', posicao: '1.A', dimensoes: '700x350x18', descricao: 'Lateral Direita', codigo: 'PEC-002' },
-      { cliente: 'Samanta Meneguzi', modulo: '5947-Tamponamento Inferior', projeto: 'RecepçãoV2', chapa: 'MDF Branco TX 18mm', posicao: '1.B', dimensoes: '800x370x18', descricao: 'Tampo Superior', codigo: 'PEC-003' },
-      { cliente: 'Samanta Meneguzi', modulo: '5781-Sem Portas c/ Rodapé', projeto: 'RecepçãoV2', chapa: 'MDF Carvalho 6mm', posicao: '2.C', dimensoes: '795x695x6', descricao: 'Fundo Traseiro', codigo: 'PEC-004' },
-      { cliente: 'Samanta Meneguzi', modulo: '3922-Armário Basculante', projeto: 'RecepçãoV2', chapa: 'MDF Cinza Sagrado 18mm', posicao: '1.C', dimensoes: '796x346x18', descricao: 'Porta de Giro', codigo: 'PEC-005' }
-    );
-  }
-
-  // Format and clean up fields
-  return pieces.map((p, idx) => {
-    if (!p.codigo) {
-      p.codigo = `PEC-${String(idx + 1).padStart(3, '0')}`;
-    }
-    p.descricao = p.descricao.replace(/^(descrição|desc|nome|peça)[:.\s]*/i, '').trim();
-    p.chapa = p.chapa ? p.chapa.replace(/^(material|mat|chapa)[:.\s]*/i, '').trim() : 'MDF Geral';
-    return p;
-  });
 }
 
-// 6b. Work Order Pieces (Peças da OS) Routes
-app.get('/api/ordens-servico/:numero/pecas', authenticateToken, async (req, res) => {
-  const { numero } = req.params;
+app.put('/api/ordem-servico/:numero', authenticateToken, handlePutOrdemServico);
+app.put('/api/ordem-controle/:numero', authenticateToken, handlePutOrdemServico);
+
+async function handleDeleteOrdemServico(req, res) {
   try {
-    const list = await db.all('SELECT * FROM os_pecas WHERE os_numero = ? ORDER BY modulo ASC, id ASC', [numero]);
-    res.json(list);
+    const { numero } = req.params;
+    const projetoId = req.query.projetoId || req.body?.ProjetoID || req.body?.projetoId;
+
+    if (projetoId !== undefined && projetoId !== null && projetoId !== '') {
+      const existing = await db.get('SELECT * FROM Ordem_Servico WHERE Numero = ? AND ProjetoID = ?', [numero, projetoId]);
+      if (!existing) {
+        return res.status(404).json({ error: 'Ordem de serviço não encontrada.' });
+      }
+      await db.run('DELETE FROM Ordem_Servico WHERE Numero = ? AND ProjetoID = ?', [numero, projetoId]);
+    } else {
+      const existing = await db.get('SELECT * FROM Ordem_Servico WHERE Numero = ?', [numero]);
+      if (!existing) {
+        return res.status(404).json({ error: 'Ordem de serviço não encontrada.' });
+      }
+      await db.run('DELETE FROM Ordem_Servico WHERE Numero = ?', [numero]);
+    }
+
+    res.json({ message: 'Ordem de serviço excluída com sucesso.' });
   } catch (error) {
-    res.status(500).json({ error: 'Erro ao buscar peças da ordem de serviço.' });
+    console.error('DELETE ORDEM SERVICO ERROR:', error);
+    res.status(500).json({ error: 'Erro ao excluir ordem de serviço.' });
   }
-});
+}
 
-app.post('/api/ordens-servico/import-new', authenticateToken, upload.single('file'), async (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ error: 'Nenhum arquivo enviado.' });
-  }
+app.delete('/api/ordem-servico/:numero', authenticateToken, handleDeleteOrdemServico);
+app.delete('/api/ordem-controle/:numero', authenticateToken, handleDeleteOrdemServico);
 
+// ==========================================
+// ROTAS: Revisão Técnica da Ordem de Serviço
+// ==========================================
+async function handleGetRevisaoTecnica(req, res) {
   try {
-    const fileBuffer = fs.readFileSync(req.file.path);
-    const instance = new pdf.PDFParse(new Uint8Array(fileBuffer));
-    const pdfData = await instance.getText();
-    const text = pdfData.text || '';
+    const { numero, projetoId: paramProjId } = req.params;
+    const queryProjId = req.query.projetoId || req.query.item;
+    const targetProjId = paramProjId !== undefined ? paramProjId : (queryProjId || 1);
 
-    // Delete temp upload file
-    try {
-      fs.unlinkSync(req.file.path);
-    } catch (e) {
-      console.error('Erro ao deletar arquivo temporário:', e);
-    }
-
-    const pieces = parseLabelsFromText(text);
-    if (pieces.length === 0) {
-      return res.status(400).json({ error: 'Nenhuma peça pôde ser lida do PDF.' });
-    }
-
-    const firstPiece = pieces[0];
-    const parsedCliente = firstPiece ? firstPiece.cliente : 'Samanta Meneguzi';
-    const parsedProjeto = firstPiece ? firstPiece.projeto : 'RecepçãoV2';
-
-    // Generate OS Numero: Year(4) + Sequential(6)
-    const currentYear = new Date().getFullYear();
-    const minRange = currentYear * 1000000;
-    const maxRange = currentYear * 1000000 + 999999;
-    
-    const row = await db.get(
-      'SELECT MAX(numero) as maxNum FROM ordens_servico WHERE numero >= ? AND numero <= ?',
-      [minRange, maxRange]
+    // 1. Ordem de Serviço
+    let os = await db.get(
+      'SELECT Numero, ProjetoID, NomeProjeto, Tempo, DataCriacao, DataConclusao, Situacao, Responsavel FROM Ordem_Servico WHERE Numero = ? AND ProjetoID = ?',
+      [numero, targetProjId]
     );
 
-    let nextSeq = 1;
-    if (row && row.maxNum) {
-      nextSeq = (row.maxNum % 1000000) + 1;
-    }
-    const osNumero = currentYear * 1000000 + nextSeq;
-
-    // Fetch all active services to assign to the new OS
-    const dbServices = await db.all('SELECT * FROM servicos ORDER BY sequencia ASC');
-    let tempoTotalPrevisto = 0;
-    const itemsToInsert = [];
-
-    for (const service of dbServices) {
-      const qty = 1; // Assign default quantity = 1 for each standard service
-      const itemPrevTime = qty * service.tempo;
-      tempoTotalPrevisto += itemPrevTime;
-      itemsToInsert.push({
-        servico_id: service.id,
-        quantidade: qty,
-        tempo_previsto: itemPrevTime
-      });
-    }
-
-    await db.run('BEGIN TRANSACTION');
-
-    // Insert OS Header
-    await db.run(
-      'INSERT INTO ordens_servico (numero, status, ambiente, cliente, qtd_pecas, tempo_previsto, tempo_real) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [osNumero, 'Aberta', parsedProjeto || null, parsedCliente || null, pieces.length, tempoTotalPrevisto, 0]
-    );
-
-    // Insert OS Services
-    for (const item of itemsToInsert) {
-      await db.run(
-        'INSERT INTO os_servicos (os_numero, servico_id, quantidade, tempo_previsto) VALUES (?, ?, ?, ?)',
-        [osNumero, item.servico_id, item.quantidade, item.tempo_previsto]
+    if (!os) {
+      os = await db.get(
+        'SELECT Numero, ProjetoID, NomeProjeto, Tempo, DataCriacao, DataConclusao, Situacao, Responsavel FROM Ordem_Servico WHERE Numero = ? ORDER BY ProjetoID ASC LIMIT 1',
+        [numero]
       );
     }
 
-    // Insert OS Pieces
-    for (const p of pieces) {
-      await db.run(
-        'INSERT INTO os_pecas (os_numero, modulo, chapa, posicao, dimensoes, descricao, codigo) VALUES (?, ?, ?, ?, ?, ?, ?)',
-        [osNumero, p.modulo, p.chapa, p.posicao, p.dimensoes, p.descricao, p.codigo]
-      );
-    }
-
-    await db.run('COMMIT');
-
-    const newOs = await db.get('SELECT * FROM ordens_servico WHERE numero = ?', [osNumero]);
-    res.status(201).json(newOs);
-  } catch (error) {
-    try { await db.run('ROLLBACK'); } catch (e) {}
-    console.error('IMPORT NEW OS ERROR:', error);
-    res.status(500).json({ error: 'Erro ao processar arquivo e criar Ordem de Serviço.' });
-  }
-});
-
-app.post('/api/ordens-servico/:numero/pecas/import', authenticateToken, upload.single('file'), async (req, res) => {
-  const { numero } = req.params;
-  if (!req.file) {
-    return res.status(400).json({ error: 'Nenhum arquivo enviado.' });
-  }
-
-  try {
-    const os = await db.get('SELECT * FROM ordens_servico WHERE numero = ?', [numero]);
     if (!os) {
       return res.status(404).json({ error: 'Ordem de serviço não encontrada.' });
     }
 
-    const fileBuffer = fs.readFileSync(req.file.path);
-    const instance = new pdf.PDFParse(new Uint8Array(fileBuffer));
-    const pdfData = await instance.getText();
-    const text = pdfData.text || '';
+    // 2. Orçamento com dados do cliente
+    const orcamento = await db.get(`
+      SELECT 
+        o.numero,
+        o.data_criacao,
+        o.cliente_id,
+        o.descricao,
+        COALESCE(o.status, 'Em Aberto') as status,
+        o.parametro_financeiro_id,
+        o.total_venda,
+        o.forma_pagamento_selecionada,
+        c.nome as cliente_nome,
+        c.telefone as cliente_telefone,
+        c.documento as cliente_documento,
+        c.email as cliente_email,
+        c.cidade as cliente_cidade,
+        c.uf as cliente_uf
+      FROM orcamentos o
+      LEFT JOIN clientes c ON o.cliente_id = c.id
+      WHERE o.numero = ?
+    `, [numero]);
 
-    // Delete temp upload file
-    try {
-      fs.unlinkSync(req.file.path);
-    } catch (e) {
-      console.error('Erro ao deletar arquivo temporário:', e);
-    }
+    // 3. Todos os projetos do orçamento
+    const projetos = await db.all('SELECT * FROM projetos WHERE orcamento_numero = ? ORDER BY id ASC', [numero]);
 
-    const pieces = parseLabelsFromText(text);
-
-    const firstPiece = pieces[0];
-    const parsedCliente = firstPiece ? firstPiece.cliente : 'Samanta Meneguzi';
-    const parsedProjeto = firstPiece ? firstPiece.projeto : 'RecepçãoV2';
-
-    // Query all services in sequencer order to compute items properties
-    const dbServices = await db.all('SELECT * FROM servicos ORDER BY sequencia ASC');
-    let tempoTotalPrevisto = 0;
-    const servicesToInsert = [];
-
-    for (const service of dbServices) {
-      let qty = 1;
-      const sName = (service.nome || '').trim().toLowerCase();
-
-      if (sName === 'separação') {
-        qty = 1;
-      } else if (sName === 'usinagem') {
-        qty = parseInt(os.qtd_chapas) || 0;
-      } else if (sName === 'fitagem') {
-        qty = pieces.length;
-      } else if (sName === 'montagem de caixa' || sName === 'montagem caixa') {
-        qty = parseInt(os.qtd_caixa) || 0;
-      } else if (sName === 'especial') {
-        qty = parseInt(os.qtd_especiais) || 0;
-      } else {
-        qty = 1;
+    // 4. Selecionar projeto correspondente ao item da OS
+    let matchedProject = null;
+    if (projetos && projetos.length > 0) {
+      if (os.NomeProjeto) {
+        const osNomeNorm = os.NomeProjeto.trim().toLowerCase();
+        matchedProject = projetos.find(p => p.nome && p.nome.trim().toLowerCase() === osNomeNorm);
       }
-
-      const itemPrevTime = qty * (service.tempo || 0);
-      tempoTotalPrevisto += itemPrevTime;
-
-      servicesToInsert.push({
-        servico_id: service.id,
-        quantidade: qty,
-        tempo_previsto: itemPrevTime
-      });
+      if (!matchedProject) {
+        const idx = (parseInt(os.ProjetoID, 10) || 1) - 1;
+        if (idx >= 0 && idx < projetos.length) {
+          matchedProject = projetos[idx];
+        }
+      }
+      if (!matchedProject) {
+        matchedProject = projetos[0];
+      }
     }
 
-    await db.run('BEGIN TRANSACTION');
-    
-    // Clear previous pieces for this OS
-    await db.run('DELETE FROM os_pecas WHERE os_numero = ?', [numero]);
+    // 5. Itens e Anexos do Projeto
+    let itens = [];
+    let anexos = [];
 
-    // Insert new pieces (without client and project fields)
-    for (const p of pieces) {
-      await db.run(
-        'INSERT INTO os_pecas (os_numero, modulo, chapa, posicao, dimensoes, descricao, codigo) VALUES (?, ?, ?, ?, ?, ?, ?)',
-        [numero, p.modulo, p.chapa, p.posicao, p.dimensoes, p.descricao, p.codigo]
-      );
+    if (matchedProject && matchedProject.id) {
+      await ensureProjetoItemsPopulated(matchedProject.id);
+
+      const rawItens = await db.all(`
+        SELECT 
+          pi.ProjetoID,
+          pi.ProjetoItemID,
+          pi.MaterialReferencia,
+          m.MaterialDescricao,
+          m.MaterialTipo,
+          pi.ProjetoItemQtd,
+          pi.ProjetoItemUnidade,
+          pi.ProjetoItemVlrUnit,
+          pi.ProjetoItemTotal,
+          pi.ProjetoItemTempo,
+          pi.ProjetoItemDuracao,
+          COALESCE(m.ProdutoGrupo, 8) AS ProdutoGrupo,
+          m.MaterialImagem,
+          COALESCE(m.ExibirNaProposta, 'Nao') AS ExibirNaProposta
+        FROM ProjetoItem pi
+        LEFT JOIN Material m ON pi.MaterialReferencia = m.MaterialReferencia
+        WHERE pi.ProjetoID = ?
+        ORDER BY pi.ProjetoItemID ASC
+      `, [matchedProject.id]);
+
+      itens = await enrichProjectItemsWithServicoSequencia(rawItens);
+      anexos = await db.all('SELECT * FROM projeto_anexos WHERE projeto_id = ? ORDER BY criado_em DESC', [matchedProject.id]);
     }
 
-    // Clear previous services for this OS
-    await db.run('DELETE FROM os_servicos WHERE os_numero = ?', [numero]);
-
-    // Insert newly calculated services
-    for (const item of servicesToInsert) {
-      await db.run(
-        'INSERT INTO os_servicos (os_numero, servico_id, quantidade, tempo_previsto) VALUES (?, ?, ?, ?)',
-        [numero, item.servico_id, item.quantidade, item.tempo_previsto]
-      );
-    }
-
-    // Update OS header with the client, project (ambiente), total count of pieces and calculated tempo_previsto
-    await db.run(
-      'UPDATE ordens_servico SET cliente = ?, ambiente = ?, qtd_pecas = ?, tempo_previsto = ? WHERE numero = ?',
-      [parsedCliente, parsedProjeto, pieces.length, tempoTotalPrevisto, numero]
+    // 6. Checklist salvo da Ordem de Serviço
+    const checklist = await db.all(
+      'SELECT id, numero, projeto_id, tarefa_key, tarefa_texto, concluido, data_conclusao, responsavel, observacao, updated_at FROM ordem_servico_checklist WHERE numero = ? AND projeto_id = ? ORDER BY tarefa_key ASC, id ASC',
+      [numero, os.ProjetoID]
     );
 
-    await db.run('COMMIT');
-
-    const list = await db.all('SELECT * FROM os_pecas WHERE os_numero = ? ORDER BY id ASC', [numero]);
-    res.json(list);
+    res.json({
+      ordemServico: os,
+      orcamento,
+      projeto: matchedProject,
+      projetos,
+      anexos,
+      itens,
+      checklist
+    });
   } catch (error) {
-    try { await db.run('ROLLBACK'); } catch (e) {}
-    console.error('IMPORT ERROR:', error);
-    res.status(500).json({ error: 'Erro ao processar e importar o arquivo PDF.' });
+    console.error('GET REVISAO TECNICA ERROR:', error);
+    res.status(500).json({ error: 'Erro ao carregar dados da revisão técnica.' });
   }
-});
+}
+
+async function handlePutRevisaoChecklist(req, res) {
+  try {
+    const { numero, projetoId: paramProjId } = req.params;
+    const queryProjId = req.query.projetoId || req.body.projeto_id || req.body.ProjetoID;
+    const targetProjId = paramProjId !== undefined ? paramProjId : (queryProjId || 1);
+    const responsavelPadrao = req.user?.nome || req.user?.email || 'Usuário';
+
+    const formatDateTimeForSql = (val) => {
+      if (!val) return null;
+      const d = new Date(val);
+      if (isNaN(d.getTime())) return null;
+      return d.toISOString().slice(0, 19).replace('T', ' ');
+    };
+
+    let tarefas = [];
+    if (Array.isArray(req.body.tarefas)) {
+      tarefas = req.body.tarefas;
+    } else if (req.body.tarefa_key) {
+      tarefas = [req.body];
+    } else {
+      return res.status(400).json({ error: 'Nenhuma tarefa informada para atualização.' });
+    }
+
+    for (const t of tarefas) {
+      const { tarefa_key, tarefa_texto, concluido, observacao } = t;
+      if (!tarefa_key) continue;
+
+      const isConcluido = (concluido === 1 || concluido === true || concluido === '1') ? 1 : 0;
+      const dataConclusao = isConcluido ? formatDateTimeForSql(t.data_conclusao || new Date()) : null;
+      const resp = t.responsavel || (isConcluido ? responsavelPadrao : null);
+      const texto = tarefa_texto || '';
+      const obs = observacao !== undefined ? observacao : null;
+
+      await db.run(`
+        INSERT INTO ordem_servico_checklist 
+          (numero, projeto_id, tarefa_key, tarefa_texto, concluido, data_conclusao, responsavel, observacao)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE
+          tarefa_texto = COALESCE(VALUES(tarefa_texto), tarefa_texto),
+          concluido = VALUES(concluido),
+          data_conclusao = VALUES(data_conclusao),
+          responsavel = VALUES(responsavel),
+          observacao = COALESCE(VALUES(observacao), observacao),
+          updated_at = CURRENT_TIMESTAMP
+      `, [numero, targetProjId, tarefa_key, texto, isConcluido, dataConclusao, resp, obs]);
+    }
+
+    const updatedChecklist = await db.all(
+      'SELECT id, numero, projeto_id, tarefa_key, tarefa_texto, concluido, data_conclusao, responsavel, observacao, updated_at FROM ordem_servico_checklist WHERE numero = ? AND projeto_id = ? ORDER BY tarefa_key ASC, id ASC',
+      [numero, targetProjId]
+    );
+
+    res.json({
+      success: true,
+      message: 'Check-list da revisão técnica atualizado com sucesso.',
+      checklist: updatedChecklist
+    });
+  } catch (error) {
+    console.error('PUT REVISAO CHECKLIST ERROR:', error);
+    res.status(500).json({ error: 'Erro ao salvar check-list da revisão técnica.' });
+  }
+}
+
+async function handlePutSituacaoOrdemServico(req, res) {
+  try {
+    const { numero, projetoId } = req.params;
+    const { Situacao, situacao, Responsavel, responsavel } = req.body;
+    const novaSituacao = Situacao || situacao;
+    if (!novaSituacao) {
+      return res.status(400).json({ error: 'Situação é obrigatória.' });
+    }
+
+    const dataConclusao = novaSituacao === 'Concluida' ? new Date().toISOString().split('T')[0] : null;
+    const resp = Responsavel || responsavel;
+
+    let query = 'UPDATE Ordem_Servico SET Situacao = ?, DataConclusao = ?';
+    const params = [novaSituacao, dataConclusao];
+
+    if (resp) {
+      query += ', Responsavel = ?';
+      params.push(resp);
+    }
+
+    query += ' WHERE Numero = ? AND ProjetoID = ?';
+    params.push(numero, projetoId);
+
+    await db.run(query, params);
+
+    const updated = await db.get('SELECT * FROM Ordem_Servico WHERE Numero = ? AND ProjetoID = ?', [numero, projetoId]);
+    res.json({ success: true, item: updated });
+  } catch (error) {
+    console.error('PUT SITUACAO OS ERROR:', error);
+    res.status(500).json({ error: 'Erro ao atualizar situação da ordem de serviço.' });
+  }
+}
+
+app.get('/api/ordem-servico/:numero/:projetoId/revisao', authenticateToken, handleGetRevisaoTecnica);
+app.get('/api/ordem-servico/:numero/revisao', authenticateToken, handleGetRevisaoTecnica);
+app.put('/api/ordem-servico/:numero/:projetoId/checklist', authenticateToken, handlePutRevisaoChecklist);
+app.put('/api/ordem-servico/:numero/checklist', authenticateToken, handlePutRevisaoChecklist);
+app.put('/api/ordem-servico/:numero/:projetoId/situacao', authenticateToken, handlePutSituacaoOrdemServico);
+
 
 // Helper for parsing chapas PDF text
 function parsePdfText(textPages) {
@@ -1559,104 +1334,10 @@ function parsePdfText(textPages) {
   return Array.from(chapasMap.values());
 }
 
-// Endpoint to import chapas and pieces from PDF
-app.post('/api/ordens-servico/:numero/importar-chapas', authenticateToken, upload.single('arquivo'), async (req, res) => {
-  const { numero } = req.params;
-  if (!req.file) {
-    return res.status(400).json({ error: 'Nenhum arquivo enviado.' });
-  }
-
-  try {
-    const os = await db.get('SELECT * FROM ordens_servico WHERE numero = ?', [numero]);
-    if (!os) {
-      return res.status(404).json({ error: 'Ordem de serviço não encontrada.' });
-    }
-
-    const fileBuffer = fs.readFileSync(req.file.path);
-    const instance = new pdf.PDFParse(new Uint8Array(fileBuffer));
-    await instance.load();
-    const pdfData = await instance.getText();
-
-    // Delete temp upload file
-    try {
-      fs.unlinkSync(req.file.path);
-    } catch (e) {
-      console.error('Erro ao deletar arquivo temporário:', e);
-    }
-
-    const chapas = parsePdfText(pdfData.pages);
-    if (chapas.length === 0) {
-      return res.status(400).json({ error: 'Nenhuma chapa ou peça pôde ser lida do PDF.' });
-    }
-
-    await db.run('BEGIN TRANSACTION');
-
-    // Clear previous chapas for this OS
-    await db.run('DELETE FROM OS_Chapas WHERE os_numero = ?', [numero]);
-
-    // Insert chapas and pieces
-    for (const chapa of chapas) {
-      const chapaRes = await db.run(
-        `INSERT INTO OS_Chapas (os_numero, cliente, projeto, chapa, acabamento) 
-         VALUES (?, ?, ?, ?, ?)`,
-        [numero, chapa.cliente, chapa.projeto, chapa.chapa, chapa.acabamento]
-      );
-      const chapaId = chapaRes.lastID;
-
-      for (const peca of chapa.pecas) {
-        await db.run(
-          `INSERT INTO OS_ChapasPecas (chapa_id, item, descricao, dimensao, descricao_pai) 
-           VALUES (?, ?, ?, ?, ?)`,
-          [chapaId, peca.item, peca.descricao, peca.dimensao, peca.descricao_pai]
-        );
-      }
-    }
-
-    await db.run('COMMIT');
-
-    // Return the inserted chapas
-    const list = await db.all('SELECT * FROM OS_Chapas WHERE os_numero = ? ORDER BY id ASC', [numero]);
-    res.json(list);
-  } catch (error) {
-    try { await db.run('ROLLBACK'); } catch (e) {}
-    console.error('IMPORT CHAPAS ERROR:', error);
-    res.status(500).json({ error: 'Erro ao processar e importar as chapas do PDF.' });
-  }
-});
-
-// Endpoint to get chapas and pieces for an OS
-app.get('/api/ordens-servico/:numero/chapas', authenticateToken, async (req, res) => {
-  const { numero } = req.params;
-  try {
-    const chapas = await db.all('SELECT * FROM OS_Chapas WHERE os_numero = ? ORDER BY id ASC', [numero]);
-    for (const chapa of chapas) {
-      chapa.pecas = await db.all('SELECT * FROM OS_ChapasPecas WHERE chapa_id = ? ORDER BY item ASC', [chapa.id]);
-    }
-    res.json(chapas);
-  } catch (error) {
-    console.error('FETCH CHAPAS ERROR:', error);
-    res.status(500).json({ error: 'Erro ao buscar as chapas e peças da OS.' });
-  }
-});
-
 // 7. Planta Baixa (Factory Floor Plan) Data Route
 app.get('/api/planta-baixa/dados', authenticateToken, async (req, res) => {
   try {
-    const list = await db.all(`
-      SELECT 
-        os_servicos.*, 
-        ordens_servico.status as os_status, 
-        ordens_servico.ambiente, 
-        clientes.nome as cliente_nome, 
-        servicos.nome as servico_nome, 
-        servicos.sequencia
-      FROM os_servicos
-      JOIN ordens_servico ON os_servicos.os_numero = ordens_servico.numero
-      JOIN servicos ON os_servicos.servico_id = servicos.id
-      LEFT JOIN clientes ON ordens_servico.cliente_id = clientes.id
-      WHERE ordens_servico.status IN ('Aberta', 'EmProducao')
-    `);
-    res.json(list);
+    res.json([]);
   } catch (error) {
     console.error('PLANTA BAIXA DADOS ERROR:', error);
     res.status(500).json({ error: 'Erro ao carregar dados da planta baixa.' });
@@ -2022,7 +1703,7 @@ async function CarregarPecas(file, finalProjectId) {
 
         await db.run(
           'INSERT INTO Projeto_Pecas (projeto_id, peca, etiqueta, dimen, chapa, modulo, cod_item, imagem, cor_barras) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-          [finalProjectId, p.peca, p.etiqueta, p.dimen, p.chapa, p.modulo, p.cod_item, base64Image, base64Barcode]
+          [finalProjectId, p.peca || '', p.etiqueta || '', p.dimen || '', p.chapa || '', p.modulo || '', p.cod_item || '', base64Image, base64Barcode]
         );
       }
       console.log(`[CarregarPecas] Gravadas ${pecas.length} peças para o projeto ID ${finalProjectId}`);
@@ -2089,10 +1770,10 @@ app.post('/api/arquivos-importados', authenticateToken, uploadLayouts.array('arq
       if (lowerName.includes('cuttingplan')) {
         return 2;
       }
-      if (lowerName.includes('assembly modelo')) {
+      if (lowerName.includes('assembly modelo') || lowerName.includes('assembly')) {
         return 3;
       }
-      if (lowerName.includes('program etiquetaezattus')) {
+      if (lowerName.includes('etiqueta') || lowerName.includes('etiquetas')) {
         return 4;
       }
       return 5;
@@ -2140,9 +1821,9 @@ app.post('/api/arquivos-importados', authenticateToken, uploadLayouts.array('arq
 
       if (lowerName.includes('cuttingplan')) {
         resolvedLayout = 'PlanoCorte';
-      } else if (lowerName.includes('program etiquetaezattus')) {
+      } else if (lowerName.includes('etiqueta') || lowerName.includes('etiquetas')) {
         resolvedLayout = 'Etiqueta';
-      } else if (lowerName.includes('assembly modelo')) {
+      } else if (lowerName.includes('assembly modelo') || lowerName.includes('assembly')) {
         resolvedLayout = 'Modulo';
       } else if (lowerName.includes('relatorio_para_compra_de_materiais') || lowerName.includes('compra de materiais') || lowerName.includes('compra_de_materiais')) {
         resolvedLayout = 'Materiais';
@@ -2403,6 +2084,19 @@ app.delete('/api/arquivos-importados/:id', authenticateToken, async (req, res) =
 
     // Exclui do banco
     await db.run('DELETE FROM arquivos_importados WHERE id = ?', [id]);
+
+    // Se for layout Etiqueta, remove as peças vinculadas se não houver outro arquivo de etiqueta para este projeto
+    if (file.tipo_layout === 'Etiqueta' && file.projeto_id) {
+      const remaining = await db.get(
+        "SELECT id FROM arquivos_importados WHERE projeto_id = ? AND tipo_layout = 'Etiqueta' AND id != ?",
+        [file.projeto_id, id]
+      );
+      if (!remaining) {
+        await db.run('DELETE FROM Projeto_Pecas WHERE projeto_id = ?', [file.projeto_id]);
+        await db.run('UPDATE projetos SET ProjetoQtdPecas = 0 WHERE id = ?', [file.projeto_id]);
+      }
+    }
+
     res.json({ message: 'Arquivo de layout removido com sucesso.' });
   } catch (error) {
     console.error('DELETE LAYOUT ERROR:', error);
@@ -2579,7 +2273,25 @@ app.get('/api/projetos/:projeto_id/chapas', authenticateToken, async (req, res) 
 app.get('/api/projetos/:projeto_id/pecas', authenticateToken, async (req, res) => {
   const { projeto_id } = req.params;
   try {
-    const list = await db.all('SELECT * FROM Projeto_Pecas WHERE projeto_id = ? ORDER BY id ASC', [projeto_id]);
+    let list = await db.all('SELECT * FROM Projeto_Pecas WHERE projeto_id = ? ORDER BY id ASC', [projeto_id]);
+    
+    // Auto-recuperação: Se a tabela estiver vazia, mas existir um arquivo de Etiqueta importado para este projeto, carrega automaticamente
+    if (list.length === 0) {
+      const etiquetaFile = await db.get(
+        "SELECT * FROM arquivos_importados WHERE projeto_id = ? AND tipo_layout = 'Etiqueta' ORDER BY id DESC LIMIT 1",
+        [projeto_id]
+      );
+      if (etiquetaFile && fs.existsSync(etiquetaFile.caminho_arquivo)) {
+        console.log(`[GET /pecas] Auto-recuperando peças do arquivo "${etiquetaFile.nome_arquivo}" para o projeto ${projeto_id}...`);
+        try {
+          await CarregarPecas({ path: etiquetaFile.caminho_arquivo }, projeto_id);
+          list = await db.all('SELECT * FROM Projeto_Pecas WHERE projeto_id = ? ORDER BY id ASC', [projeto_id]);
+        } catch (procErr) {
+          console.error('[GET /pecas] Erro ao auto-processar peças:', procErr);
+        }
+      }
+    }
+
     res.json(list);
   } catch (error) {
     console.error('GET PROJECT PECAS ERROR:', error);
@@ -3093,11 +2805,35 @@ app.post('/api/orcamentos/:numero/conclusao', authenticateToken, async (req, res
         anotacoes_cliente = ?,
         anotacoes_conclusao = ?,
         status = ?,
+        situacao = ?,
         data_aprovacao = ?,
         data_entrada = ?,
         fluxo_financeiro = ?
       WHERE numero = ?
-    `, [descPerc, descVlr, precoFinal, formaPag, anotacoesCli, anotacoesConc, novoStatus, dataAprovacao, dataEntrada, fluxoFinanceiro, numero]);
+    `, [descPerc, descVlr, precoFinal, formaPag, anotacoesCli, anotacoesConc, novoStatus, novoStatus, dataAprovacao, dataEntrada, fluxoFinanceiro, numero]);
+
+    // Sincronizar com a versão mais recente da proposta se houver
+    if (formaPag || novoStatus === 'Aprovado') {
+      const propStatus = novoStatus === 'Aprovado' ? 'Aprovada' : undefined;
+      if (propStatus) {
+        await db.run(
+          `UPDATE propostas 
+           SET status = ?, 
+               forma_pagamento_selecionada = COALESCE(?, forma_pagamento_selecionada) 
+           WHERE orcamento_numero = ? 
+           ORDER BY versao DESC, id DESC LIMIT 1`,
+          [propStatus, formaPag, numero]
+        );
+      } else if (formaPag) {
+        await db.run(
+          `UPDATE propostas 
+           SET forma_pagamento_selecionada = ? 
+           WHERE orcamento_numero = ? 
+           ORDER BY versao DESC, id DESC LIMIT 1`,
+          [formaPag, numero]
+        );
+      }
+    }
 
     // Se houver projetos e um novo preço final, distribui proporcionalmente no preco_venda_final dos projetos
     const projetos = await db.all('SELECT * FROM projetos WHERE orcamento_numero = ? ORDER BY id ASC', [numero]);
@@ -3858,6 +3594,67 @@ app.post('/api/projetos/:id/gerar-descricao', authenticateToken, async (req, res
   }
 });
 
+// Helper para associar sequência da tabela de servicos aos itens de projeto
+async function enrichProjectItemsWithServicoSequencia(items) {
+  if (!items || !Array.isArray(items) || items.length === 0) return items;
+  try {
+    const servicosList = await db.all('SELECT id, nome, unidade, tempo, sequencia FROM servicos ORDER BY sequencia ASC, id ASC');
+    
+    // Helper para normalizar strings para comparação
+    const normalize = (str) => (str || '').toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9]/g, ' ')
+      .trim();
+
+    return items.map(item => {
+      const isServico = item.MaterialTipo === 'Serviço' || (item.MaterialReferencia && item.MaterialReferencia.startsWith('FAB.'));
+      if (!isServico) {
+        return {
+          ...item,
+          sequencia: null,
+          servico_sequencia: null,
+          servico_id: null
+        };
+      }
+
+      const itemDescNorm = normalize(item.MaterialDescricao);
+      const itemRefNorm = normalize(item.MaterialReferencia);
+
+      // Tenta encontrar serviço correspondente na tabela servicos
+      let matchedServico = servicosList.find(s => {
+        const sNomeNorm = normalize(s.nome);
+        if (sNomeNorm === itemDescNorm) return true;
+        if (itemDescNorm.includes(sNomeNorm) || sNomeNorm.includes(itemDescNorm)) return true;
+        
+        // Mapeamentos conhecidos por prefixos/referências de fabricação
+        if ((itemRefNorm.includes('cor') || itemRefNorm.includes('sep') || itemDescNorm.includes('corte') || itemDescNorm.includes('separacao')) && (sNomeNorm.includes('separacao') || sNomeNorm.includes('corte'))) return true;
+        if ((itemRefNorm.includes('usi') || itemDescNorm.includes('usinagem')) && sNomeNorm.includes('usinagem')) return true;
+        if ((itemRefNorm.includes('fit') || itemDescNorm.includes('fitagem')) && sNomeNorm.includes('fitagem')) return true;
+        if ((itemRefNorm.includes('mon cxa') || itemRefNorm.includes('mon') || itemDescNorm.includes('montagem de caixa') || itemDescNorm.includes('montagem caixa')) && (sNomeNorm.includes('montagem de caixa') || sNomeNorm.includes('montagem'))) return true;
+        if ((itemRefNorm.includes('esp') || itemDescNorm.includes('especial')) && sNomeNorm.includes('especial')) return true;
+        if ((itemRefNorm.includes('emb') || itemDescNorm.includes('embalagem')) && sNomeNorm.includes('embalagem')) return true;
+
+        return false;
+      });
+
+      const seq = matchedServico && matchedServico.sequencia !== undefined && matchedServico.sequencia !== null
+        ? matchedServico.sequencia
+        : 999;
+
+      return {
+        ...item,
+        sequencia: seq,
+        servico_sequencia: seq,
+        servico_id: matchedServico ? matchedServico.id : null,
+        servico_nome: matchedServico ? matchedServico.nome : item.MaterialDescricao
+      };
+    });
+  } catch (err) {
+    console.error('Erro ao enriquecer itens com sequencia de servicos:', err);
+    return items;
+  }
+}
+
 // GET /api/projetos/:id/itens
 app.get('/api/projetos/:id/itens', authenticateToken, async (req, res) => {
   const { id } = req.params;
@@ -3888,7 +3685,8 @@ app.get('/api/projetos/:id/itens', authenticateToken, async (req, res) => {
       ORDER BY pi.ProjetoItemID ASC
     `, [id]);
 
-    res.json(list);
+    const enrichedList = await enrichProjectItemsWithServicoSequencia(list);
+    res.json(enrichedList);
   } catch (error) {
     console.error('GET PROJECT ITEMS ERROR:', error);
     res.status(500).json({ error: 'Erro ao buscar itens do orçamento do projeto.' });
@@ -5218,6 +5016,21 @@ app.put('/api/propostas/:id', authenticateToken, async (req, res) => {
       [newStatus, newObs, newTitulo, id]
     );
 
+    // Se o status foi alterado para Aprovada, sincronizar no orçamento
+    if (newStatus === 'Aprovada') {
+      const orc = await db.get('SELECT * FROM orcamentos WHERE numero = ?', [prop.orcamento_numero]);
+      const formaToSet = prop.forma_pagamento_selecionada || orc?.forma_pagamento_selecionada;
+      await db.run(
+        `UPDATE orcamentos 
+         SET status = 'Aprovado', 
+             situacao = 'Aprovado',
+             data_aprovacao = COALESCE(data_aprovacao, CURRENT_TIMESTAMP),
+             forma_pagamento_selecionada = COALESCE(?, forma_pagamento_selecionada)
+         WHERE numero = ?`,
+        [formaToSet || null, prop.orcamento_numero]
+      );
+    }
+
     const updated = await db.get('SELECT * FROM propostas WHERE id = ?', [id]);
     res.json(updated);
   } catch (error) {
@@ -5403,12 +5216,31 @@ app.get('/api/public/propostas/:token', async (req, res) => {
       }
     }
 
+    // Buscar dados em tempo real do orçamento para mesclar status e forma de pagamento atualizados
+    const orc = await db.get(
+      `SELECT o.*, c.nome as cliente_nome, c.telefone as cliente_telefone, c.email as cliente_email,
+              c.documento as cliente_documento, c.endereco as cliente_endereco
+       FROM orcamentos o 
+       LEFT JOIN clientes c ON o.cliente_id = c.id 
+       WHERE o.numero = ?`,
+      [share.orcamento_numero]
+    );
+
+    if (!orc) {
+      return res.status(404).json({ error: 'Orçamento não encontrado.' });
+    }
+
     if (parsedSnapshot) {
-      // Usar a fotografia (snapshot) fielmente gravada
+      // Usar a fotografia (snapshot) fielmente gravada com os dados de status e forma de pagamento mais atuais
+      const formaPagFinal = share.forma_pagamento_selecionada || orc.forma_pagamento_selecionada || parsedSnapshot.orcamento?.forma_pagamento_selecionada;
+      const statusFinal = (share.status === 'Aprovado' || orc.status === 'Aprovado' || propRecord?.status === 'Aprovada') ? 'Aprovado' : (orc.status || parsedSnapshot.orcamento?.status || 'Em Aberto');
+
       const orcSnapshot = {
         ...parsedSnapshot.orcamento,
-        forma_pagamento_selecionada: share.forma_pagamento_selecionada || parsedSnapshot.orcamento?.forma_pagamento_selecionada,
-        anotacoes_cliente: share.anotacoes_cliente || parsedSnapshot.orcamento?.anotacoes_cliente
+        status: statusFinal,
+        situacao: statusFinal,
+        forma_pagamento_selecionada: formaPagFinal,
+        anotacoes_cliente: share.anotacoes_cliente || orc.anotacoes_cliente || parsedSnapshot.orcamento?.anotacoes_cliente
       };
 
       const empresaParams = parsedSnapshot.empresaParams || {};
@@ -5438,22 +5270,15 @@ app.get('/api/public/propostas/:token', async (req, res) => {
           expira_em: share.expira_em,
           acessos_count: (share.acessos_count || 0) + 1,
           aprovado_em: share.aprovado_em,
-          forma_pagamento_selecionada: share.forma_pagamento_selecionada,
-          anotacoes_cliente: share.anotacoes_cliente,
-          proposta_id: share.proposta_id
+          forma_pagamento_selecionada: formaPagFinal,
+          anotacoes_cliente: share.anotacoes_cliente || orc.anotacoes_cliente,
+          proposta_id: share.proposta_id,
+          status: (share.status === 'Aprovado' || orc.status === 'Aprovado') ? 'Aprovado' : share.status
         }
       });
     }
 
-    // Fallback: caso a proposta não tenha snapshot gravado (legado)
-    const orc = await db.get(
-      `SELECT o.*, c.nome as cliente_nome, c.telefone as cliente_telefone, c.email as cliente_email 
-       FROM orcamentos o 
-       LEFT JOIN clientes c ON o.cliente_id = c.id 
-       WHERE o.numero = ?`,
-      [share.orcamento_numero]
-    );
-
+    // Fallback: caso a proposta não tenha snapshot gravado (legado), orc já está carregado acima
     if (!orc) {
       return res.status(404).json({ error: 'Orçamento não encontrado.' });
     }
@@ -5566,10 +5391,110 @@ app.get('/api/public/propostas/:token', async (req, res) => {
   }
 });
 
+// Função utilitária para gerar o fluxo financeiro com base em uma condição de pagamento
+function gerarFluxoFinanceiroDeCondicao(cond, totalVenda, dataEntrada, meioFallback = 'PIX') {
+  if (!totalVenda || totalVenda <= 0) return [];
+  const baseDt = (dataEntrada || new Date().toISOString().split('T')[0]).split('T')[0];
+  const result = [];
+
+  if (!cond) {
+    result.push({
+      id: 1,
+      tipo: 'À Vista',
+      descricao: 'Pagamento Integral',
+      data: baseDt,
+      percentual: 100,
+      valor: Math.round(totalVenda * 100) / 100,
+      meio_pagamento: meioFallback || 'PIX'
+    });
+    return result;
+  }
+
+  const percEntrada = parseFloat(cond.perc_entrada) || 0;
+  const numParcelas = parseInt(cond.num_parcelas, 10) || 0;
+  const percDesc = parseFloat(cond.perc_desconto) || 0;
+  const vlrDesconto = totalVenda * (percDesc / 100);
+  const totalComDesc = Math.round((totalVenda - vlrDesconto) * 100) / 100;
+
+  const vlrEntrada = Math.round((totalComDesc * (percEntrada / 100)) * 100) / 100;
+  const vlrSaldo = Math.max(0, Math.round((totalComDesc - vlrEntrada) * 100) / 100);
+  const meio = (cond.meio_pagamento || meioFallback || 'PIX').trim();
+
+  if (percEntrada >= 100) {
+    result.push({
+      id: 1,
+      tipo: 'À Vista',
+      descricao: percDesc > 0 ? `Pagamento Integral à Vista (${percDesc}% desc)` : 'Pagamento Integral à Vista',
+      data: baseDt,
+      percentual: 100,
+      valor: totalComDesc,
+      meio_pagamento: meio
+    });
+    return result;
+  }
+
+  if (percEntrada > 0) {
+    result.push({
+      id: 1,
+      tipo: 'Entrada',
+      descricao: `Entrada (${percEntrada}%)`,
+      data: baseDt,
+      percentual: percEntrada,
+      valor: vlrEntrada,
+      meio_pagamento: meio
+    });
+  }
+
+  if (numParcelas > 0) {
+    const vlrParcelaBase = Math.floor((vlrSaldo / numParcelas) * 100) / 100;
+    const percSaldo = 100 - percEntrada;
+    const percParcelaBase = Math.floor((percSaldo / numParcelas) * 100) / 100;
+    let somaVlr = 0;
+    let somaPerc = 0;
+
+    for (let i = 1; i <= numParcelas; i++) {
+      let dataVenc = baseDt;
+      try {
+        const d = new Date(baseDt + 'T12:00:00');
+        d.setDate(d.getDate() + (30 * i));
+        dataVenc = d.toISOString().split('T')[0];
+      } catch (e) {}
+
+      const isLast = (i === numParcelas);
+      const val = isLast ? Math.round((vlrSaldo - somaVlr) * 100) / 100 : vlrParcelaBase;
+      const pct = isLast ? Math.round((percSaldo - somaPerc) * 100) / 100 : percParcelaBase;
+      somaVlr += val;
+      somaPerc += pct;
+
+      result.push({
+        id: (percEntrada > 0 ? 1 : 0) + i,
+        tipo: numParcelas === 1 && percEntrada > 0 ? 'Saldo na Entrega' : 'Parcela',
+        descricao: numParcelas === 1 && percEntrada > 0 ? 'Saldo na Entrega' : `Parcela ${i}/${numParcelas}`,
+        data: dataVenc,
+        percentual: pct,
+        valor: val,
+        meio_pagamento: meio
+      });
+    }
+  } else if (percEntrada === 0) {
+    result.push({
+      id: 1,
+      tipo: 'À Vista',
+      descricao: 'Pagamento Integral',
+      data: baseDt,
+      percentual: 100,
+      valor: totalComDesc,
+      meio_pagamento: meio
+    });
+  }
+
+  return result;
+}
+
 // POST /api/public/propostas/:token/anotacoes - Gravação de anotações/observações e forma de pagamento na proposta digital
 app.post('/api/public/propostas/:token/anotacoes', async (req, res) => {
   const { token } = req.params;
-  const { anotacoes, forma_pagamento_descricao } = req.body || {};
+  const { anotacoes, forma_pagamento_descricao, condicao_id } = req.body || {};
   try {
     const share = await db.get('SELECT * FROM proposta_compartilhamentos WHERE token = ?', [token]);
     if (!share) {
@@ -5592,16 +5517,19 @@ app.post('/api/public/propostas/:token/anotacoes', async (req, res) => {
     }
 
     const notes = typeof anotacoes === 'string' ? anotacoes.trim() : (orc.anotacoes_cliente || null);
-    const formaDesc = typeof forma_pagamento_descricao === 'string' ? forma_pagamento_descricao.trim() : (orc.forma_pagamento_selecionada || null);
+    const formaDesc = typeof forma_pagamento_descricao === 'string' && forma_pagamento_descricao.trim() 
+      ? forma_pagamento_descricao.trim() 
+      : (orc.forma_pagamento_selecionada || null);
 
     // Atualiza o orçamento com as anotações, forma de pagamento selecionada e status para 'Em Negociação'
     await db.run(
       `UPDATE orcamentos 
        SET anotacoes_cliente = ?, 
            forma_pagamento_selecionada = ?, 
-           status = CASE WHEN status = 'Aprovado' THEN status ELSE 'Em Negociação' END
+           status = CASE WHEN status = 'Aprovado' THEN status ELSE 'Em Negociação' END,
+           situacao = CASE WHEN situacao = 'Aprovado' THEN situacao ELSE 'Em Negociação' END
        WHERE numero = ?`,
-      [notes, formaDesc || orc.forma_pagamento_selecionada || null, share.orcamento_numero]
+      [notes, formaDesc, share.orcamento_numero]
     );
 
     // Atualiza o registro de compartilhamento
@@ -5610,8 +5538,23 @@ app.post('/api/public/propostas/:token/anotacoes', async (req, res) => {
        SET anotacoes_cliente = ?, 
            forma_pagamento_selecionada = ? 
        WHERE id = ?`,
-      [notes, formaDesc || share.forma_pagamento_selecionada || null, share.id]
+      [notes, formaDesc, share.id]
     );
+
+    // Sincroniza na versão da proposta
+    if (formaDesc) {
+      if (share.proposta_id) {
+        await db.run(
+          `UPDATE propostas SET forma_pagamento_selecionada = ? WHERE id = ?`,
+          [formaDesc, share.proposta_id]
+        );
+      } else {
+        await db.run(
+          `UPDATE propostas SET forma_pagamento_selecionada = ? WHERE orcamento_numero = ? ORDER BY versao DESC, id DESC LIMIT 1`,
+          [formaDesc, share.orcamento_numero]
+        );
+      }
+    }
 
     const updatedOrc = await db.get('SELECT * FROM orcamentos WHERE numero = ?', [share.orcamento_numero]);
 
@@ -5626,10 +5569,10 @@ app.post('/api/public/propostas/:token/anotacoes', async (req, res) => {
   }
 });
 
-// POST /api/public/propostas/:token/aprovar - Aprovação online da proposta pelo cliente
+// POST /api/public/propostas/:token/aprovar - Aprovação online da proposta pelo cliente com forma de pagamento
 app.post('/api/public/propostas/:token/aprovar', async (req, res) => {
   const { token } = req.params;
-  const { forma_pagamento_descricao, anotacoes } = req.body || {};
+  const { forma_pagamento_descricao, condicao_id, anotacoes } = req.body || {};
   try {
     const share = await db.get('SELECT * FROM proposta_compartilhamentos WHERE token = ?', [token]);
     if (!share) {
@@ -5651,18 +5594,50 @@ app.post('/api/public/propostas/:token/aprovar', async (req, res) => {
       return res.status(404).json({ error: 'Orçamento não encontrado.' });
     }
 
-    const formaDesc = (forma_pagamento_descricao || '').trim();
+    const formaDesc = (forma_pagamento_descricao || '').trim() || (share.forma_pagamento_selecionada || '').trim() || (orc.forma_pagamento_selecionada || '').trim() || null;
     const notes = typeof anotacoes === 'string' ? anotacoes.trim() : (orc.anotacoes_cliente || null);
 
-    // 1. Atualiza o status do orçamento para "Aprovado"
+    // Buscar a condição de pagamento correspondente para estruturar o fluxo financeiro exato
+    let matchedCond = null;
+    if (condicao_id) {
+      matchedCond = await db.get('SELECT * FROM condicoes_pagamento WHERE id = ?', [condicao_id]);
+    }
+    if (!matchedCond && formaDesc) {
+      const condicoes = await db.all(`
+        SELECT c.*, f.nome as forma_nome 
+        FROM condicoes_pagamento c
+        JOIN formas_pagamento f ON c.forma_pagamento_id = f.id
+      `);
+      if (condicoes && condicoes.length > 0) {
+        matchedCond = condicoes.find(c => {
+          const descCompleta = `${c.forma_nome} - ${c.descricao || c.meio_pagamento || ''}`.trim().toLowerCase();
+          const fpLower = formaDesc.toLowerCase();
+          const descLower = (c.descricao || '').toLowerCase();
+          return descCompleta === fpLower || descLower === fpLower || fpLower.includes(descLower);
+        });
+      }
+    }
+
+    const totalVendaOrc = parseFloat(orc.total_venda) || (
+      (await db.all('SELECT preco_venda_final FROM projetos WHERE orcamento_numero = ?', [orc.numero]))
+        .reduce((sum, p) => sum + (parseFloat(p.preco_venda_final) || 0), 0)
+    );
+
+    const dataEntradaOrc = orc.data_entrada || new Date().toISOString().split('T')[0];
+    const fluxoGerado = gerarFluxoFinanceiroDeCondicao(matchedCond, totalVendaOrc, dataEntradaOrc, matchedCond?.meio_pagamento || formaDesc);
+    const fluxoJson = JSON.stringify(fluxoGerado);
+
+    // 1. Atualiza o status do orçamento para "Aprovado" e persiste a forma de pagamento e fluxo
     await db.run(
       `UPDATE orcamentos 
        SET status = 'Aprovado', 
+           situacao = 'Aprovado',
            forma_pagamento_selecionada = ?, 
            anotacoes_cliente = ?, 
-           data_aprovacao = CURRENT_TIMESTAMP 
+           data_aprovacao = CURRENT_TIMESTAMP,
+           fluxo_financeiro = ?
        WHERE numero = ?`,
-      [formaDesc || orc.forma_pagamento_selecionada || null, notes, share.orcamento_numero]
+      [formaDesc, notes, fluxoJson, share.orcamento_numero]
     );
 
     // 2. Registra a aprovação no histórico do link compartilhado
@@ -5673,8 +5648,28 @@ app.post('/api/public/propostas/:token/aprovar', async (req, res) => {
            forma_pagamento_selecionada = ?, 
            anotacoes_cliente = ? 
        WHERE id = ?`,
-      [formaDesc || null, notes, share.id]
+      [formaDesc, notes, share.id]
     );
+
+    // 3. Atualiza o status e a forma de pagamento na tabela de propostas
+    if (share.proposta_id) {
+      await db.run(
+        `UPDATE propostas 
+         SET status = 'Aprovada', 
+             forma_pagamento_selecionada = ? 
+         WHERE id = ?`,
+        [formaDesc, share.proposta_id]
+      );
+    } else {
+      await db.run(
+        `UPDATE propostas 
+         SET status = 'Aprovada', 
+             forma_pagamento_selecionada = ? 
+         WHERE orcamento_numero = ? 
+         ORDER BY versao DESC, id DESC LIMIT 1`,
+        [formaDesc, share.orcamento_numero]
+      );
+    }
 
     const updatedOrc = await db.get('SELECT * FROM orcamentos WHERE numero = ?', [share.orcamento_numero]);
 
@@ -5950,6 +5945,10 @@ app.post('/api/orcamentos/:numero/efetivar-fluxo', authenticateToken, async (req
       return res.status(404).json({ error: 'Orçamento não encontrado.' });
     }
 
+    if (!orcamento.data_assinatura) {
+      return res.status(400).json({ error: 'O contrato do projeto precisa estar assinado para que o fluxo financeiro possa ser efetivado.' });
+    }
+
     if (!parcelas || !Array.isArray(parcelas) || parcelas.length === 0) {
       return res.status(400).json({ error: 'Nenhuma parcela informada para efetivar o fluxo.' });
     }
@@ -5969,7 +5968,7 @@ app.post('/api/orcamentos/:numero/efetivar-fluxo', authenticateToken, async (req
       const perc = parseFloat(p.percentual) || 0;
       const val = parseFloat(p.valor) || 0;
       const dtVenc = p.data_vencimento || new Date().toISOString().split('T')[0];
-      const meioPag = p.meio_pagamento || orcamento.forma_pagamento || 'PIX';
+      const meioPag = p.meio_pagamento || orcamento.forma_pagamento_selecionada || 'PIX';
       const obs = p.observacoes || observacoes || null;
 
       await db.run(
@@ -5999,9 +5998,51 @@ app.post('/api/orcamentos/:numero/efetivar-fluxo', authenticateToken, async (req
     // Marcar orçamento como status = 'Efetivado' e fluxo_efetivado = 1
     await db.run('UPDATE orcamentos SET status = "Efetivado", fluxo_efetivado = 1 WHERE numero = ?', [numero]);
 
+    // Inserir registros na tabela Ordem_Servico para cada projeto do orçamento
+    const responsavel = (req.user?.email || req.user?.nome || 'Sistema').slice(0, 20);
+    const dataCriacao = new Date().toISOString().split('T')[0];
+
+    const projs = await db.all('SELECT * FROM projetos WHERE orcamento_numero = ? ORDER BY id ASC', [numero]);
+
+    if (projs && projs.length > 0) {
+      for (let i = 0; i < projs.length; i++) {
+        const p = projs[i];
+        const projId = (i + 1); // Sequencial Numeric(3) referente ao orçamento
+        const nomeProj = p.nome || `Projeto ${projId}`;
+        const tempoTotal = (parseInt(p.DuracaoFabricacao, 10) || 0) + (parseInt(p.DuracaoMontagem, 10) || 0);
+
+        const existingOS = await db.get(
+          'SELECT Numero FROM Ordem_Servico WHERE Numero = ? AND ProjetoID = ?',
+          [numero, projId]
+        );
+        if (!existingOS) {
+          await db.run(
+            'INSERT INTO Ordem_Servico (Numero, ProjetoID, DataCriacao, DataConclusao, Situacao, Responsavel, NomeProjeto, Tempo) VALUES (?, ?, ?, NULL, "Aberta", ?, ?, ?)',
+            [numero, projId, dataCriacao, responsavel, nomeProj, tempoTotal]
+          );
+        } else {
+          await db.run(
+            'UPDATE Ordem_Servico SET NomeProjeto = ?, Tempo = ? WHERE Numero = ? AND ProjetoID = ?',
+            [nomeProj, tempoTotal, numero, projId]
+          );
+        }
+      }
+    } else {
+      const existingOS = await db.get(
+        'SELECT Numero FROM Ordem_Servico WHERE Numero = ? AND ProjetoID = 1',
+        [numero]
+      );
+      if (!existingOS) {
+        await db.run(
+          'INSERT INTO Ordem_Servico (Numero, ProjetoID, DataCriacao, DataConclusao, Situacao, Responsavel, NomeProjeto, Tempo) VALUES (?, 1, ?, NULL, "Aberta", ?, ?, 0)',
+          [numero, dataCriacao, responsavel, orcamento.descricao || 'Projeto Geral']
+        );
+      }
+    }
+
     res.json({
       success: true,
-      message: `${inseridas} parcela(s) efetivada(s) no Fluxo de Recebimento com sucesso!`,
+      message: `${inseridas} parcela(s) efetivada(s) no Fluxo de Recebimento com sucesso e Ordem de Serviço #${numero} gerada!`,
       totalInseridas: inseridas
     });
   } catch (err) {
@@ -6021,6 +6062,9 @@ app.post('/api/orcamentos/:numero/desfazer-efetivacao', authenticateToken, async
 
     // Exclui todos os lançamentos do fluxo financeiro deste orçamento
     await db.run('DELETE FROM FluxoRecebimento WHERE orcamento_numero = ?', [numero]);
+
+    // Exclui registros da Ordem_Servico deste orçamento
+    await db.run('DELETE FROM Ordem_Servico WHERE Numero = ?', [numero]);
 
     // Retorna o orçamento para a situação Em Aberto e limpa a flag de fluxo efetivado
     await db.run(
