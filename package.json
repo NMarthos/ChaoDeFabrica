@@ -3,15 +3,33 @@
   "version": "1.0.0",
   "description": "ERP Monorepo with Node.js and React",
   "private": true,
+  "type": "module",
+  "main": "backend/src/server.js",
+  "engines": {
+    "node": "22.x"
+  },
   "scripts": {
-    "install:all": "npm install && npm install --prefix backend && npm install --prefix frontend",
-    "build": "npm run build --prefix frontend",
-    "build:all": "npm install --prefix backend && npm install --prefix frontend && npm run build --prefix frontend",
+    "build": "npm install --prefix frontend && npm run build --prefix frontend",
     "start": "node backend/src/server.js",
+    "install:all": "npm install && npm install --prefix backend && npm install --prefix frontend",
+    "build:all": "npm install --prefix backend && npm install --prefix frontend && npm run build --prefix frontend",
     "dev": "npx concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
     "dev:backend": "npm run dev --prefix backend",
     "dev:frontend": "npm run dev --prefix frontend",
     "mysql:start": "\"\"C:\\Program Files\\MySQL\\MySQL Server 8.4\\bin\\mysqld.exe\" --defaults-file=\"C:\\ProgramData\\MySQL\\MySQL Server 8.4\\my.ini\" --console\""
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.6",
+    "dotenv": "^16.6.1",
+    "express": "^4.22.1",
+    "googleapis": "^171.4.0",
+    "jsonwebtoken": "^9.0.3",
+    "multer": "^2.1.1",
+    "mysql2": "^3.9.7",
+    "pdf-extract-image": "^0.0.3",
+    "pdf-parse": "^2.4.5",
+    "pngjs": "^6.0.0"
   },
   "devDependencies": {
     "concurrently": "^8.2.2"
