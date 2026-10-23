@@ -16,6 +16,7 @@ dist/
 dist-ssr/
 frontend/dist/
 *.local
+*.zip
 
 # Environment variables & secrets
 .env
