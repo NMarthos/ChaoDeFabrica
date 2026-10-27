@@ -171,11 +171,11 @@ app.get('/api/health', async (req, res) => {
     port: PORT,
     dbConnected: Boolean(db),
     dbConfig: {
-      host: process.env.DB_HOST || 'localhost',
+      host: process.env.DB_HOST || '127.0.0.1',
       port: process.env.DB_PORT || '3306',
-      user: process.env.DB_USER ? `${process.env.DB_USER.slice(0, 4)}***` : '(default: root)',
-      database: process.env.DB_NAME || 'erp_chaodefabrica',
-      hasPassword: Boolean(process.env.DB_PASSWORD)
+      user: process.env.DB_USER || 'u510090903_admin',
+      database: process.env.DB_NAME || 'u510090903_erp',
+      hasPassword: Boolean(process.env.DB_PASSWORD !== undefined ? process.env.DB_PASSWORD : 'Erp!Db_2026#xQ7m')
     },
     dbError: dbInitError ? {
       code: dbInitError.code || null,
