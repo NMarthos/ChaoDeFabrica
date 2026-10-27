@@ -150,11 +150,17 @@ export async function ensureColumn(db, tableName, columnName, columnDefinition) 
 }
 
 export async function initDb() {
-  const dbHost = process.env.DB_HOST || '127.0.0.1';
+  const isPlaceholderEnv = !process.env.DB_USER || process.env.DB_USER === 'u123456_erp';
+  const rawHost = isPlaceholderEnv ? '127.0.0.1' : (process.env.DB_HOST || '127.0.0.1');
+  const dbHost = (rawHost === 'localhost' || rawHost === '::1') ? '127.0.0.1' : rawHost;
   const dbPort = parseInt(process.env.DB_PORT || '3306', 10);
-  const dbUser = process.env.DB_USER || 'u510090903_admin';
-  const dbPassword = process.env.DB_PASSWORD !== undefined ? process.env.DB_PASSWORD : 'Erp!Db_2026#xQ7m';
-  const dbName = process.env.DB_NAME || 'u510090903_erp';
+  const dbUser = isPlaceholderEnv ? 'u510090903_admin' : process.env.DB_USER;
+  const dbPassword = (isPlaceholderEnv || process.env.DB_PASSWORD === 'sua_senha_do_banco' || process.env.DB_PASSWORD === undefined)
+    ? 'Erp!Db_2026#xQ7m'
+    : process.env.DB_PASSWORD;
+  const dbName = (isPlaceholderEnv || process.env.DB_NAME === 'u123456_erp_chaodefabrica' || !process.env.DB_NAME)
+    ? 'u510090903_erp'
+    : process.env.DB_NAME;
 
   console.log(`Connecting to MySQL server at ${dbHost}:${dbPort} (database: ${dbName})...`);
 
