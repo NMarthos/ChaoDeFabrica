@@ -1,14 +1,16 @@
 import mysql from 'mysql2/promise';
 import bcrypt from 'bcryptjs';
 import dotenv from 'dotenv';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Carrega variáveis de ambiente da raiz, da pasta backend ou do diretório atual
 dotenv.config();
-
-const dbHost = process.env.DB_HOST || 'localhost';
-const dbPort = parseInt(process.env.DB_PORT || '3306', 10);
-const dbUser = process.env.DB_USER || 'root';
-const dbPassword = process.env.DB_PASSWORD || '';
-const dbName = process.env.DB_NAME || 'erp_chaodefabrica';
+dotenv.config({ path: path.resolve(__dirname, '../../.env') });
+dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
 /**
  * Cria a conexão e abstrai as operações com a mesma interface usada pelo SQLite:
@@ -148,20 +150,31 @@ export async function ensureColumn(db, tableName, columnName, columnDefinition) 
 }
 
 export async function initDb() {
-  console.log(`Connecting to MySQL server at ${dbHost}:${dbPort}...`);
+  const dbHost = process.env.DB_HOST || 'localhost';
+  const dbPort = parseInt(process.env.DB_PORT || '3306', 10);
+  const dbUser = process.env.DB_USER || 'root';
+  const dbPassword = process.env.DB_PASSWORD || '';
+  const dbName = process.env.DB_NAME || 'erp_chaodefabrica';
 
-  // 1. Conecta inicialmente ao MySQL sem selecionar banco para criar a base caso não exista
-  const rootConn = await mysql.createConnection({
-    host: dbHost,
-    port: dbPort,
-    user: dbUser,
-    password: dbPassword
-  });
+  console.log(`Connecting to MySQL server at ${dbHost}:${dbPort} (database: ${dbName})...`);
 
-  await rootConn.query(
-    `CREATE DATABASE IF NOT EXISTS \`${dbName}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`
-  );
-  await rootConn.end();
+  // 1. Tenta criar a base caso não exista (em hospedagens compartilhadas como Hostinger o banco já existe e o usuário não tem permissão CREATE DATABASE)
+  try {
+    const rootConn = await mysql.createConnection({
+      host: dbHost,
+      port: dbPort,
+      user: dbUser,
+      password: dbPassword,
+      connectTimeout: 10000
+    });
+
+    await rootConn.query(
+      `CREATE DATABASE IF NOT EXISTS \`${dbName}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`
+    );
+    await rootConn.end();
+  } catch (createDbErr) {
+    console.warn(`Aviso: CREATE DATABASE ignorado (${createDbErr.code || createDbErr.message}). Conectando diretamente ao banco "${dbName}"...`);
+  }
 
   // 2. Cria o pool de conexões direcionado ao banco do ERP
   const pool = mysql.createPool({
@@ -175,8 +188,12 @@ export async function initDb() {
     queueLimit: 0,
     multipleStatements: true,
     decimalNumbers: true,
-    dateStrings: true
+    dateStrings: true,
+    connectTimeout: 10000
   });
+
+  // Valida a conexão antes de rodar migrações
+  await pool.query('SELECT 1');
 
   const db = new MySQLDatabaseAdapter(pool);
 
@@ -267,7 +284,7 @@ export async function initDb() {
     CREATE TABLE IF NOT EXISTS Ordem_Servico (
       Numero BIGINT NOT NULL,
       ProjetoID DECIMAL(3,0) NOT NULL DEFAULT 1,
-      DataCriacao DATE DEFAULT (CURRENT_DATE),
+      DataCriacao DATE DEFAULT NULL,
       DataConclusao DATE DEFAULT NULL,
       Situacao VARCHAR(20) NOT NULL DEFAULT 'Aberta',
       Responsavel VARCHAR(20) DEFAULT NULL,
@@ -663,7 +680,7 @@ export async function initDb() {
   await ensureColumn(db, 'Ordem_Servico', 'ProjetoID', 'DECIMAL(3,0) NOT NULL DEFAULT 1');
   await ensureColumn(db, 'Ordem_Servico', 'NomeProjeto', 'VARCHAR(255) DEFAULT NULL');
   await ensureColumn(db, 'Ordem_Servico', 'Tempo', 'INT DEFAULT 0');
-  await ensureColumn(db, 'Ordem_Servico', 'DataCriacao', 'DATE DEFAULT (CURRENT_DATE)');
+  await ensureColumn(db, 'Ordem_Servico', 'DataCriacao', 'DATE DEFAULT NULL');
   await ensureColumn(db, 'Ordem_Servico', 'DataConclusao', 'DATE DEFAULT NULL');
   await ensureColumn(db, 'Ordem_Servico', 'Situacao', "VARCHAR(20) NOT NULL DEFAULT 'Aberta'");
   await ensureColumn(db, 'Ordem_Servico', 'Responsavel', 'VARCHAR(20) DEFAULT NULL');

@@ -1,3 +1,15 @@
+// Polyfill Promise.withResolvers para compatibilidade caso o servidor rode Node < 22 (ex: Node 18/20 na Hostinger)
+if (typeof Promise.withResolvers !== 'function') {
+  Promise.withResolvers = function () {
+    let resolve, reject;
+    const promise = new Promise((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  };
+}
+
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
@@ -6,15 +18,37 @@ import bcrypt from 'bcryptjs';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
+import { fileURLToPath } from 'url';
 import { initDb } from './db.js';
 import { createRequire } from 'module';
-const require = createRequire(import.meta.url);
-const pdf = require('pdf-parse');
-import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { PNG } from 'pngjs';
 import crypto from 'crypto';
 
+const require = createRequire(import.meta.url);
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Carrega .env da raiz do projeto, da pasta backend ou do diretório de trabalho atual
 dotenv.config();
+dotenv.config({ path: path.resolve(__dirname, '../../.env') });
+dotenv.config({ path: path.resolve(__dirname, '../.env') });
+
+// Lazy loaders para bibliotecas de PDF (evita falha de inicialização do servidor por módulos nativos/canvas no Linux)
+let _pdfParseModule = null;
+async function getPdfParse() {
+  if (!_pdfParseModule) {
+    _pdfParseModule = require('pdf-parse');
+  }
+  return _pdfParseModule;
+}
+
+let _pdfjsModule = null;
+async function getPdfJs() {
+  if (!_pdfjsModule) {
+    _pdfjsModule = await import('pdfjs-dist/legacy/build/pdf.mjs');
+  }
+  return _pdfjsModule;
+}
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -28,10 +62,14 @@ const layoutsUploadDir = path.join(uploadsBaseDir, 'layouts');
 const anexosUploadDir = path.join(uploadsBaseDir, 'anexos');
 const parametrosUploadDir = path.join(uploadsBaseDir, 'parametros');
 
-if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
-if (!fs.existsSync(layoutsUploadDir)) fs.mkdirSync(layoutsUploadDir, { recursive: true });
-if (!fs.existsSync(anexosUploadDir)) fs.mkdirSync(anexosUploadDir, { recursive: true });
-if (!fs.existsSync(parametrosUploadDir)) fs.mkdirSync(parametrosUploadDir, { recursive: true });
+try {
+  if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+  if (!fs.existsSync(layoutsUploadDir)) fs.mkdirSync(layoutsUploadDir, { recursive: true });
+  if (!fs.existsSync(anexosUploadDir)) fs.mkdirSync(anexosUploadDir, { recursive: true });
+  if (!fs.existsSync(parametrosUploadDir)) fs.mkdirSync(parametrosUploadDir, { recursive: true });
+} catch (mkdirErr) {
+  console.warn('Aviso ao criar diretórios de upload:', mkdirErr.message);
+}
 
 // Helper to safely resolve physical path of uploaded files
 export function getUploadPhysicalPath(relPath) {
@@ -83,26 +121,84 @@ const anexosStorage = multer.diskStorage({
 });
 const uploadAnexos = multer({ storage: anexosStorage });
 
-// Initialize database
-let db;
-try {
-  db = await initDb();
-  console.log('MySQL database initialized successfully.');
-  await ensureOrcamentosSchema(db);
-} catch (error) {
-  console.error('\n❌ [ERRO DE BANCO DE DADOS]');
-  if (error.code === 'ECONNREFUSED' || (error.errors && error.errors.some(e => e.code === 'ECONNREFUSED'))) {
-    console.error(`Não foi possível conectar ao servidor MySQL (${process.env.DB_HOST || 'localhost'}:${process.env.DB_PORT || '3306'}).`);
-    console.error('👉 Verifique se o serviço do MySQL está iniciado na sua máquina (ex: XAMPP, Laragon, WAMP, Docker ou Serviço Windows).');
-    console.error('👉 Verifique também as credenciais (DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME) no arquivo backend/.env.\n');
-  } else if (error.code === 'ER_ACCESS_DENIED_ERROR') {
-    console.error('Acesso negado para o usuário/senha informados no arquivo backend/.env.');
-    console.error('👉 Verifique as variáveis DB_USER e DB_PASSWORD no backend/.env.\n');
-  } else {
-    console.error('Falha ao inicializar banco MySQL:', error.message || error);
-  }
-  process.exit(1);
+// Initialize database asynchronously (sem top-level await ou process.exit para não derrubar o Passenger/LiteSpeed na Hostinger)
+let db = null;
+let dbInitError = null;
+let dbInitPromise = null;
+
+async function ensureDbInitialized() {
+  if (db) return db;
+  if (dbInitPromise) return dbInitPromise;
+
+  dbInitPromise = (async () => {
+    try {
+      const initializedDb = await initDb();
+      await ensureOrcamentosSchema(initializedDb);
+      db = initializedDb;
+      dbInitError = null;
+      console.log('MySQL database initialized successfully.');
+      return db;
+    } catch (error) {
+      dbInitError = error;
+      console.error('\n❌ [ERRO DE BANCO DE DADOS]');
+      if (error.code === 'ECONNREFUSED' || (error.errors && error.errors.some(e => e.code === 'ECONNREFUSED'))) {
+        console.error(`Não foi possível conectar ao servidor MySQL (${process.env.DB_HOST || 'localhost'}:${process.env.DB_PORT || '3306'}).`);
+      } else if (error.code === 'ER_ACCESS_DENIED_ERROR' || error.code === 'ER_DBACCESS_DENIED_ERROR') {
+        console.error('Acesso negado para o usuário/senha/banco informados nas variáveis de ambiente.');
+      } else {
+        console.error('Falha ao inicializar banco MySQL:', error.message || error);
+      }
+      return null;
+    } finally {
+      dbInitPromise = null;
+    }
+  })();
+
+  return dbInitPromise;
 }
+
+// Dispara inicialização do banco em background logo ao subir
+ensureDbInitialized();
+
+// Rota de diagnóstico de saúde do servidor e banco de dados
+app.get('/api/health', async (req, res) => {
+  if (!db) {
+    await ensureDbInitialized();
+  }
+  res.status(200).json({
+    status: db ? 'ok' : 'db_error',
+    nodeVersion: process.version,
+    port: PORT,
+    dbConnected: Boolean(db),
+    dbConfig: {
+      host: process.env.DB_HOST || 'localhost',
+      port: process.env.DB_PORT || '3306',
+      user: process.env.DB_USER ? `${process.env.DB_USER.slice(0, 4)}***` : '(default: root)',
+      database: process.env.DB_NAME || 'erp_chaodefabrica',
+      hasPassword: Boolean(process.env.DB_PASSWORD)
+    },
+    dbError: dbInitError ? {
+      code: dbInitError.code || null,
+      message: dbInitError.message || String(dbInitError)
+    } : null
+  });
+});
+
+// Middleware para garantir que o banco está conectado antes de processar rotas /api/*
+app.use('/api', async (req, res, next) => {
+  if (req.path === '/health') return next();
+  if (!db) {
+    await ensureDbInitialized();
+  }
+  if (!db) {
+    const errCode = dbInitError?.code || 'DB_INIT_FAILED';
+    const errMsg = dbInitError?.message || 'Não foi possível conectar ao banco de dados MySQL.';
+    return res.status(500).json({
+      error: `Erro de conexão com o banco de dados (${errCode}): ${errMsg}. Verifique as variáveis DB_HOST, DB_USER, DB_PASSWORD e DB_NAME no painel da Hostinger.`
+    });
+  }
+  next();
+});
 
 async function ensureOrcamentosSchema(database) {
   try {
@@ -1450,6 +1546,7 @@ function cleanMdfDescription(desc) {
 // Rotina de Carga de Materiais (CarregarMateriais)
 async function CarregarMateriais(file, finalProjectId) {
   try {
+    const pdf = await getPdfParse();
     const fileBuffer = fs.readFileSync(file.path);
     const instance = new pdf.PDFParse(new Uint8Array(fileBuffer));
     if (instance.load) await instance.load();
@@ -1636,6 +1733,8 @@ function parsePecasFromText(text) {
 // Rotina de Carga de Peças e Etiquetas (CarregarPecas)
 async function CarregarPecas(file, finalProjectId) {
   try {
+    const pdfjs = await getPdfJs();
+    const pdf = await getPdfParse();
     // Extração das imagens reais (desenho e código de barras) do PDF usando a build legacy do pdfjs
     console.log(`[CarregarPecas] Iniciando extração de imagens reais de: "${file.path}"`);
     const loadingTask = pdfjs.getDocument(file.path);
@@ -1849,6 +1948,8 @@ app.post('/api/arquivos-importados', authenticateToken, uploadLayouts.array('arq
       // Se for Layout do tipo 'Modulo' (Assembly), extrai os dados do PDF e popula a tabela Projeto_Modulo
       if (resolvedLayout === 'Modulo') {
         try {
+          const pdfjs = await getPdfJs();
+          const pdf = await getPdfParse();
           // Extração das imagens reais do PDF usando a build legacy do pdfjs
           console.log(`[CargaModulos] Iniciando extração de imagens reais de: "${file.path}"`);
           const loadingTask = pdfjs.getDocument(file.path);
@@ -1966,6 +2067,7 @@ app.post('/api/arquivos-importados', authenticateToken, uploadLayouts.array('arq
       // Se for Layout do tipo 'PlanoCorte' (CuttingPlan), extrai os dados do PDF e popula a tabela Projeto_Chapa
       if (resolvedLayout === 'PlanoCorte') {
         try {
+          const pdf = await getPdfParse();
           const fileBuffer = fs.readFileSync(file.path);
           const instance = new pdf.PDFParse(new Uint8Array(fileBuffer));
           if (instance.load) await instance.load();
@@ -6210,6 +6312,8 @@ app.delete('/api/fluxo-recebimento/:id', authenticateToken, async (req, res) => 
 // -------------------------------------------------------------
 const candidateDistPaths = [
   process.env.FRONTEND_DIST_PATH,
+  path.resolve(__dirname, '../../frontend/dist'),
+  path.resolve(__dirname, '../frontend/dist'),
   path.resolve(process.cwd(), 'frontend/dist'),
   path.resolve(process.cwd(), '../frontend/dist'),
   path.resolve(process.cwd(), 'dist')
@@ -6228,7 +6332,10 @@ if (frontendDistPath) {
     res.sendFile(path.join(frontendDistPath, 'index.html'));
   });
 } else {
-  console.log('[Frontend] Diretório frontend/dist não encontrado. Servindo apenas rotas de API.');
+  console.log('[Frontend] Diretório frontend/dist não encontrado. Servindo rota diagnóstica na raiz.');
+  app.get('/', (req, res) => {
+    res.status(200).send('Servidor Node.js (ChaoDeFabrica ERP) está online. O diretório frontend/dist não foi encontrado; execute npm run build.');
+  });
 }
 
 // Start Server
