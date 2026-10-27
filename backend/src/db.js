@@ -153,7 +153,7 @@ export async function initDb() {
   const dbHost = process.env.DB_HOST || '127.0.0.1';
   const dbPort = parseInt(process.env.DB_PORT || '3306', 10);
   const dbUser = process.env.DB_USER || 'u510090903_admin';
-  const dbPassword = process.env.DB_PASSWORD !== undefined ? process.env.DB_PASSWORD : 'MrtsNld171#';
+  const dbPassword = process.env.DB_PASSWORD !== undefined ? process.env.DB_PASSWORD : 'Erp!Db_2026#xQ7m';
   const dbName = process.env.DB_NAME || 'u510090903_erp';
 
   console.log(`Connecting to MySQL server at ${dbHost}:${dbPort} (database: ${dbName})...`);
