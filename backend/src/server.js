@@ -175,7 +175,7 @@ app.get('/api/health', async (req, res) => {
       port: process.env.DB_PORT || '3306',
       user: process.env.DB_USER || 'u510090903_admin',
       database: process.env.DB_NAME || 'u510090903_erp',
-      hasPassword: Boolean(process.env.DB_PASSWORD !== undefined ? process.env.DB_PASSWORD : 'Erp!Db_2026#xQ7m')
+      hasPassword: Boolean(process.env.DB_PASSWORD !== undefined ? process.env.DB_PASSWORD : 'MrtsNld171#')
     },
     dbError: dbInitError ? {
       code: dbInitError.code || null,
