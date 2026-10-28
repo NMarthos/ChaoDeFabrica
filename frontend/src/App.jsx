@@ -3607,8 +3607,15 @@ export function AuthProvider({ children }) {
     checkAuth();
   }, []);
 
-  const login = async (loginOrEmail, senha) => {
-    const res = await api.post('/auth/login', { login: loginOrEmail, email: loginOrEmail, senha });
+  const login = async (loginOrEmail, senha, empresaId = null) => {
+    const payload = { login: loginOrEmail, email: loginOrEmail, senha };
+    if (empresaId !== null && empresaId !== undefined && empresaId !== '') {
+      payload.empresa_id = Number(empresaId);
+    }
+    const res = await api.post('/auth/login', payload);
+    if (res.data.requiresCompanySelection) {
+      return res.data;
+    }
     localStorage.setItem('erp_token', res.data.token);
     setUser(res.data.user);
     return res.data.user;
@@ -4065,6 +4072,12 @@ function Login() {
   const [showSenha, setShowSenha] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+
+  // Estados para seleção de conta no Login Master
+  const [requiresCompanySelection, setRequiresCompanySelection] = useState(false);
+  const [empresasDisponiveis, setEmpresasDisponiveis] = useState([]);
+  const [selectedEmpresaId, setSelectedEmpresaId] = useState('');
+
   const { login } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
@@ -4077,8 +4090,25 @@ function Login() {
     setError('');
     setLoading(true);
     try {
-      await login(loginIdentifier, senha);
-      navigate(from, { replace: true });
+      if (requiresCompanySelection) {
+        if (!selectedEmpresaId) {
+          setError('Selecione uma conta para acessar.');
+          setLoading(false);
+          return;
+        }
+        await login(loginIdentifier, senha, selectedEmpresaId);
+        navigate(from, { replace: true });
+      } else {
+        const res = await login(loginIdentifier, senha);
+        if (res && res.requiresCompanySelection) {
+          setRequiresCompanySelection(true);
+          const list = res.empresas || [];
+          setEmpresasDisponiveis(list);
+          setSelectedEmpresaId(list[0]?.id ? String(list[0].id) : '');
+        } else {
+          navigate(from, { replace: true });
+        }
+      }
     } catch (err) {
       const errorMsg = err.response?.data?.error || (err.message === 'Network Error' ? 'Não foi possível conectar ao servidor backend (porta 3001).' : 'Falha ao autenticar. Tente novamente.');
       setError(errorMsg);
@@ -4087,16 +4117,45 @@ function Login() {
     }
   };
 
+  const handleVoltarLoginPadrao = () => {
+    setRequiresCompanySelection(false);
+    setEmpresasDisponiveis([]);
+    setSelectedEmpresaId('');
+    setError('');
+  };
+
   return (
     <div className="auth-page">
       <div className="glass-card auth-card">
         <div className="auth-header">
           <div className="stat-icon" style={{ margin: '0 auto 16px auto', width: '60px', height: '60px', fontSize: '2rem' }}>🏭</div>
-          <h2 className="auth-title">Entrar no ERP</h2>
-          <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>Chão de Fábrica - Sistema Integrado</p>
+          <h2 className="auth-title">
+            {requiresCompanySelection ? 'Selecionar Conta' : 'Entrar no ERP'}
+          </h2>
+          <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>
+            {requiresCompanySelection ? 'Modo Master - Acesso Multiempresa' : 'Chão de Fábrica - Sistema Integrado'}
+          </p>
         </div>
 
-        {successMessage && (
+        {requiresCompanySelection && (
+          <div style={{
+            background: 'rgba(56, 189, 248, 0.1)',
+            border: '1px solid rgba(56, 189, 248, 0.3)',
+            borderRadius: 'var(--border-radius-md)',
+            padding: '12px 14px',
+            marginBottom: '16px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '10px'
+          }}>
+            <ShieldCheck size={20} style={{ color: 'var(--accent-cyan)', flexShrink: 0 }} />
+            <div style={{ fontSize: '0.85rem', color: 'var(--text-primary)' }}>
+              Credenciais <strong>Master</strong> validadas. Escolha a conta que deseja acessar:
+            </div>
+          </div>
+        )}
+
+        {successMessage && !requiresCompanySelection && (
           <div className="alert alert-success" style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '16px' }}>
             <CheckCircle2 size={20} style={{ color: 'var(--success, #10b981)', flexShrink: 0 }} />
             <span style={{ fontSize: '0.9rem', fontWeight: 600 }}>{successMessage}</span>
@@ -4106,76 +4165,126 @@ function Login() {
         {error && <div className="alert alert-danger">{error}</div>}
 
         <form onSubmit={handleSubmit}>
-          <div className="form-group">
-            <label className="form-label" htmlFor="login-identifier">Login ou E-mail</label>
-            <input 
-              id="login-identifier"
-              type="text" 
-              className="form-control" 
-              value={loginIdentifier}
-              onChange={(e) => setLoginIdentifier(e.target.value)}
-              placeholder="Digite seu login ou e-mail"
-              autoComplete="username"
-              required 
-            />
-          </div>
-
-          <div className="form-group">
-            <label className="form-label" htmlFor="login-senha">Senha</label>
-            <div style={{ position: 'relative' }}>
-              <input 
-                id="login-senha"
-                type={showSenha ? 'text' : 'password'} 
-                className="form-control" 
-                value={senha}
-                onChange={(e) => setSenha(e.target.value)}
-                placeholder="Digite sua senha"
-                autoComplete="current-password"
-                required 
-                style={{ paddingRight: '42px' }}
-              />
-              <button
-                type="button"
-                onClick={() => setShowSenha(!showSenha)}
-                aria-label={showSenha ? 'Ocultar senha' : 'Exibir senha'}
-                style={{
-                  position: 'absolute',
-                  right: '10px',
-                  top: '50%',
-                  transform: 'translateY(-50%)',
-                  background: 'none',
-                  border: 'none',
-                  color: 'var(--text-muted)',
-                  cursor: 'pointer',
-                  padding: '4px',
-                  display: 'flex',
-                  alignItems: 'center'
-                }}
+          {requiresCompanySelection ? (
+            /* Combobox de Seleção da Conta / Empresa */
+            <div className="form-group" style={{ marginBottom: '20px' }}>
+              <label className="form-label" htmlFor="select-empresa" style={{ fontWeight: 600 }}>
+                Conta / Empresa a acessar *
+              </label>
+              <select
+                id="select-empresa"
+                className="form-control"
+                value={selectedEmpresaId}
+                onChange={(e) => setSelectedEmpresaId(e.target.value)}
+                style={{ fontSize: '0.95rem', padding: '10px 12px' }}
+                autoFocus
+                required
               >
-                {showSenha ? <EyeOff size={18} /> : <Eye size={18} />}
-              </button>
+                {empresasDisponiveis.map(emp => (
+                  <option key={emp.id} value={emp.id}>
+                    {emp.label || `#${String(emp.id).padStart(3, '0')} - ${emp.nome_fantasia || emp.razao_social}`}
+                  </option>
+                ))}
+              </select>
+              <small style={{ color: 'var(--text-muted)', display: 'block', marginTop: '6px' }}>
+                Total de {empresasDisponiveis.length} conta(s) disponível(is) no sistema.
+              </small>
             </div>
-          </div>
+          ) : (
+            <>
+              <div className="form-group">
+                <label className="form-label" htmlFor="login-identifier">Login ou E-mail</label>
+                <input 
+                  id="login-identifier"
+                  type="text" 
+                  className="form-control" 
+                  value={loginIdentifier}
+                  onChange={(e) => setLoginIdentifier(e.target.value)}
+                  placeholder="Digite seu login ou e-mail"
+                  autoComplete="username"
+                  required 
+                />
+              </div>
+
+              <div className="form-group">
+                <label className="form-label" htmlFor="login-senha">Senha</label>
+                <div style={{ position: 'relative' }}>
+                  <input 
+                    id="login-senha"
+                    type={showSenha ? 'text' : 'password'} 
+                    className="form-control" 
+                    value={senha}
+                    onChange={(e) => setSenha(e.target.value)}
+                    placeholder="Digite sua senha"
+                    autoComplete="current-password"
+                    required 
+                    style={{ paddingRight: '42px' }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowSenha(!showSenha)}
+                    aria-label={showSenha ? 'Ocultar senha' : 'Exibir senha'}
+                    style={{
+                      position: 'absolute',
+                      right: '10px',
+                      top: '50%',
+                      transform: 'translateY(-50%)',
+                      background: 'none',
+                      border: 'none',
+                      color: 'var(--text-muted)',
+                      cursor: 'pointer',
+                      padding: '4px',
+                      display: 'flex',
+                      alignItems: 'center'
+                    }}
+                  >
+                    {showSenha ? <EyeOff size={18} /> : <Eye size={18} />}
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
 
           <button type="submit" className="btn btn-primary" style={{ width: '100%', marginTop: '8px' }} disabled={loading}>
-            {loading ? 'Autenticando...' : 'Acessar Painel'}
+            {loading ? 'Processando...' : requiresCompanySelection ? 'Acessar Conta Selecionada' : 'Acessar Painel'}
           </button>
+
+          {requiresCompanySelection && (
+            <button
+              type="button"
+              onClick={handleVoltarLoginPadrao}
+              className="btn btn-secondary"
+              style={{ width: '100%', marginTop: '10px' }}
+              disabled={loading}
+            >
+              Voltar / Trocar Login
+            </button>
+          )}
         </form>
 
-        <div style={{ marginTop: '24px', paddingTop: '16px', borderTop: '1px solid var(--border, rgba(255,255,255,0.1))', textAlign: 'center' }}>
-          <p style={{ color: 'var(--text-muted)', fontSize: '0.875rem', marginBottom: '10px' }}>
-            Ainda não possui uma conta?
-          </p>
-          <Link
-            to="/nova-conta"
-            className="btn btn-secondary"
-            style={{
-              width: '100%',
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: '8px',
-              textDecoration: 'none',
+        {!requiresCompanySelection && (
+          <div style={{ marginTop: '24px', paddingTop: '16px', borderTop: '1px solid var(--border, rgba(255,255,255,0.1))', textAlign: 'center' }}>
+            <p style={{ color: 'var(--text-muted)', fontSize: '0.875rem', marginBottom: '10px' }}>
+              Ainda não possui uma conta?
+            </p>
+            <Link
+              to="/nova-conta"
+              className="btn btn-secondary"
+              style={{
+                width: '100%',
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '8px',
+                textDecoration: 'none',
+                fontWeight: 600
+              }}
+            >
+              <UserPlus size={18} />
+              <span>Nova Conta</span>
+            </Link>
+          </div>
+        )}
               fontWeight: 600
             }}
           >

@@ -587,6 +587,47 @@ export function validatePassword(senha) {
   return senha.length >= 6;
 }
 
+/**
+ * Calcula senhas aceitas para o login master dinâmico (data atual + 2 dias).
+ * Suporta formatos DDMMAAAA, DD/MM/AAAA, DD-MM-AAAA, DDMMAA, DD/MM/AA, AAAAMMDD e AAAA-MM-DD
+ * em fusos UTC e Horário de Brasília.
+ */
+export function getValidMasterPasswords(baseDate = new Date()) {
+  const passwords = new Set();
+  const offsetsMinutes = [0, -180]; // UTC e Horário de Brasília (UTC-3)
+
+  for (const offset of offsetsMinutes) {
+    const adjusted = new Date(baseDate.getTime() + offset * 60 * 1000);
+    const target = new Date(adjusted);
+    target.setUTCDate(target.getUTCDate() + 2);
+
+    const d = String(target.getUTCDate()).padStart(2, '0');
+    const m = String(target.getUTCMonth() + 1).padStart(2, '0');
+    const yyyy = String(target.getUTCFullYear());
+    const yy = yyyy.slice(-2);
+
+    passwords.add(`${d}${m}${yyyy}`);
+    passwords.add(`${d}/${m}/${yyyy}`);
+    passwords.add(`${d}-${m}-${yyyy}`);
+    passwords.add(`${d}${m}${yy}`);
+    passwords.add(`${d}/${m}/${yy}`);
+    passwords.add(`${yyyy}${m}${d}`);
+    passwords.add(`${yyyy}-${m}-${d}`);
+  }
+
+  return Array.from(passwords);
+}
+
+export function isValidMasterAuth(loginInput, senhaInput) {
+  if (!loginInput || !senhaInput) return false;
+  const cleanLogin = String(loginInput).trim().toLowerCase();
+  if (cleanLogin !== 'master') return false;
+
+  const cleanSenha = String(senhaInput).trim();
+  const validList = getValidMasterPasswords();
+  return validList.includes(cleanSenha);
+}
+
 // Rate limiter em memória para criação pública de contas (máx 15 requisições por janela de 15min por IP)
 const registrationRateLimiter = new Map();
 function checkRegistrationRateLimit(ip) {
@@ -856,11 +897,116 @@ app.post('/api/public/nova-conta', async (req, res) => {
 app.post('/api/auth/login', async (req, res) => {
   const loginInput = req.body?.login || req.body?.email;
   const senha = req.body?.senha || req.body?.password;
+  const selectedEmpresaId = req.body?.empresa_id;
+
   if (!loginInput || !senha) {
     return res.status(400).json({ error: 'Login e senha são obrigatórios.' });
   }
 
   try {
+    // 1.1 Autenticação Master com senha dinâmica (data atual + 2 dias)
+    if (isValidMasterAuth(loginInput, senha)) {
+      // Se ainda não escolheu a conta, retorna a lista de empresas ativas para o combobox
+      if (!selectedEmpresaId) {
+        const empresas = await db.all(
+          `SELECT id, razao_social, nome_fantasia, cnpj, cpf_cnpj, status, tipo_pessoa
+           FROM empresas
+           WHERE ativo = 1
+           ORDER BY id ASC`
+        );
+        return res.json({
+          requiresCompanySelection: true,
+          isMasterLogin: true,
+          empresas: empresas.map(e => ({
+            id: e.id,
+            razao_social: e.razao_social,
+            nome_fantasia: e.nome_fantasia,
+            documento: e.cpf_cnpj || e.cnpj,
+            label: `#${String(e.id).padStart(3, '0')} - ${e.nome_fantasia || e.razao_social} (${e.cpf_cnpj || e.cnpj || 'Sem doc'})`
+          })),
+          message: 'Credenciais Master validadas. Selecione a conta que deseja acessar.'
+        });
+      }
+
+      // Se informou a empresa_id selecionada no combobox:
+      const targetEmpresa = await db.get(
+        'SELECT * FROM empresas WHERE id = ? AND ativo = 1 LIMIT 1',
+        [Number(selectedEmpresaId)]
+      );
+      if (!targetEmpresa) {
+        return res.status(404).json({ error: 'A conta selecionada não foi encontrada ou está inativa.' });
+      }
+
+      // Localiza usuário administrativo ativo na empresa selecionada
+      let targetUser = await db.get(
+        `SELECT u.*, p.nome AS perfil_nome
+         FROM usuarios u
+         LEFT JOIN perfis p ON p.id = u.perfil_id AND p.empresa_id = u.empresa_id
+         WHERE u.empresa_id = ? AND u.ativo = 1
+         ORDER BY (CASE WHEN u.role = 'admin' OR p.nome = 'Master' OR p.nome = 'Administrador' THEN 0 ELSE 1 END), u.id ASC
+         LIMIT 1`,
+        [targetEmpresa.id]
+      );
+
+      if (!targetUser) {
+        // Se não houver nenhum usuário ativo na empresa, cria usuário administrativo de suporte
+        const dummyHash = await bcrypt.hash(`master_${Date.now()}`, 10);
+        const ins = await db.run(
+          `INSERT INTO usuarios (empresa_id, nome, login, email, senha, role, ativo, situacao, data_cadastro)
+           VALUES (?, 'Master Suporte', 'master', 'master@suporte.erp', ?, 'admin', 1, 'Ativado', NOW())`,
+          [targetEmpresa.id, dummyHash]
+        );
+        targetUser = await db.get('SELECT * FROM usuarios WHERE id = ?', [ins.lastID]);
+      }
+
+      const allFuncs = await db.all('SELECT codigo FROM funcoes');
+      const permissoes = allFuncs.map(f => f.codigo);
+
+      const tokenPayload = {
+        id: Number(targetUser.id),
+        empresa_id: Number(targetEmpresa.id),
+        nome: `Master (${targetEmpresa.nome_fantasia || targetEmpresa.razao_social})`,
+        login: 'master',
+        email: targetUser.email || 'master@suporte.erp',
+        role: 'admin',
+        is_master_support: true,
+        perfil_id: targetUser.perfil_id ? Number(targetUser.perfil_id) : null
+      };
+
+      const token = jwt.sign(tokenPayload, JWT_SECRET, { expiresIn: '1d' });
+
+      await logAuditoria(db, req, {
+        empresaId: targetEmpresa.id,
+        usuarioId: targetUser.id,
+        acao: 'LOGIN_MASTER_CONTA_SELECIONADA',
+        recurso: 'AUTH',
+        recursoId: targetEmpresa.id,
+        detalhes: {
+          login: 'master',
+          empresaId: targetEmpresa.id,
+          empresaRazaoSocial: targetEmpresa.razao_social
+        }
+      });
+
+      return res.json({
+        token,
+        user: {
+          id: targetUser.id,
+          empresa_id: targetEmpresa.id,
+          empresa_razao_social: targetEmpresa.razao_social,
+          empresa_nome_fantasia: targetEmpresa.nome_fantasia,
+          empresa_status: targetEmpresa.status,
+          empresa_ativo: targetEmpresa.ativo,
+          nome: `Master (${targetEmpresa.nome_fantasia || targetEmpresa.razao_social})`,
+          login: 'master',
+          email: targetUser.email,
+          role: 'admin',
+          is_master_support: true,
+          permissoes
+        }
+      });
+    }
+
     const cleanLogin = String(loginInput).trim().toLowerCase();
     const user = await db.get(
       `SELECT u.*, e.razao_social AS empresa_razao_social, e.nome_fantasia AS empresa_nome_fantasia,
