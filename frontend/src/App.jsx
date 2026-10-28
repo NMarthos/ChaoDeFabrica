@@ -26,6 +26,7 @@ import {
   UserPlus,
   DollarSign,
   Briefcase,
+  Building2,
   AlertTriangle,
   Wrench,
   ClipboardList,
@@ -3747,6 +3748,8 @@ function Layout() {
       icon: ShieldCheck,
       type: 'group',
       items: [
+        { path: '/empresa', label: 'Dados da Empresa', icon: Building2 },
+        { path: '/usuarios', label: 'Gestão de Usuários', icon: Users },
         { path: '/seguranca', label: 'Segurança', icon: ShieldCheck }
       ]
     }
@@ -3885,6 +3888,8 @@ function Layout() {
           <Route path="/planta-baixa" element={<PlantaBaixa />} />
           <Route path="/formas-pagamento" element={<FormasPagamento />} />
           <Route path="/configuracoes" element={<Configuracoes />} />
+          <Route path="/empresa" element={<DadosEmpresa />} />
+          <Route path="/usuarios" element={<GestaoUsuarios />} />
           <Route path="/seguranca" element={<Seguranca />} />
           <Route path="/financeiro" element={<Financeiro />} />
           <Route path="/administrativo" element={<Administrativo />} />
@@ -6774,12 +6779,12 @@ function Seguranca() {
         
         <div className="form-group">
           <label className="form-label">Chave de Assinatura JWT (Simétrica)</label>
-          <input type="password" readonly className="form-control" value="super_secret_jwt_token_key_12345" />
+          <input type="password" readOnly className="form-control" value="super_secret_jwt_token_key_12345" />
         </div>
 
         <div className="form-group">
           <label className="form-label">Conexão SQLite</label>
-          <input type="text" readonly className="form-control" value="sqlite:./database/erp.db" />
+          <input type="text" readOnly className="form-control" value="sqlite:./database/erp.db" />
         </div>
         
         <div style={{ background: 'rgba(245, 158, 11, 0.05)', border: '1px solid rgba(245, 158, 11, 0.2)', padding: '16px', borderRadius: 'var(--border-radius-md)', display: 'flex', gap: '12px', alignItems: 'flex-start' }}>
@@ -6790,6 +6795,1072 @@ function Seguranca() {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+// 6.1 Manter Dados da Empresa Logada
+function DadosEmpresa() {
+  const [empresa, setEmpresa] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+  const [fieldErrors, setFieldErrors] = useState({});
+
+  const [formData, setFormData] = useState({
+    razao_social: '',
+    nome_fantasia: '',
+    tipo_pessoa: 'Jurídica',
+    cpf_cnpj: '',
+    telefone: '',
+    email: ''
+  });
+
+  const carregarEmpresa = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const res = await api.get('/empresa/atual');
+      const data = res.data || {};
+      setEmpresa(data);
+      setFormData({
+        razao_social: data.razao_social || '',
+        nome_fantasia: data.nome_fantasia || '',
+        tipo_pessoa: data.tipo_pessoa || 'Jurídica',
+        cpf_cnpj: maskCpfCnpj(data.cpf_cnpj || data.cnpj || '', data.tipo_pessoa || 'Jurídica'),
+        telefone: maskPhone(data.telefone || ''),
+        email: data.email || ''
+      });
+    } catch (err) {
+      setError(err.response?.data?.error || 'Erro ao carregar os dados da empresa.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    carregarEmpresa();
+  }, []);
+
+  const handleChangeTipoPessoa = (novoTipo) => {
+    setFormData(prev => ({
+      ...prev,
+      tipo_pessoa: novoTipo,
+      cpf_cnpj: maskCpfCnpj(prev.cpf_cnpj, novoTipo)
+    }));
+    setFieldErrors(prev => ({ ...prev, tipo_pessoa: undefined, cpf_cnpj: undefined }));
+  };
+
+  const handleChangeCpfCnpj = (e) => {
+    const raw = e.target.value;
+    const masked = maskCpfCnpj(raw, formData.tipo_pessoa);
+    setFormData(prev => ({ ...prev, cpf_cnpj: masked }));
+    if (fieldErrors.cpf_cnpj) {
+      setFieldErrors(prev => ({ ...prev, cpf_cnpj: undefined }));
+    }
+  };
+
+  const handleChangeTelefone = (e) => {
+    const raw = e.target.value;
+    const masked = maskPhone(raw);
+    setFormData(prev => ({ ...prev, telefone: masked }));
+    if (fieldErrors.telefone) {
+      setFieldErrors(prev => ({ ...prev, telefone: undefined }));
+    }
+  };
+
+  const handleChangeField = (field, value) => {
+    setFormData(prev => ({ ...prev, [field]: value }));
+    if (fieldErrors[field]) {
+      setFieldErrors(prev => ({ ...prev, [field]: undefined }));
+    }
+  };
+
+  const validarFormulario = () => {
+    const errors = {};
+    if (!formData.razao_social || formData.razao_social.trim().length < 2) {
+      errors.razao_social = 'A Razão Social / Nome Completo é obrigatória (mínimo 2 caracteres).';
+    }
+
+    if (formData.tipo_pessoa !== 'Física' && formData.tipo_pessoa !== 'Jurídica') {
+      errors.tipo_pessoa = 'Selecione o tipo de pessoa.';
+    }
+
+    const cleanDoc = formData.cpf_cnpj ? formData.cpf_cnpj.trim() : '';
+    if (cleanDoc) {
+      if (formData.tipo_pessoa === 'Física' && !validateCPF(cleanDoc)) {
+        errors.cpf_cnpj = 'CPF inválido. Verifique os números digitados.';
+      } else if (formData.tipo_pessoa === 'Jurídica' && !validateCNPJ(cleanDoc)) {
+        errors.cpf_cnpj = 'CNPJ inválido. Verifique os números digitados.';
+      }
+    }
+
+    const cleanEmail = formData.email ? formData.email.trim() : '';
+    if (cleanEmail && !validateEmail(cleanEmail)) {
+      errors.email = 'Endereço de e-mail inválido.';
+    }
+
+    const cleanTel = formData.telefone ? formData.telefone.trim() : '';
+    if (cleanTel && !validatePhone(cleanTel)) {
+      errors.telefone = 'Telefone inválido (deve conter DDD e formato válido).';
+    }
+
+    setFieldErrors(errors);
+    return Object.keys(errors).length === 0;
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setError('');
+    setSuccess('');
+
+    if (!validarFormulario()) {
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const payload = {
+        razao_social: formData.razao_social.trim(),
+        nome_fantasia: formData.nome_fantasia ? formData.nome_fantasia.trim() : '',
+        tipo_pessoa: formData.tipo_pessoa,
+        cpf_cnpj: formData.cpf_cnpj ? formData.cpf_cnpj.trim() : '',
+        telefone: formData.telefone ? formData.telefone.trim() : '',
+        email: formData.email ? formData.email.trim().toLowerCase() : ''
+      };
+
+      const res = await api.put('/empresa/atual', payload);
+      setEmpresa(res.data);
+      setSuccess('Dados da empresa atualizados com sucesso!');
+      setTimeout(() => setSuccess(''), 5000);
+    } catch (err) {
+      const msg = err.response?.data?.error || 'Erro ao atualizar dados da empresa.';
+      setError(msg);
+      if (err.response?.data?.errors) {
+        setFieldErrors(err.response.data.errors);
+      }
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const formatarData = (dt) => {
+    if (!dt) return '-';
+    try {
+      const d = new Date(dt);
+      if (isNaN(d.getTime())) return dt;
+      return d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
+    } catch {
+      return dt;
+    }
+  };
+
+  const calcularDiasRestantes = (dataVigencia) => {
+    if (!dataVigencia) return null;
+    const vig = new Date(dataVigencia);
+    if (isNaN(vig.getTime())) return null;
+    const diff = vig.getTime() - Date.now();
+    return Math.ceil(diff / (1000 * 60 * 60 * 24));
+  };
+
+  const diasRestantes = calcularDiasRestantes(empresa?.data_vigencia);
+
+  return (
+    <div style={{ maxWidth: '1100px', margin: '0 auto' }}>
+      <div className="content-header" style={{ marginBottom: '20px' }}>
+        <div>
+          <h1 className="page-title" style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <Building2 size={24} style={{ color: 'var(--accent-cyan)' }} />
+            <span>Dados da Empresa</span>
+          </h1>
+          <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginTop: '4px' }}>
+            Visualize e mantenha as informações cadastrais e operacionais da empresa logada.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={carregarEmpresa}
+          className="btn btn-secondary"
+          disabled={loading || saving}
+          title="Recarregar dados"
+          style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
+        >
+          <RefreshCw size={16} className={loading ? 'icon-spin' : ''} />
+          <span>Atualizar</span>
+        </button>
+      </div>
+
+      {error && (
+        <div className="alert alert-danger" style={{ marginBottom: '20px', display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <AlertCircle size={20} />
+          <span>{error}</span>
+        </div>
+      )}
+
+      {success && (
+        <div className="alert alert-success" style={{ marginBottom: '20px', display: 'flex', alignItems: 'center', gap: '10px', background: 'rgba(16, 185, 129, 0.15)', borderColor: 'rgba(16, 185, 129, 0.4)', color: '#10b981' }}>
+          <CheckCircle2 size={20} />
+          <span>{success}</span>
+        </div>
+      )}
+
+      {loading ? (
+        <div className="glass-card" style={{ padding: '40px', textAlign: 'center', color: 'var(--text-muted)' }}>
+          <RefreshCw size={24} className="icon-spin" style={{ margin: '0 auto 12px auto' }} />
+          <div>Carregando dados da empresa...</div>
+        </div>
+      ) : (
+        <form onSubmit={handleSubmit}>
+          {/* Card Resumo do Plano / Status */}
+          <div className="glass-card" style={{ marginBottom: '24px', padding: '20px' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '16px' }}>
+              <div style={{ padding: '12px 16px', background: 'rgba(255,255,255,0.03)', borderRadius: 'var(--border-radius-md)', border: '1px solid var(--glass-border)' }}>
+                <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Código da Empresa</div>
+                <div style={{ fontSize: '1.2rem', fontWeight: 700, color: 'var(--text-primary)', marginTop: '4px' }}>
+                  #{String(empresa?.id || 1).padStart(4, '0')}
+                </div>
+              </div>
+
+              <div style={{ padding: '12px 16px', background: 'rgba(255,255,255,0.03)', borderRadius: 'var(--border-radius-md)', border: '1px solid var(--glass-border)' }}>
+                <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Situação da Conta</div>
+                <div style={{ marginTop: '6px' }}>
+                  <span className={`badge ${String(empresa?.status || 'Ativo').toLowerCase() === 'ativo' ? 'badge-success' : 'badge-danger'}`} style={{ fontSize: '0.85rem', padding: '4px 10px' }}>
+                    {empresa?.status || 'Ativo'}
+                  </span>
+                </div>
+              </div>
+
+              <div style={{ padding: '12px 16px', background: 'rgba(255,255,255,0.03)', borderRadius: 'var(--border-radius-md)', border: '1px solid var(--glass-border)' }}>
+                <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Data de Cadastro</div>
+                <div style={{ fontSize: '1.1rem', fontWeight: 600, color: 'var(--text-primary)', marginTop: '4px' }}>
+                  {formatarData(empresa?.data_cadastro || empresa?.created_at)}
+                </div>
+              </div>
+
+              <div style={{ padding: '12px 16px', background: 'rgba(255,255,255,0.03)', borderRadius: 'var(--border-radius-md)', border: '1px solid var(--glass-border)' }}>
+                <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Vigência da Licença</div>
+                <div style={{ fontSize: '1.1rem', fontWeight: 600, color: 'var(--accent-cyan)', marginTop: '4px' }}>
+                  {formatarData(empresa?.data_vigencia)}
+                  {diasRestantes !== null && (
+                    <span style={{ fontSize: '0.8rem', fontWeight: 400, marginLeft: '6px', color: diasRestantes > 7 ? 'var(--text-muted)' : 'var(--color-warning)' }}>
+                      ({diasRestantes > 0 ? `${diasRestantes} dias restantes` : 'Expirada'})
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Card Formulário de Edição */}
+          <div className="glass-card" style={{ padding: '24px', marginBottom: '24px' }}>
+            <h3 style={{ fontSize: '1.1rem', fontWeight: 700, marginBottom: '20px', borderBottom: '1px solid var(--glass-border)', paddingBottom: '12px' }}>
+              Informações Cadastrais
+            </h3>
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '20px' }}>
+              {/* Tipo de Pessoa */}
+              <div className="form-group">
+                <label className="form-label" style={{ fontWeight: 600 }}>Tipo de Pessoa *</label>
+                <select
+                  className={`form-control ${fieldErrors.tipo_pessoa ? 'is-invalid' : ''}`}
+                  value={formData.tipo_pessoa}
+                  onChange={(e) => handleChangeTipoPessoa(e.target.value)}
+                >
+                  <option value="Jurídica">Pessoa Jurídica</option>
+                  <option value="Física">Pessoa Física</option>
+                </select>
+                {fieldErrors.tipo_pessoa && (
+                  <div style={{ color: 'var(--color-danger, #ef4444)', fontSize: '0.8rem', marginTop: '4px' }}>
+                    {fieldErrors.tipo_pessoa}
+                  </div>
+                )}
+              </div>
+
+              {/* CPF / CNPJ */}
+              <div className="form-group">
+                <label className="form-label" style={{ fontWeight: 600 }}>
+                  {formData.tipo_pessoa === 'Física' ? 'CPF *' : 'CNPJ *'}
+                </label>
+                <input
+                  type="text"
+                  className={`form-control ${fieldErrors.cpf_cnpj ? 'is-invalid' : ''}`}
+                  value={formData.cpf_cnpj}
+                  onChange={handleChangeCpfCnpj}
+                  placeholder={formData.tipo_pessoa === 'Física' ? '000.000.000-00' : '00.000.000/0000-00'}
+                  maxLength={formData.tipo_pessoa === 'Física' ? 14 : 18}
+                />
+                {fieldErrors.cpf_cnpj && (
+                  <div style={{ color: 'var(--color-danger, #ef4444)', fontSize: '0.8rem', marginTop: '4px' }}>
+                    {fieldErrors.cpf_cnpj}
+                  </div>
+                )}
+              </div>
+
+              {/* Razão Social / Nome Completo */}
+              <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                <label className="form-label" style={{ fontWeight: 600 }}>
+                  {formData.tipo_pessoa === 'Física' ? 'Nome Completo *' : 'Razão Social *'}
+                </label>
+                <input
+                  type="text"
+                  className={`form-control ${fieldErrors.razao_social ? 'is-invalid' : ''}`}
+                  value={formData.razao_social}
+                  onChange={(e) => handleChangeField('razao_social', e.target.value)}
+                  placeholder="Informe o nome ou razão social"
+                  maxLength={255}
+                  required
+                />
+                {fieldErrors.razao_social && (
+                  <div style={{ color: 'var(--color-danger, #ef4444)', fontSize: '0.8rem', marginTop: '4px' }}>
+                    {fieldErrors.razao_social}
+                  </div>
+                )}
+              </div>
+
+              {/* Nome Fantasia */}
+              <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                <label className="form-label" style={{ fontWeight: 600 }}>Nome Fantasia</label>
+                <input
+                  type="text"
+                  className="form-control"
+                  value={formData.nome_fantasia}
+                  onChange={(e) => handleChangeField('nome_fantasia', e.target.value)}
+                  placeholder="Nome fantasia ou apelido operacional (opcional)"
+                  maxLength={255}
+                />
+              </div>
+
+              {/* Telefone */}
+              <div className="form-group">
+                <label className="form-label" style={{ fontWeight: 600 }}>Telefone com DDD *</label>
+                <input
+                  type="tel"
+                  className={`form-control ${fieldErrors.telefone ? 'is-invalid' : ''}`}
+                  value={formData.telefone}
+                  onChange={handleChangeTelefone}
+                  placeholder="(11) 98765-4321"
+                  maxLength={15}
+                />
+                {fieldErrors.telefone && (
+                  <div style={{ color: 'var(--color-danger, #ef4444)', fontSize: '0.8rem', marginTop: '4px' }}>
+                    {fieldErrors.telefone}
+                  </div>
+                )}
+              </div>
+
+              {/* E-mail */}
+              <div className="form-group">
+                <label className="form-label" style={{ fontWeight: 600 }}>E-mail Corporativo / Contato *</label>
+                <input
+                  type="email"
+                  className={`form-control ${fieldErrors.email ? 'is-invalid' : ''}`}
+                  value={formData.email}
+                  onChange={(e) => handleChangeField('email', e.target.value)}
+                  placeholder="contato@empresa.com.br"
+                  maxLength={255}
+                />
+                {fieldErrors.email && (
+                  <div style={{ color: 'var(--color-danger, #ef4444)', fontSize: '0.8rem', marginTop: '4px' }}>
+                    {fieldErrors.email}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div style={{ marginTop: '28px', display: 'flex', justifyContent: 'flex-end', gap: '12px' }}>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={carregarEmpresa}
+                disabled={saving}
+              >
+                Cancelar
+              </button>
+              <button
+                type="submit"
+                className="btn btn-primary"
+                disabled={saving}
+                style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: '160px', justifyContent: 'center' }}
+              >
+                {saving ? (
+                  <>
+                    <RefreshCw size={16} className="icon-spin" />
+                    <span>Salvando...</span>
+                  </>
+                ) : (
+                  <>
+                    <Save size={16} />
+                    <span>Salvar Alterações</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </form>
+      )}
+    </div>
+  );
+}
+
+// 6.2 Gestão de Usuários da Empresa Logada
+function GestaoUsuarios() {
+  const { user: currentUser } = useAuth();
+  const [usuarios, setUsuarios] = useState([]);
+  const [perfis, setPerfis] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+  const [searchTerm, setSearchTerm] = useState('');
+  const [filtroPerfil, setFiltroPerfil] = useState('todos');
+  const [filtroSituacao, setFiltroSituacao] = useState('todos');
+
+  // Modal State
+  const [showModal, setShowModal] = useState(false);
+  const [editMode, setEditMode] = useState(false);
+  const [userIdToEdit, setUserIdToEdit] = useState(null);
+  const [showPassword, setShowPassword] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [modalErrors, setModalErrors] = useState({});
+
+  const [formData, setFormData] = useState({
+    nome: '',
+    login: '',
+    email: '',
+    senha: '',
+    perfil_id: '',
+    ativo: 1,
+    role: 'user'
+  });
+
+  // Delete State
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [userToDelete, setUserToDelete] = useState(null);
+  const [deleting, setDeleting] = useState(false);
+
+  const carregarDados = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const [resUsers, resPerfis] = await Promise.all([
+        api.get('/usuarios'),
+        api.get('/perfis').catch(() => ({ data: [] }))
+      ]);
+      setUsuarios(Array.isArray(resUsers.data) ? resUsers.data : []);
+      setPerfis(Array.isArray(resPerfis.data) ? resPerfis.data : []);
+    } catch (err) {
+      setError(err.response?.data?.error || 'Erro ao carregar lista de usuários da empresa.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    carregarDados();
+  }, []);
+
+  const handleOpenAdd = () => {
+    setEditMode(false);
+    setUserIdToEdit(null);
+    setShowPassword(false);
+    setModalErrors({});
+    const defaultPerfil = perfis.find(p => p.nome === 'Operador' || p.nome === 'Usuário') || perfis[0];
+    setFormData({
+      nome: '',
+      login: '',
+      email: '',
+      senha: '',
+      perfil_id: defaultPerfil ? String(defaultPerfil.id) : '',
+      ativo: 1,
+      role: 'user'
+    });
+    setShowModal(true);
+  };
+
+  const handleOpenEdit = (u) => {
+    setEditMode(true);
+    setUserIdToEdit(u.id);
+    setShowPassword(false);
+    setModalErrors({});
+    setFormData({
+      nome: u.nome || '',
+      login: u.login || '',
+      email: u.email || '',
+      senha: '',
+      perfil_id: u.perfil_id !== null && u.perfil_id !== undefined ? String(u.perfil_id) : '',
+      ativo: Number(u.ativo) ? 1 : 0,
+      role: u.role || 'user'
+    });
+    setShowModal(true);
+  };
+
+  const handleToggleAtivo = async (u) => {
+    if (currentUser?.id === u.id) {
+      alert('Não é permitido desativar o seu próprio usuário logado.');
+      return;
+    }
+    const novoAtivo = Number(u.ativo) ? 0 : 1;
+    try {
+      await api.put(`/usuarios/${u.id}`, { ativo: novoAtivo });
+      setUsuarios(prev => prev.map(item => item.id === u.id ? { ...item, ativo: novoAtivo, situacao: novoAtivo ? 'Ativado' : 'Desativado' } : item));
+      setSuccess(`Usuário "${u.nome}" ${novoAtivo ? 'ativado' : 'desativado'} com sucesso.`);
+      setTimeout(() => setSuccess(''), 4000);
+    } catch (err) {
+      alert(err.response?.data?.error || 'Erro ao alterar situação do usuário.');
+    }
+  };
+
+  const handleOpenDelete = (u) => {
+    if (currentUser?.id === u.id) {
+      alert('Não é permitido excluir o próprio usuário logado.');
+      return;
+    }
+    setUserToDelete(u);
+    setShowDeleteModal(true);
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!userToDelete) return;
+    setDeleting(true);
+    try {
+      await api.delete(`/usuarios/${userToDelete.id}`);
+      setUsuarios(prev => prev.filter(u => u.id !== userToDelete.id));
+      setShowDeleteModal(false);
+      setUserToDelete(null);
+      setSuccess('Usuário excluído com sucesso.');
+      setTimeout(() => setSuccess(''), 4000);
+    } catch (err) {
+      alert(err.response?.data?.error || 'Erro ao excluir usuário.');
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const validarModal = () => {
+    const errs = {};
+    if (!formData.nome || formData.nome.trim().length < 2) {
+      errs.nome = 'O nome é obrigatório (mínimo 2 caracteres).';
+    }
+    if (!formData.email || !validateEmail(formData.email.trim())) {
+      errs.email = 'Endereço de e-mail inválido.';
+    }
+    if (formData.login && !validateLogin(formData.login.trim())) {
+      errs.login = 'Login inválido (mínimo 3 caracteres, sem espaços ou caracteres especiais).';
+    }
+    if (!editMode) {
+      if (!formData.senha || formData.senha.length < 6) {
+        errs.senha = 'A senha deve conter no mínimo 6 caracteres.';
+      }
+    } else {
+      if (formData.senha && formData.senha.length < 6) {
+        errs.senha = 'A nova senha deve conter no mínimo 6 caracteres.';
+      }
+    }
+    setModalErrors(errs);
+    return Object.keys(errs).length === 0;
+  };
+
+  const handleSaveModal = async (e) => {
+    e.preventDefault();
+    if (!validarModal()) return;
+
+    setSaving(true);
+    try {
+      const payload = {
+        nome: formData.nome.trim(),
+        login: formData.login ? formData.login.trim().toLowerCase() : formData.email.trim().toLowerCase(),
+        email: formData.email.trim().toLowerCase(),
+        perfil_id: formData.perfil_id ? Number(formData.perfil_id) : null,
+        ativo: Number(formData.ativo) ? 1 : 0,
+        situacao: Number(formData.ativo) ? 'Ativado' : 'Desativado',
+        role: formData.role || 'user'
+      };
+
+      if (formData.senha && formData.senha.trim().length > 0) {
+        payload.senha = formData.senha;
+      }
+
+      if (editMode) {
+        const res = await api.put(`/usuarios/${userIdToEdit}`, payload);
+        const updated = res.data;
+        const perfilMatched = perfis.find(p => p.id === updated.perfil_id);
+        setUsuarios(prev => prev.map(u => u.id === userIdToEdit ? { ...updated, perfil_nome: perfilMatched?.nome || u.perfil_nome } : u));
+        setSuccess('Usuário atualizado com sucesso.');
+      } else {
+        const res = await api.post('/usuarios', payload);
+        const created = res.data;
+        const perfilMatched = perfis.find(p => p.id === created.perfil_id);
+        setUsuarios(prev => [...prev, { ...created, perfil_nome: perfilMatched?.nome || 'Personalizado' }]);
+        setSuccess('Novo usuário cadastrado com sucesso.');
+      }
+      setTimeout(() => setSuccess(''), 4000);
+      setShowModal(false);
+    } catch (err) {
+      const msg = err.response?.data?.error || 'Erro ao salvar usuário.';
+      setModalErrors(prev => ({ ...prev, global: msg }));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const formatarData = (dt) => {
+    if (!dt) return '-';
+    try {
+      const d = new Date(dt);
+      if (isNaN(d.getTime())) return dt;
+      return d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
+    } catch {
+      return dt;
+    }
+  };
+
+  const filteredUsuarios = usuarios.filter(u => {
+    const term = searchTerm.toLowerCase();
+    const matchSearch = (u.nome || '').toLowerCase().includes(term) ||
+      (u.email || '').toLowerCase().includes(term) ||
+      (u.login || '').toLowerCase().includes(term);
+
+    const matchPerfil = filtroPerfil === 'todos' || String(u.perfil_id) === String(filtroPerfil);
+    const matchSituacao = filtroSituacao === 'todos' ||
+      (filtroSituacao === 'ativo' && Number(u.ativo) === 1) ||
+      (filtroSituacao === 'inativo' && Number(u.ativo) === 0);
+
+    return matchSearch && matchPerfil && matchSituacao;
+  });
+
+  return (
+    <div>
+      <div className="content-header" style={{ marginBottom: '20px' }}>
+        <div>
+          <h1 className="page-title" style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <Users size={24} style={{ color: 'var(--accent-cyan)' }} />
+            <span>Gestão de Usuários</span>
+          </h1>
+          <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginTop: '4px' }}>
+            Gerencie os usuários, credenciais de acesso e permissões da sua empresa.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={handleOpenAdd}
+          className="btn btn-primary"
+          style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
+        >
+          <UserPlus size={18} />
+          <span>Novo Usuário</span>
+        </button>
+      </div>
+
+      {error && (
+        <div className="alert alert-danger" style={{ marginBottom: '20px', display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <AlertCircle size={20} />
+          <span>{error}</span>
+        </div>
+      )}
+
+      {success && (
+        <div className="alert alert-success" style={{ marginBottom: '20px', display: 'flex', alignItems: 'center', gap: '10px', background: 'rgba(16, 185, 129, 0.15)', borderColor: 'rgba(16, 185, 129, 0.4)', color: '#10b981' }}>
+          <CheckCircle2 size={20} />
+          <span>{success}</span>
+        </div>
+      )}
+
+      {/* Barra de Filtros */}
+      <div className="glass-card" style={{ marginBottom: '24px', padding: '16px' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '16px', alignItems: 'center' }}>
+          {/* Busca por texto */}
+          <div style={{ display: 'flex', alignItems: 'center', background: 'rgba(0,0,0,0.2)', padding: '8px 14px', borderRadius: 'var(--border-radius-md)', border: '1px solid var(--glass-border)' }}>
+            <Search size={18} style={{ color: 'var(--text-muted)', marginRight: '8px', flexShrink: 0 }} />
+            <input
+              type="text"
+              placeholder="Buscar por nome, login ou e-mail..."
+              className="form-control"
+              style={{ border: 'none', background: 'transparent', padding: 0 }}
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+            />
+          </div>
+
+          {/* Filtro por Perfil */}
+          <div>
+            <select
+              className="form-control"
+              value={filtroPerfil}
+              onChange={(e) => setFiltroPerfil(e.target.value)}
+            >
+              <option value="todos">Todos os Perfis</option>
+              {perfis.map(p => (
+                <option key={p.id} value={p.id}>{p.nome}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* Filtro por Situação */}
+          <div>
+            <select
+              className="form-control"
+              value={filtroSituacao}
+              onChange={(e) => setFiltroSituacao(e.target.value)}
+            >
+              <option value="todos">Todas as Situações</option>
+              <option value="ativo">Apenas Ativados</option>
+              <option value="inativo">Apenas Desativados</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      {/* Tabela de Usuários */}
+      <div className="glass-card" style={{ padding: '0' }}>
+        <div className="table-container" style={{ overflowX: 'auto' }}>
+          <table className="data-table" style={{ width: '100%', minWidth: '700px' }}>
+            <thead>
+              <tr>
+                <th style={{ width: '70px' }}>ID</th>
+                <th>Nome Completo</th>
+                <th>Login / E-mail</th>
+                <th>Perfil de Acesso</th>
+                <th>Situação</th>
+                <th>Cadastro</th>
+                <th style={{ textAlign: 'right', width: '130px' }}>Ações</th>
+              </tr>
+            </thead>
+            <tbody>
+              {loading ? (
+                <tr>
+                  <td colSpan="7" style={{ textAlign: 'center', padding: '30px', color: 'var(--text-muted)' }}>
+                    <RefreshCw size={20} className="icon-spin" style={{ margin: '0 auto 8px auto' }} />
+                    <div>Carregando usuários...</div>
+                  </td>
+                </tr>
+              ) : filteredUsuarios.length === 0 ? (
+                <tr>
+                  <td colSpan="7" style={{ textAlign: 'center', padding: '30px', color: 'var(--text-muted)' }}>
+                    Nenhum usuário encontrado para os critérios selecionados.
+                  </td>
+                </tr>
+              ) : (
+                filteredUsuarios.map((u) => {
+                  const isSelf = currentUser?.id === u.id;
+                  const isAtivo = Number(u.ativo) === 1 && String(u.situacao || 'Ativado').toLowerCase() === 'ativado';
+                  return (
+                    <tr key={u.id}>
+                      <td style={{ fontWeight: 600, color: 'var(--text-muted)' }}>#{String(u.id).padStart(3, '0')}</td>
+                      <td>
+                        <div style={{ fontWeight: 600, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          <span>{u.nome}</span>
+                          {isSelf && (
+                            <span className="badge" style={{ fontSize: '0.65rem', background: 'rgba(56, 189, 248, 0.2)', color: 'var(--accent-cyan)' }}>
+                              Você
+                            </span>
+                          )}
+                        </div>
+                      </td>
+                      <td>
+                        <div style={{ fontSize: '0.85rem', color: 'var(--text-primary)' }}>{u.login || u.email}</div>
+                        {u.login && u.email && u.login !== u.email && (
+                          <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>{u.email}</div>
+                        )}
+                      </td>
+                      <td>
+                        <span className="badge badge-secondary" style={{ fontSize: '0.8rem', padding: '3px 8px' }}>
+                          {u.perfil_nome || (u.role === 'admin' ? 'Administrador' : 'Padrão')}
+                        </span>
+                      </td>
+                      <td>
+                        <button
+                          type="button"
+                          onClick={() => handleToggleAtivo(u)}
+                          disabled={isSelf}
+                          className={`badge ${isAtivo ? 'badge-success' : 'badge-danger'}`}
+                          style={{
+                            cursor: isSelf ? 'default' : 'pointer',
+                            border: 'none',
+                            padding: '4px 10px',
+                            fontSize: '0.8rem',
+                            opacity: isSelf ? 0.8 : 1
+                          }}
+                          title={isSelf ? 'Você não pode desativar o próprio usuário' : `Clique para ${isAtivo ? 'desativar' : 'ativar'}`}
+                        >
+                          {isAtivo ? 'Ativado' : 'Desativado'}
+                        </button>
+                      </td>
+                      <td style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+                        {formatarData(u.created_at)}
+                      </td>
+                      <td style={{ textAlign: 'right' }}>
+                        <div className="flex-gap-2" style={{ justifyContent: 'flex-end', display: 'flex', gap: '6px' }}>
+                          <button
+                            type="button"
+                            onClick={() => handleOpenEdit(u)}
+                            className="btn btn-secondary"
+                            style={{ padding: '6px 8px' }}
+                            title="Editar Usuário"
+                          >
+                            <Edit2 size={14} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleOpenDelete(u)}
+                            disabled={isSelf}
+                            className="btn btn-danger"
+                            style={{ padding: '6px 8px', opacity: isSelf ? 0.4 : 1, cursor: isSelf ? 'not-allowed' : 'pointer' }}
+                            title={isSelf ? 'Não é permitido excluir o usuário autenticado' : 'Excluir Usuário'}
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Modal Adicionar / Editar Usuário */}
+      {showModal && (
+        <div className="modal-overlay">
+          <div className="glass-card modal-content" style={{ maxWidth: '540px', width: '90%' }}>
+            <div className="modal-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+              <h3 className="modal-title" style={{ fontSize: '1.2rem', fontWeight: 700 }}>
+                {editMode ? 'Editar Usuário' : 'Novo Usuário'}
+              </h3>
+              <button
+                type="button"
+                onClick={() => setShowModal(false)}
+                className="close-btn"
+                style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', fontSize: '1.4rem', cursor: 'pointer' }}
+              >
+                &times;
+              </button>
+            </div>
+
+            {modalErrors.global && (
+              <div className="alert alert-danger" style={{ marginBottom: '16px' }}>
+                {modalErrors.global}
+              </div>
+            )}
+
+            <form onSubmit={handleSaveModal}>
+              {/* Nome */}
+              <div className="form-group" style={{ marginBottom: '14px' }}>
+                <label className="form-label" style={{ fontWeight: 600 }}>Nome Completo *</label>
+                <input
+                  type="text"
+                  className={`form-control ${modalErrors.nome ? 'is-invalid' : ''}`}
+                  value={formData.nome}
+                  onChange={(e) => {
+                    setFormData(prev => ({ ...prev, nome: e.target.value }));
+                    if (modalErrors.nome) setModalErrors(prev => ({ ...prev, nome: undefined }));
+                  }}
+                  placeholder="Nome do colaborador"
+                  maxLength={150}
+                  required
+                />
+                {modalErrors.nome && (
+                  <div style={{ color: 'var(--color-danger, #ef4444)', fontSize: '0.8rem', marginTop: '4px' }}>
+                    {modalErrors.nome}
+                  </div>
+                )}
+              </div>
+
+              {/* Login e E-mail */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px', marginBottom: '14px' }}>
+                <div className="form-group">
+                  <label className="form-label" style={{ fontWeight: 600 }}>Nome de Usuário (Login) *</label>
+                  <input
+                    type="text"
+                    className={`form-control ${modalErrors.login ? 'is-invalid' : ''}`}
+                    value={formData.login}
+                    onChange={(e) => {
+                      setFormData(prev => ({ ...prev, login: e.target.value }));
+                      if (modalErrors.login) setModalErrors(prev => ({ ...prev, login: undefined }));
+                    }}
+                    placeholder="usuario.login"
+                    maxLength={60}
+                    required
+                  />
+                  {modalErrors.login && (
+                    <div style={{ color: 'var(--color-danger, #ef4444)', fontSize: '0.8rem', marginTop: '4px' }}>
+                      {modalErrors.login}
+                    </div>
+                  )}
+                </div>
+
+                <div className="form-group">
+                  <label className="form-label" style={{ fontWeight: 600 }}>E-mail *</label>
+                  <input
+                    type="email"
+                    className={`form-control ${modalErrors.email ? 'is-invalid' : ''}`}
+                    value={formData.email}
+                    onChange={(e) => {
+                      setFormData(prev => ({ ...prev, email: e.target.value }));
+                      if (modalErrors.email) setModalErrors(prev => ({ ...prev, email: undefined }));
+                    }}
+                    placeholder="usuario@empresa.com"
+                    maxLength={150}
+                    required
+                  />
+                  {modalErrors.email && (
+                    <div style={{ color: 'var(--color-danger, #ef4444)', fontSize: '0.8rem', marginTop: '4px' }}>
+                      {modalErrors.email}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Perfil e Situação */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px', marginBottom: '14px' }}>
+                <div className="form-group">
+                  <label className="form-label" style={{ fontWeight: 600 }}>Perfil de Acesso</label>
+                  <select
+                    className="form-control"
+                    value={formData.perfil_id}
+                    onChange={(e) => setFormData(prev => ({ ...prev, perfil_id: e.target.value }))}
+                  >
+                    <option value="">(Padrão da Empresa)</option>
+                    {perfis.map(p => (
+                      <option key={p.id} value={p.id}>{p.nome}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="form-group">
+                  <label className="form-label" style={{ fontWeight: 600 }}>Situação</label>
+                  <select
+                    className="form-control"
+                    value={formData.ativo}
+                    onChange={(e) => setFormData(prev => ({ ...prev, ativo: Number(e.target.value) }))}
+                  >
+                    <option value={1}>Ativado</option>
+                    <option value={0}>Desativado</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Senha */}
+              <div className="form-group" style={{ marginBottom: '20px' }}>
+                <label className="form-label" style={{ fontWeight: 600 }}>
+                  {editMode ? 'Nova Senha (opcional)' : 'Senha de Acesso *'}
+                </label>
+                <div style={{ position: 'relative' }}>
+                  <input
+                    type={showPassword ? 'text' : 'password'}
+                    className={`form-control ${modalErrors.senha ? 'is-invalid' : ''}`}
+                    value={formData.senha}
+                    onChange={(e) => {
+                      setFormData(prev => ({ ...prev, senha: e.target.value }));
+                      if (modalErrors.senha) setModalErrors(prev => ({ ...prev, senha: undefined }));
+                    }}
+                    placeholder={editMode ? 'Deixe em branco para manter a senha atual' : 'Mínimo de 6 caracteres'}
+                    style={{ paddingRight: '42px' }}
+                    required={!editMode}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    style={{
+                      position: 'absolute',
+                      right: '10px',
+                      top: '50%',
+                      transform: 'translateY(-50%)',
+                      background: 'none',
+                      border: 'none',
+                      color: 'var(--text-muted)',
+                      cursor: 'pointer',
+                      padding: 0
+                    }}
+                    title={showPassword ? 'Ocultar senha' : 'Ver senha'}
+                  >
+                    {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+                  </button>
+                </div>
+                {modalErrors.senha && (
+                  <div style={{ color: 'var(--color-danger, #ef4444)', fontSize: '0.8rem', marginTop: '4px' }}>
+                    {modalErrors.senha}
+                  </div>
+                )}
+              </div>
+
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '24px' }}>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => setShowModal(false)}
+                  disabled={saving}
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  className="btn btn-primary"
+                  disabled={saving}
+                  style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: '130px', justifyContent: 'center' }}
+                >
+                  {saving ? (
+                    <>
+                      <RefreshCw size={16} className="icon-spin" />
+                      <span>Salvando...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Save size={16} />
+                      <span>{editMode ? 'Salvar' : 'Criar Usuário'}</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Confirmar Exclusão */}
+      {showDeleteModal && (
+        <div className="modal-overlay">
+          <div className="glass-card modal-content" style={{ maxWidth: '420px', width: '90%' }}>
+            <div style={{ textAlign: 'center', marginBottom: '16px' }}>
+              <AlertTriangle size={36} style={{ color: 'var(--color-danger, #ef4444)', margin: '0 auto 12px auto' }} />
+              <h3 style={{ fontSize: '1.2rem', fontWeight: 700 }}>Confirmar Exclusão</h3>
+            </div>
+            <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', textAlign: 'center', marginBottom: '24px' }}>
+              Tem certeza que deseja excluir o usuário <strong>{userToDelete?.nome}</strong> ({userToDelete?.email})? Esta ação não pode ser desfeita.
+            </p>
+            <div style={{ display: 'flex', justifyContent: 'center', gap: '12px' }}>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => setShowDeleteModal(false)}
+                disabled={deleting}
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                className="btn btn-danger"
+                onClick={handleConfirmDelete}
+                disabled={deleting}
+                style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
+              >
+                {deleting ? (
+                  <>
+                    <RefreshCw size={16} className="icon-spin" />
+                    <span>Excluindo...</span>
+                  </>
+                ) : (
+                  <>
+                    <Trash2 size={16} />
+                    <span>Sim, Excluir</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

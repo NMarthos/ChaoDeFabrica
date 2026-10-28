@@ -1195,7 +1195,7 @@ app.delete('/api/perfis/:id', authenticateToken, requirePermission('ADMIN_PERFIS
 app.get('/api/usuarios', authenticateToken, requirePermission('ADMIN_USUARIOS'), async (req, res) => {
   try {
     const users = await req.tenantDb.all(
-      `SELECT u.id, u.empresa_id, u.perfil_id, u.nome, u.email, u.role, u.ativo, u.created_at,
+      `SELECT u.id, u.empresa_id, u.perfil_id, u.nome, u.login, u.email, u.role, u.ativo, u.situacao, u.created_at,
               p.nome AS perfil_nome
        FROM usuarios u
        LEFT JOIN perfis p ON p.empresa_id = u.empresa_id AND p.id = u.perfil_id
@@ -1213,7 +1213,7 @@ app.get('/api/usuarios/:id', authenticateToken, requirePermission('ADMIN_USUARIO
   if (req.params.id === 'assinatura') return next();
   try {
     const user = await req.tenantDb.get(
-      `SELECT u.id, u.empresa_id, u.perfil_id, u.nome, u.email, u.role, u.ativo, u.created_at,
+      `SELECT u.id, u.empresa_id, u.perfil_id, u.nome, u.login, u.email, u.role, u.ativo, u.situacao, u.created_at,
               p.nome AS perfil_nome
        FROM usuarios u
        LEFT JOIN perfis p ON p.empresa_id = u.empresa_id AND p.id = u.perfil_id
@@ -1231,7 +1231,7 @@ app.get('/api/usuarios/:id', authenticateToken, requirePermission('ADMIN_USUARIO
 });
 
 app.post('/api/usuarios', authenticateToken, requirePermission('ADMIN_USUARIOS'), async (req, res) => {
-  const { nome, email, senha, role = 'user', perfil_id = null, ativo = 1 } = req.body;
+  const { nome, email, login, senha, role = 'user', perfil_id = null, ativo = 1, situacao = null } = req.body;
   if (!nome || !email || !senha) {
     return res.status(400).json({ error: 'Nome, e-mail e senha são obrigatórios.' });
   }
@@ -1265,27 +1265,40 @@ app.post('/api/usuarios', authenticateToken, requirePermission('ADMIN_USUARIOS')
     }
 
     const emailClean = String(email).trim().toLowerCase();
+    if (!validateEmail(emailClean)) {
+      return res.status(400).json({ error: 'Endereço de e-mail inválido.' });
+    }
+
     const existingEmail = await db.get('SELECT id FROM usuarios WHERE LOWER(email) = ? LIMIT 1', [emailClean]);
     if (existingEmail) {
       return res.status(400).json({ error: 'Este endereço de e-mail já está em uso.' });
     }
 
+    const loginClean = login ? String(login).trim().toLowerCase() : emailClean;
+    const existingLogin = await db.get('SELECT id FROM usuarios WHERE LOWER(login) = ? LIMIT 1', [loginClean]);
+    if (existingLogin) {
+      return res.status(400).json({ error: 'Este nome de usuário (login) já está em uso.' });
+    }
+
     const hashed = await bcrypt.hash(String(senha), 10);
+    const resolvedAtivo = Number(ativo) ? 1 : 0;
+    const resolvedSituacao = situacao ? String(situacao).trim() : (resolvedAtivo ? 'Ativado' : 'Desativado');
+
     const ins = await req.tenantDb.run(
-      `INSERT INTO usuarios (empresa_id, perfil_id, nome, email, senha, role, ativo)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [req.auth.empresaId, validPerfilId, String(nome).trim(), emailClean, hashed, targetRole, Number(ativo) ? 1 : 0]
+      `INSERT INTO usuarios (empresa_id, perfil_id, nome, login, email, senha, role, ativo, situacao, data_cadastro)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+      [req.auth.empresaId, validPerfilId, String(nome).trim(), loginClean, emailClean, hashed, targetRole, resolvedAtivo, resolvedSituacao]
     );
 
     await logAuditoria(db, req, {
       acao: 'CRIAR_USUARIO',
       recurso: 'usuarios',
       recursoId: ins.lastID,
-      detalhes: { email: emailClean, role: targetRole, perfil_id: validPerfilId }
+      detalhes: { login: loginClean, email: emailClean, role: targetRole, perfil_id: validPerfilId }
     });
 
     const created = await req.tenantDb.get(
-      'SELECT id, empresa_id, perfil_id, nome, email, role, ativo, created_at FROM usuarios WHERE empresa_id = ? AND id = ?',
+      'SELECT id, empresa_id, perfil_id, nome, login, email, role, ativo, situacao, created_at FROM usuarios WHERE empresa_id = ? AND id = ?',
       [req.auth.empresaId, ins.lastID]
     );
     res.status(201).json(created);
@@ -1297,7 +1310,7 @@ app.post('/api/usuarios', authenticateToken, requirePermission('ADMIN_USUARIOS')
 app.put('/api/usuarios/:id', authenticateToken, requirePermission('ADMIN_USUARIOS'), async (req, res, next) => {
   if (req.params.id === 'assinatura') return next();
   const targetUserId = Number(req.params.id);
-  const { nome, email, senha, role, perfil_id, ativo } = req.body;
+  const { nome, email, login, senha, role, perfil_id, ativo, situacao } = req.body;
 
   try {
     const existing = await req.tenantDb.get(
@@ -1340,34 +1353,47 @@ app.put('/api/usuarios/:id', authenticateToken, requirePermission('ADMIN_USUARIO
 
     const newEmail = email !== undefined ? String(email).trim().toLowerCase() : existing.email;
     if (newEmail !== existing.email.toLowerCase()) {
+      if (!validateEmail(newEmail)) {
+        return res.status(400).json({ error: 'Endereço de e-mail inválido.' });
+      }
       const dup = await db.get('SELECT id FROM usuarios WHERE LOWER(email) = ? AND id <> ? LIMIT 1', [newEmail, targetUserId]);
       if (dup) {
         return res.status(400).json({ error: 'Este endereço de e-mail já está em uso.' });
       }
     }
 
+    let newLogin = existing.login;
+    if (login !== undefined && login !== null && String(login).trim().length > 0) {
+      newLogin = String(login).trim().toLowerCase();
+      const dupLogin = await db.get('SELECT id FROM usuarios WHERE LOWER(login) = ? AND id <> ? LIMIT 1', [newLogin, targetUserId]);
+      if (dupLogin) {
+        return res.status(400).json({ error: 'Este nome de usuário (login) já está em uso.' });
+      }
+    }
+
     const newNome = nome !== undefined ? String(nome).trim() : existing.nome;
     const newAtivo = ativo !== undefined ? (Number(ativo) ? 1 : 0) : existing.ativo;
+    const newSituacao = situacao !== undefined ? String(situacao).trim() : (newAtivo ? 'Ativado' : 'Desativado');
     const newSenha = (senha && String(senha).trim().length > 0)
       ? await bcrypt.hash(String(senha), 10)
       : existing.senha;
 
     await req.tenantDb.run(
       `UPDATE usuarios
-       SET nome = ?, email = ?, senha = ?, role = ?, perfil_id = ?, ativo = ?
+       SET nome = ?, login = ?, email = ?, senha = ?, role = ?, perfil_id = ?, ativo = ?, situacao = ?
        WHERE empresa_id = ? AND id = ?`,
-      [newNome, newEmail, newSenha, newRole, validPerfilId, newAtivo, req.auth.empresaId, targetUserId]
+      [newNome, newLogin, newEmail, newSenha, newRole, validPerfilId, newAtivo, newSituacao, req.auth.empresaId, targetUserId]
     );
 
     await logAuditoria(db, req, {
       acao: 'ATUALIZAR_USUARIO',
       recurso: 'usuarios',
       recursoId: targetUserId,
-      detalhes: { role: newRole, perfil_id: validPerfilId, ativo: newAtivo }
+      detalhes: { role: newRole, perfil_id: validPerfilId, ativo: newAtivo, situacao: newSituacao }
     });
 
     const updated = await req.tenantDb.get(
-      'SELECT id, empresa_id, perfil_id, nome, email, role, ativo, created_at FROM usuarios WHERE empresa_id = ? AND id = ?',
+      'SELECT id, empresa_id, perfil_id, nome, login, email, role, ativo, situacao, created_at FROM usuarios WHERE empresa_id = ? AND id = ?',
       [req.auth.empresaId, targetUserId]
     );
     res.json(updated);
@@ -1393,6 +1419,114 @@ app.delete('/api/usuarios/:id', authenticateToken, requirePermission('ADMIN_USUA
     res.json({ message: 'Usuário excluído com sucesso.' });
   } catch (err) {
     res.status(500).json({ error: 'Erro ao excluir usuário.' });
+  }
+});
+
+// Endpoints para manter dados da empresa logada
+app.get('/api/empresa/atual', authenticateToken, async (req, res) => {
+  try {
+    const empresa = await db.get(
+      `SELECT id, razao_social, nome_fantasia, tipo_pessoa, cnpj, cpf_cnpj, email, telefone,
+              status, ativo, data_cadastro, data_vigencia, created_at, updated_at
+       FROM empresas
+       WHERE id = ?
+       LIMIT 1`,
+      [req.auth.empresaId]
+    );
+    if (!empresa) {
+      return res.status(404).json({ error: 'Empresa não encontrada.' });
+    }
+    res.json(empresa);
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao carregar dados da empresa.' });
+  }
+});
+
+app.put('/api/empresa/atual', authenticateToken, async (req, res) => {
+  try {
+    // Permite alteração para administradores da empresa ou usuários com permissão ADMIN_PARAMETROS / ADMIN_USUARIOS
+    const canEdit = req.auth.role === 'admin'
+      || (Array.isArray(req.auth.permissoes) && (
+        req.auth.permissoes.includes('ADMIN_PARAMETROS') ||
+        req.auth.permissoes.includes('ADMIN_USUARIOS')
+      ));
+    if (!canEdit) {
+      return res.status(403).json({ error: 'Acesso negado: você não tem permissão para alterar os dados da empresa.' });
+    }
+
+    const { razao_social, nome_fantasia, tipo_pessoa, cpf_cnpj, email, telefone } = req.body || {};
+    const errors = {};
+
+    const cleanNome = String(razao_social || '').trim();
+    if (!cleanNome || cleanNome.length < 2) {
+      errors.razao_social = 'A Razão Social / Nome é obrigatória (mínimo de 2 caracteres).';
+    }
+
+    const cleanTipo = tipo_pessoa ? String(tipo_pessoa).trim() : null;
+    if (cleanTipo && cleanTipo !== 'Física' && cleanTipo !== 'Jurídica') {
+      errors.tipo_pessoa = 'Tipo de pessoa inválido.';
+    }
+
+    const cleanDoc = cpf_cnpj ? String(cpf_cnpj).trim() : null;
+    if (cleanDoc) {
+      if (cleanTipo === 'Física' && !validateCPF(cleanDoc)) {
+        errors.cpf_cnpj = 'CPF inválido.';
+      } else if (cleanTipo === 'Jurídica' && !validateCNPJ(cleanDoc)) {
+        errors.cpf_cnpj = 'CNPJ inválido.';
+      }
+    }
+
+    const cleanEmail = email !== undefined && email !== null ? String(email).trim().toLowerCase() : '';
+    if (cleanEmail && !validateEmail(cleanEmail)) {
+      errors.email = 'E-mail inválido.';
+    }
+
+    const cleanTel = telefone !== undefined && telefone !== null ? String(telefone).trim() : '';
+    if (cleanTel && !validatePhone(cleanTel)) {
+      errors.telefone = 'Telefone inválido (use formato com DDD).';
+    }
+
+    if (Object.keys(errors).length > 0) {
+      return res.status(400).json({ error: 'Dados inválidos.', errors });
+    }
+
+    const existing = await db.get('SELECT * FROM empresas WHERE id = ? LIMIT 1', [req.auth.empresaId]);
+    if (!existing) {
+      return res.status(404).json({ error: 'Empresa não encontrada.' });
+    }
+
+    const resolvedTipo = cleanTipo || existing.tipo_pessoa || 'Jurídica';
+    const resolvedDoc = cleanDoc || existing.cpf_cnpj || existing.cnpj;
+    const resolvedNomeFantasia = nome_fantasia !== undefined ? String(nome_fantasia).trim() : existing.nome_fantasia;
+    const resolvedEmail = cleanEmail || existing.email;
+    const resolvedTel = cleanTel || existing.telefone;
+
+    await db.run(
+      `UPDATE empresas
+       SET razao_social = ?, nome_fantasia = ?, tipo_pessoa = ?, cpf_cnpj = ?, cnpj = ?, email = ?, telefone = ?, updated_at = NOW()
+       WHERE id = ?`,
+      [cleanNome, resolvedNomeFantasia, resolvedTipo, resolvedDoc, resolvedDoc, resolvedEmail, resolvedTel, req.auth.empresaId]
+    );
+
+    await logAuditoria(db, req, {
+      empresaId: req.auth.empresaId,
+      usuarioId: req.auth.userId,
+      acao: 'ATUALIZAR_DADOS_EMPRESA',
+      recurso: 'empresas',
+      recursoId: req.auth.empresaId,
+      detalhes: { razao_social: cleanNome, nome_fantasia: resolvedNomeFantasia, tipo_pessoa: resolvedTipo, email: resolvedEmail, telefone: resolvedTel }
+    });
+
+    const updated = await db.get(
+      `SELECT id, razao_social, nome_fantasia, tipo_pessoa, cnpj, cpf_cnpj, email, telefone,
+              status, ativo, data_cadastro, data_vigencia, created_at, updated_at
+       FROM empresas
+       WHERE id = ? LIMIT 1`,
+      [req.auth.empresaId]
+    );
+    res.json(updated);
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao atualizar dados da empresa.' });
   }
 });
 
