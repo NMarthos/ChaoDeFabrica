@@ -369,22 +369,38 @@ const valorPorExtenso = (valor) => {
   return final ? final.charAt(0).toUpperCase() + final.slice(1) : 'Zero reais';
 };
 
-// Utilitário global para resolução de URL de imagens e anexos da API
+// Utilitário global para resolução de URL de imagens e anexos da API (com autenticação por empresa/token)
 export const getMediaUrl = (imgPath) => {
   if (!imgPath) return '';
   if (imgPath.startsWith('http://') || imgPath.startsWith('https://') || imgPath.startsWith('blob:') || imgPath.startsWith('data:')) return imgPath;
   const clean = imgPath.startsWith('/') ? imgPath.substring(1) : imgPath;
   const apiRoot = (import.meta.env.VITE_API_URL || '').replace(/\/api\/?$/, '');
-  return apiRoot ? `${apiRoot}/${clean}` : `/${clean}`;
+  const baseUrl = apiRoot ? `${apiRoot}/${clean}` : `/${clean}`;
+
+  if (clean.startsWith('uploads/')) {
+    const sep = baseUrl.includes('?') ? '&' : '?';
+    const pathname = typeof window !== 'undefined' ? (window.location?.pathname || '') : '';
+    const pubMatch = pathname.match(/^\/proposta(?:-publica)?\/([a-fA-F0-9]+)/);
+    if (pubMatch && pubMatch[1]) {
+      return `${baseUrl}${sep}share_token=${encodeURIComponent(pubMatch[1])}`;
+    }
+    const jwtToken = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+    if (jwtToken) {
+      return `${baseUrl}${sep}token=${encodeURIComponent(jwtToken)}`;
+    }
+  }
+  return baseUrl;
 };
 
-// Cache para parâmetros da empresa utilizados na geração de impressões e documentos
+// Cache para parâmetros da empresa isolado por token de sessão
 let cachedEmpresaParams = null;
+let cachedEmpresaToken = null;
 let lastEmpresaParamsFetch = 0;
 
 export const getEmpresaParametros = async () => {
   const now = Date.now();
-  if (cachedEmpresaParams && (now - lastEmpresaParamsFetch < 30000)) {
+  const currentToken = typeof localStorage !== 'undefined' ? (localStorage.getItem('token') || '') : '';
+  if (cachedEmpresaParams && cachedEmpresaToken === currentToken && (now - lastEmpresaParamsFetch < 30000)) {
     return cachedEmpresaParams;
   }
   try {
@@ -397,13 +413,14 @@ export const getEmpresaParametros = async () => {
         }
       });
       cachedEmpresaParams = map;
+      cachedEmpresaToken = currentToken;
       lastEmpresaParamsFetch = now;
       return map;
     }
   } catch (err) {
     console.error('Erro ao carregar parâmetros da empresa para documentos:', err);
   }
-  return cachedEmpresaParams || {};
+  return (cachedEmpresaToken === currentToken && cachedEmpresaParams) ? cachedEmpresaParams : {};
 };
 
 const gerarDocumentoReciboHtml = ({ orcamento, cliente, parcela, index = 0, totalParcelas = 1, isTotal = false, projetos = [], empresaParams = {} }) => {

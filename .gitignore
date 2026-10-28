@@ -33,6 +33,7 @@ backend/database/*.db
 database/*.db
 
 # Temporary and upload files
+uploads/
 backend/uploads/*
 !backend/uploads/.gitkeep
 backend/uploads/anexos/*

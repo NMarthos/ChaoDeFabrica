@@ -3,6 +3,7 @@ import bcrypt from 'bcryptjs';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { runMultiTenantMigrations, ensureCompanyProfilesAndPermissions } from './migrations.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -149,16 +150,16 @@ export async function ensureColumn(db, tableName, columnName, columnDefinition) 
   }
 }
 
-export async function initDb() {
+export async function initDb(options = {}) {
   const isPlaceholderEnv = !process.env.DB_USER || process.env.DB_USER === 'u123456_erp';
   const rawHost = isPlaceholderEnv ? '127.0.0.1' : (process.env.DB_HOST || '127.0.0.1');
   const dbHost = (rawHost === 'localhost' || rawHost === '::1') ? '127.0.0.1' : rawHost;
   const dbPort = parseInt(process.env.DB_PORT || '3306', 10);
-  const dbUser = isPlaceholderEnv ? 'u510090903_admin' : process.env.DB_USER;
-  const dbPassword = (isPlaceholderEnv || process.env.DB_PASSWORD === 'sua_senha_do_banco' || process.env.DB_PASSWORD === undefined)
+  let dbUser = isPlaceholderEnv ? 'u510090903_admin' : process.env.DB_USER;
+  let dbPassword = (isPlaceholderEnv || process.env.DB_PASSWORD === 'sua_senha_do_banco' || process.env.DB_PASSWORD === undefined)
     ? 'Erp!Db_2026#xQ7m'
     : process.env.DB_PASSWORD;
-  const dbName = (isPlaceholderEnv || process.env.DB_NAME === 'u123456_erp_chaodefabrica' || !process.env.DB_NAME)
+  let dbName = (isPlaceholderEnv || process.env.DB_NAME === 'u123456_erp_chaodefabrica' || !process.env.DB_NAME)
     ? 'u510090903_erp'
     : process.env.DB_NAME;
 
@@ -179,7 +180,30 @@ export async function initDb() {
     );
     await rootConn.end();
   } catch (createDbErr) {
-    console.warn(`Aviso: CREATE DATABASE ignorado (${createDbErr.code || createDbErr.message}). Conectando diretamente ao banco "${dbName}"...`);
+    // Se estiver em ambiente de desenvolvimento local e a credencial da Hostinger falhar com ER_ACCESS_DENIED_ERROR, usa o MySQL local (root / erp_chaodefabrica)
+    if (createDbErr.code === 'ER_ACCESS_DENIED_ERROR' && dbHost === '127.0.0.1' && dbUser === 'u510090903_admin' && process.env.NODE_ENV !== 'production') {
+      try {
+        const localConn = await mysql.createConnection({
+          host: '127.0.0.1',
+          port: dbPort,
+          user: 'root',
+          password: '',
+          connectTimeout: 5000
+        });
+        dbUser = 'root';
+        dbPassword = '';
+        dbName = process.env.LOCAL_DB_NAME || 'erp_chaodefabrica';
+        await localConn.query(
+          `CREATE DATABASE IF NOT EXISTS \`${dbName}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`
+        );
+        await localConn.end();
+        console.log(`[Dev Local] Conectado ao MySQL local com usuário "${dbUser}" e banco "${dbName}".`);
+      } catch (localErr) {
+        console.warn(`Aviso: CREATE DATABASE ignorado (${createDbErr.code || createDbErr.message}). Conectando diretamente ao banco "${dbName}"...`);
+      }
+    } else {
+      console.warn(`Aviso: CREATE DATABASE ignorado (${createDbErr.code || createDbErr.message}). Conectando diretamente ao banco "${dbName}"...`);
+    }
   }
 
   // 2. Cria o pool de conexões direcionado ao banco do ERP
@@ -722,178 +746,133 @@ export async function initDb() {
     console.warn('Aviso ao verificar coluna cor_barras de Projeto_Pecas:', err.message);
   }
 
-  // 5. Seeds padrão caso o banco esteja vazio
+  // 5. Executa a migração versionada multiempresa (empresas, funcoes, perfis, perfil_funcoes, auditoria, FKs compostas e índices)
+  const migrationInfo = await runMultiTenantMigrations(pool, options);
+  const defaultEmpresaId = migrationInfo.defaultEmpresaId || 1;
 
-  // Seed default Parametro_Financeiro and configuracoes_financeiras
-  const existingParam = await db.get('SELECT * FROM Parametro_Financeiro WHERE id = 1');
-  if (!existingParam) {
-    await db.run(`INSERT INTO Parametro_Financeiro (id, nome, situacao) VALUES (1, 'Padrão Fábrica', 'Ativado')`);
-    await db.run(`
-      INSERT INTO configuracoes_financeiras (id, parametro_id, perc_imposto, perc_comissao, perc_custo_financeiro, perc_markup_lucro, perc_margem_minima, metodo_calculo)
-      VALUES (1, 1, 6.00, 5.00, 4.00, 20.00, 10.00, 'divisor')
-    `);
-  }
+  // 6. Seeds padrão para a empresa inicial caso o banco esteja vazio
+  await seedCompanyDefaults(db, defaultEmpresaId);
 
-  // Seed default admin user
+  // Seed default admin user para a empresa inicial se não existir
   const adminEmail = 'admin@erp.com';
   const existingAdmin = await db.get('SELECT * FROM usuarios WHERE email = ?', [adminEmail]);
   if (!existingAdmin) {
     const hashedPassword = await bcrypt.hash('admin123', 10);
+    const adminPerfil = await db.get(
+      `SELECT id FROM perfis WHERE empresa_id = ? AND nome = 'Administrador' LIMIT 1`,
+      [defaultEmpresaId]
+    );
     await db.run(
-      'INSERT INTO usuarios (nome, email, senha, role) VALUES (?, ?, ?, ?)',
-      ['Administrador', adminEmail, hashedPassword, 'admin']
+      'INSERT INTO usuarios (empresa_id, perfil_id, nome, email, senha, role, ativo) VALUES (?, ?, ?, ?, ?, ?, 1)',
+      [defaultEmpresaId, adminPerfil ? adminPerfil.id : null, 'Administrador', adminEmail, hashedPassword, 'admin']
     );
     console.log('Seeded default admin user: admin@erp.com / admin123');
   }
 
-  // Seed default clients if empty
-  const clientsCount = await db.get('SELECT COUNT(*) as count FROM clientes');
-  if (clientsCount && (clientsCount.count === 0 || clientsCount.count === '0')) {
-    await db.run('INSERT INTO clientes (nome, documento, email, telefone, status) VALUES (?, ?, ?, ?, ?)', [
-      'Tech Solutions Ltda',
-      '12.345.678/0001-99',
-      'contato@techsolutions.com',
-      '(11) 98888-7777',
-      'Ativo'
-    ]);
-    await db.run('INSERT INTO clientes (nome, documento, email, telefone, status) VALUES (?, ?, ?, ?, ?)', [
-      'Indústrias Metalúrgicas Alfa',
-      '98.765.432/0001-88',
-      'financeiro@indalfa.com',
-      '(19) 3456-7890',
-      'Ativo'
-    ]);
-    await db.run('INSERT INTO clientes (nome, documento, email, telefone, status) VALUES (?, ?, ?, ?, ?)', [
-      'Comércio Varejista Beta',
-      '45.678.901/0001-22',
-      'contato@lojasbeta.com.br',
-      '(21) 2233-4455',
-      'Inativo'
-    ]);
-    console.log('Seeded initial mock clients');
-  }
+  return db;
+}
 
-  // Seed default contracts if empty
-  const contractsCount = await db.get('SELECT COUNT(*) as count FROM contratos');
-  if (contractsCount && (contractsCount.count === 0 || contractsCount.count === '0')) {
-    const client1 = await db.get('SELECT id FROM clientes WHERE nome = ?', ['Tech Solutions Ltda']);
-    const client2 = await db.get('SELECT id FROM clientes WHERE nome = ?', ['Indústrias Metalúrgicas Alfa']);
+/**
+ * Inicializa cadastros básicos obrigatórios para uma empresa (perfis, parâmetro financeiro, serviços, FAB.*, formas de pagamento e parâmetros institucionais).
+ */
+export async function seedCompanyDefaults(db, empresaId, companyInfo = {}) {
+  await ensureCompanyProfilesAndPermissions(db.pool, empresaId);
 
-    if (client1) {
-      await db.run('INSERT INTO contratos (cliente_id, numero, valor, data_inicio, data_fim, status) VALUES (?, ?, ?, ?, ?, ?)', [
-        client1.id,
-        'CTR-2026-0001',
-        15000.00,
-        '2026-01-01',
-        '2026-12-31',
-        'Ativo'
-      ]);
-    }
-    if (client2) {
-      await db.run('INSERT INTO contratos (cliente_id, numero, valor, data_inicio, data_fim, status) VALUES (?, ?, ?, ?, ?, ?)', [
-        client2.id,
-        'CTR-2026-0002',
-        42500.00,
-        '2026-02-15',
-        '2027-02-14',
-        'Ativo'
-      ]);
-    }
-    console.log('Seeded initial mock contracts');
-  }
-
-  // Seed default services if empty
-  const servicesCount = await db.get('SELECT COUNT(*) as count FROM servicos');
-  if (servicesCount && (servicesCount.count === 0 || servicesCount.count === '0')) {
-    await db.run('INSERT INTO servicos (nome, unidade, tempo, sequencia) VALUES (?, ?, ?, ?)', ['Separação', 1, 15, 5]);
-    await db.run('INSERT INTO servicos (nome, unidade, tempo, sequencia) VALUES (?, ?, ?, ?)', ['Usinagem', 2, 45, 10]);
-    await db.run('INSERT INTO servicos (nome, unidade, tempo, sequencia) VALUES (?, ?, ?, ?)', ['Fitagem', 3, 10, 20]);
-    await db.run('INSERT INTO servicos (nome, unidade, tempo, sequencia) VALUES (?, ?, ?, ?)', ['Montagem de caixa', 4, 30, 30]);
-    await db.run('INSERT INTO servicos (nome, unidade, tempo, sequencia) VALUES (?, ?, ?, ?)', ['Especial', 6, 60, 40]);
-    console.log('Seeded initial mock services');
-  }
-
-
-
-  // Seed default budgets if empty
-  const budgetsCount = await db.get('SELECT COUNT(*) as count FROM orcamentos');
-  if (budgetsCount && (budgetsCount.count === 0 || budgetsCount.count === '0')) {
-    const client = await db.get('SELECT id FROM clientes ORDER BY id ASC LIMIT 1');
-    if (client) {
-      const year = new Date().getFullYear();
-      await db.run(
-        'INSERT INTO orcamentos (numero, cliente_id, descricao) VALUES (?, ?, ?)',
-        [year * 1000000 + 1, client.id, 'Orçamento de móveis planejados para o escritório corporativo. Inclui mesas, gaveteiros e armários aéreos.']
-      );
-      console.log('Seeded initial mock Budget');
-    }
-  }
-
-  // Seed default projects if empty
-  const projectsCount = await db.get('SELECT COUNT(*) as count FROM projetos');
-  if (projectsCount && (projectsCount.count === 0 || projectsCount.count === '0')) {
-    const budget = await db.get('SELECT numero FROM orcamentos ORDER BY numero ASC LIMIT 1');
-    if (budget) {
-      await db.run(
-        'INSERT INTO projetos (orcamento_numero, nome, descricao) VALUES (?, ?, ?)',
-        [budget.numero, 'Cozinha Planejada Residencial', 'Projeto de armários em MDF Ultra resistente a umidade para a cozinha.']
-      );
-      await db.run(
-        'INSERT INTO projetos (orcamento_numero, nome, descricao) VALUES (?, ?, ?)',
-        [budget.numero, 'Painel de TV Sala de Estar', 'Painel ripado com iluminação LED embutida.']
-      );
-      console.log('Seeded initial mock Projects');
-    }
-  }
-
-  // Seed FAB.MON.CLI in Material if not exists
-  const fabMonCli = await db.get("SELECT MaterialReferencia FROM Material WHERE MaterialReferencia = 'FAB.MON.CLI'");
-  if (!fabMonCli) {
-    await db.run(
-      `INSERT INTO Material (MaterialReferencia, MaterialDescricao, MaterialUnidade, MaterialValorUnitario, GrupoSigla, ProdutoGrupo, MaterialTipo, MaterialTempo)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      ['FAB.MON.CLI', 'Montagem cliente', 'DIA', 0.0, null, 8, 'Serviço', 0]
+  // Parâmetro Financeiro padrão da empresa
+  const existingParam = await db.get(
+    'SELECT * FROM Parametro_Financeiro WHERE empresa_id = ? ORDER BY id ASC LIMIT 1',
+    [empresaId]
+  );
+  if (!existingParam) {
+    const resParam = await db.run(
+      `INSERT INTO Parametro_Financeiro (empresa_id, nome, situacao) VALUES (?, 'Padrão Fábrica', 'Ativado')`,
+      [empresaId]
     );
-    console.log("Migration: Seeded FAB.MON.CLI in Material table.");
+    if (resParam.lastID) {
+      await db.run(
+        `INSERT INTO configuracoes_financeiras (empresa_id, parametro_id, perc_imposto, perc_comissao, perc_custo_financeiro, perc_markup_lucro, perc_margem_minima, metodo_calculo)
+         VALUES (?, ?, 6.00, 5.00, 4.00, 20.00, 10.00, 'divisor')`,
+        [empresaId, resParam.lastID]
+      );
+    }
   }
 
-  // Seed Formas de Pagamento & Condicoes de Pagamento if empty
-  const countFormas = await db.get('SELECT COUNT(*) as cnt FROM formas_pagamento');
-  if (countFormas && (countFormas.cnt === 0 || countFormas.cnt === '0')) {
+  // Serviços padrão da empresa
+  const servicesCount = await db.get('SELECT COUNT(*) as count FROM servicos WHERE empresa_id = ?', [empresaId]);
+  if (servicesCount && Number(servicesCount.count) === 0) {
+    const defaultServices = [
+      ['Separação', 1, 15, 5],
+      ['Usinagem', 2, 45, 10],
+      ['Fitagem', 3, 10, 20],
+      ['Montagem de caixa', 4, 30, 30],
+      ['Especial', 6, 60, 40]
+    ];
+    for (const [nome, unidade, tempo, sequencia] of defaultServices) {
+      await db.run(
+        'INSERT INTO servicos (empresa_id, nome, unidade, tempo, sequencia) VALUES (?, ?, ?, ?, ?)',
+        [empresaId, nome, unidade, tempo, sequencia]
+      );
+    }
+  }
+
+  // Itens de fabricação padrão no catálogo Material da empresa
+  const defaultFabMaterials = [
+    ['FAB.USI.CHP', 'Usinagem de chapas', 'CHP', 0.0, 'FAB', 8, 'Serviço', 10],
+    ['FAB.FIT.PCA', 'Fitagem', 'M', 0.0, 'FAB', 8, 'Serviço', 1],
+    ['FAB.MON.CXA', 'Montagem caixa', 'UND', 0.0, 'FAB', 8, 'Serviço', 15],
+    ['FAB.ESP.PCA', 'Item especial', 'UND', 0.0, 'FAB', 8, 'Serviço', 30],
+    ['FAB.EMB.UND', 'Embalagem', 'UND', 0.0, 'FAB', 8, 'Serviço', 5],
+    ['FAB.MON.CLI', 'Montagem cliente', 'DIA', 0.0, 'FAB', 8, 'Serviço', 0]
+  ];
+  for (const [ref, desc, un, vlr, sigla, grupo, tipo, tempo] of defaultFabMaterials) {
+    const exists = await db.get(
+      'SELECT MaterialReferencia FROM Material WHERE empresa_id = ? AND MaterialReferencia = ?',
+      [empresaId, ref]
+    );
+    if (!exists) {
+      await db.run(
+        `INSERT INTO Material (empresa_id, MaterialReferencia, MaterialDescricao, MaterialUnidade, MaterialValorUnitario, GrupoSigla, ProdutoGrupo, MaterialTipo, MaterialTempo)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [empresaId, ref, desc, un, vlr, sigla, grupo, tipo, tempo]
+      );
+    }
+  }
+
+  // Formas e condições de pagamento padrão da empresa
+  const countFormas = await db.get('SELECT COUNT(*) as cnt FROM formas_pagamento WHERE empresa_id = ?', [empresaId]);
+  if (countFormas && Number(countFormas.cnt) === 0) {
     const resForma = await db.run(
-      `INSERT INTO formas_pagamento (nome, descricao, valor_minimo, valor_maximo, ativo, ordem)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      ['Orçamento até 10 mil', 'Condições para orçamentos de até R$ 10.000,00', 0, 10000, 'Sim', 1]
+      `INSERT INTO formas_pagamento (empresa_id, nome, descricao, valor_minimo, valor_maximo, ativo, ordem)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [empresaId, 'Orçamento até 10 mil', 'Condições para orçamentos de até R$ 10.000,00', 0, 10000, 'Sim', 1]
     );
     const formaId = resForma.lastID;
-
     if (formaId) {
       await db.run(
-        `INSERT INTO condicoes_pagamento (forma_pagamento_id, perc_entrada, num_parcelas, perc_desconto, meio_pagamento, descricao, ordem)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [formaId, 100, 0, 10, '', 'À vista - 10% desc', 1]
+        `INSERT INTO condicoes_pagamento (empresa_id, forma_pagamento_id, perc_entrada, num_parcelas, perc_desconto, meio_pagamento, descricao, ordem)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [empresaId, formaId, 100, 0, 10, '', 'À vista - 10% desc', 1]
       );
       await db.run(
-        `INSERT INTO condicoes_pagamento (forma_pagamento_id, perc_entrada, num_parcelas, perc_desconto, meio_pagamento, descricao, ordem)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [formaId, 50, 1, 5, '', 'Entrada 50% + saldo entrega', 2]
+        `INSERT INTO condicoes_pagamento (empresa_id, forma_pagamento_id, perc_entrada, num_parcelas, perc_desconto, meio_pagamento, descricao, ordem)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [empresaId, formaId, 50, 1, 5, '', 'Entrada 50% + saldo entrega', 2]
       );
       await db.run(
-        `INSERT INTO condicoes_pagamento (forma_pagamento_id, perc_entrada, num_parcelas, perc_desconto, meio_pagamento, descricao, ordem)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [formaId, 40, 3, 0, 'C.Crédito', 'Entrada 40% + 3x C.Crédito', 3]
+        `INSERT INTO condicoes_pagamento (empresa_id, forma_pagamento_id, perc_entrada, num_parcelas, perc_desconto, meio_pagamento, descricao, ordem)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [empresaId, formaId, 40, 3, 0, 'C.Crédito', 'Entrada 40% + 3x C.Crédito', 3]
       );
-      console.log('Database seed: Formas de Pagamento e Condições criadas com sucesso.');
     }
   }
 
-  // Seed ParametrosEmpresa if empty
-  const paramsCount = await db.get('SELECT COUNT(*) as count FROM parametros_empresa');
-  if (paramsCount && (paramsCount.count === 0 || paramsCount.count === '0')) {
+  // Parâmetros institucionais da empresa
+  const paramsCount = await db.get('SELECT COUNT(*) as count FROM parametros_empresa WHERE empresa_id = ?', [empresaId]);
+  if (paramsCount && Number(paramsCount.count) === 0) {
     const seedParams = [
-      { chave: 'RAZAO_SOC', tipo: 1, conteudo: 'EZATTUS PLANEJADOS LTDA', descricao: 'Razão social oficial da empresa' },
-      { chave: 'NOME_FANT', tipo: 1, conteudo: 'EZATTUS PLANEJADOS', descricao: 'Nome fantasia da marca' },
-      { chave: 'CNPJ', tipo: 1, conteudo: '12.345.678/0001-90', descricao: 'CNPJ da matriz' },
+      { chave: 'RAZAO_SOC', tipo: 1, conteudo: companyInfo.razao_social || 'EZATTUS PLANEJADOS LTDA', descricao: 'Razão social oficial da empresa' },
+      { chave: 'NOME_FANT', tipo: 1, conteudo: companyInfo.nome_fantasia || 'EZATTUS PLANEJADOS', descricao: 'Nome fantasia da marca' },
+      { chave: 'CNPJ', tipo: 1, conteudo: companyInfo.cnpj || '12.345.678/0001-90', descricao: 'CNPJ da matriz' },
       { chave: 'VAL_HORA', tipo: 2, conteudo: '85.00', descricao: 'Valor da hora técnica padrão (R$)' },
       { chave: 'DT_FUNDAC', tipo: 3, conteudo: '2015-06-10', descricao: 'Data de fundação da empresa' },
       { chave: 'DESC_MAX', tipo: 4, conteudo: '15.00', descricao: 'Percentual de desconto máximo para vendedores (%)' },
@@ -905,12 +884,9 @@ export async function initDb() {
 
     for (const p of seedParams) {
       await db.run(
-        'INSERT INTO parametros_empresa (chave, tipo, conteudo, descricao) VALUES (?, ?, ?, ?)',
-        [p.chave, p.tipo, p.conteudo, p.descricao]
+        'INSERT INTO parametros_empresa (empresa_id, chave, tipo, conteudo, descricao) VALUES (?, ?, ?, ?, ?)',
+        [empresaId, p.chave, p.tipo, p.conteudo, p.descricao]
       );
     }
-    console.log('Database seed: Parâmetros da Empresa inseridos com sucesso.');
   }
-
-  return db;
 }

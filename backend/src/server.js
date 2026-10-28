@@ -19,7 +19,17 @@ import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import { initDb } from './db.js';
+import { initDb, seedCompanyDefaults } from './db.js';
+import {
+  requestIdMiddleware,
+  createAuthMiddleware,
+  requirePermission,
+  requireCompanyAdmin,
+  logAuditoria,
+  TenantRepository,
+  sanitizeSafeFilename,
+  resolveSafeUploadPath
+} from './tenantContext.js';
 import { createRequire } from 'module';
 import { PNG } from 'pngjs';
 import crypto from 'crypto';
@@ -52,7 +62,7 @@ async function getPdfJs() {
 
 const app = express();
 const PORT = process.env.PORT || 3001;
-const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_jwt_token_key_12345';
+export const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_jwt_token_key_12345';
 
 // Base directory for uploads (supports custom UPLOADS_PATH env var to store files outside app/git directory)
 const rawUploadsDir = process.env.UPLOADS_PATH || './uploads';
@@ -71,52 +81,93 @@ try {
   console.warn('Aviso ao criar diretórios de upload:', mkdirErr.message);
 }
 
-// Helper to safely resolve physical path of uploaded files
+// Helper to safely resolve physical path of uploaded files (protegido contra Path Traversal)
 export function getUploadPhysicalPath(relPath) {
-  if (!relPath) return '';
-  if (path.isAbsolute(relPath)) return relPath;
-  const clean = relPath.replace(/^[\\\/]*uploads[\\\/]*/i, '');
-  return path.join(uploadsBaseDir, clean);
+  const resolved = resolveSafeUploadPath(uploadsBaseDir, relPath);
+  return resolved ? resolved.fullPath : '';
 }
 
-// Middlewares
-app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-app.use('/uploads', express.static(uploadsBaseDir));
+export function getCompanyUploadDir(empresaId, category = 'geral') {
+  const empId = Number(empresaId);
+  if (!Number.isInteger(empId) || empId <= 0) {
+    throw new Error('empresa_id inválido para armazenamento de arquivo.');
+  }
+  const safeCategory = String(category || 'geral').replace(/[^a-z0-9_-]/gi, '');
+  const fullDir = path.join(uploadsBaseDir, `empresa_${empId}`, safeCategory);
+  if (!fs.existsSync(fullDir)) {
+    fs.mkdirSync(fullDir, { recursive: true });
+  }
+  return {
+    fullDir,
+    relPrefix: `uploads/empresa_${empId}/${safeCategory}`
+  };
+}
 
-// Setup multer upload folder locally
+// Middlewares básicos
+app.use(requestIdMiddleware);
+app.use(cors());
+app.use(express.json({ limit: '15mb' }));
+app.use(express.urlencoded({ extended: true, limit: '15mb' }));
+
+// Setup multer upload folder organizado por empresa
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, uploadDir);
+    try {
+      const empId = req.auth?.empresaId;
+      if (!empId) return cb(new Error('Contexto de empresa obrigatório para upload.'));
+      const { fullDir, relPrefix } = getCompanyUploadDir(empId, 'produtos');
+      file._relPrefix = relPrefix;
+      cb(null, fullDir);
+    } catch (err) {
+      cb(err);
+    }
   },
   filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
-    cb(null, uniqueSuffix + path.extname(file.originalname));
+    const safeName = sanitizeSafeFilename(file.originalname, 'prod');
+    file.tenantRelPath = `${file._relPrefix || `uploads/empresa_${req.auth?.empresaId}/produtos`}/${safeName}`;
+    cb(null, safeName);
   }
 });
 const upload = multer({ storage });
 
-// Setup multer upload folder for layout files
+// Setup multer upload folder for layout files (organizado por empresa)
 const layoutsStorage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, layoutsUploadDir);
+    try {
+      const empId = req.auth?.empresaId;
+      if (!empId) return cb(new Error('Contexto de empresa obrigatório para upload de layout.'));
+      const { fullDir, relPrefix } = getCompanyUploadDir(empId, 'layouts');
+      file._relPrefix = relPrefix;
+      cb(null, fullDir);
+    } catch (err) {
+      cb(err);
+    }
   },
   filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
-    cb(null, uniqueSuffix + path.extname(file.originalname));
+    const safeName = sanitizeSafeFilename(file.originalname, 'layout');
+    file.tenantRelPath = `${file._relPrefix || `uploads/empresa_${req.auth?.empresaId}/layouts`}/${safeName}`;
+    cb(null, safeName);
   }
 });
 const uploadLayouts = multer({ storage: layoutsStorage });
 
-// Setup multer upload folder for project attachment files
+// Setup multer upload folder for project attachment files (organizado por empresa)
 const anexosStorage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, anexosUploadDir);
+    try {
+      const empId = req.auth?.empresaId;
+      if (!empId) return cb(new Error('Contexto de empresa obrigatório para upload de anexo.'));
+      const { fullDir, relPrefix } = getCompanyUploadDir(empId, 'anexos');
+      file._relPrefix = relPrefix;
+      cb(null, fullDir);
+    } catch (err) {
+      cb(err);
+    }
   },
   filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
-    cb(null, uniqueSuffix + path.extname(file.originalname));
+    const safeName = sanitizeSafeFilename(file.originalname, 'anexo');
+    file.tenantRelPath = `${file._relPrefix || `uploads/empresa_${req.auth?.empresaId}/anexos`}/${safeName}`;
+    cb(null, safeName);
   }
 });
 const uploadAnexos = multer({ storage: anexosStorage });
@@ -126,7 +177,7 @@ let db = null;
 let dbInitError = null;
 let dbInitPromise = null;
 
-async function ensureDbInitialized() {
+export async function ensureDbInitialized() {
   if (db) return db;
   if (dbInitPromise) return dbInitPromise;
 
@@ -158,7 +209,7 @@ async function ensureDbInitialized() {
 }
 
 // Dispara inicialização do banco em background logo ao subir
-ensureDbInitialized();
+const dbReadyPromise = ensureDbInitialized();
 
 // Rota de diagnóstico de saúde do servidor e banco de dados
 app.get('/api/health', async (req, res) => {
@@ -184,8 +235,8 @@ app.get('/api/health', async (req, res) => {
   });
 });
 
-// Middleware para garantir que o banco está conectado antes de processar rotas /api/*
-app.use('/api', async (req, res, next) => {
+// Middleware para garantir que o banco está conectado antes de processar rotas /api/* e /uploads/*
+app.use(['/api', '/uploads'], async (req, res, next) => {
   if (req.path === '/health') return next();
   if (!db) {
     await ensureDbInitialized();
@@ -223,23 +274,189 @@ async function ensureOrcamentosSchema(database) {
   }
 }
 
-// Authentication Middleware
-const authenticateToken = (req, res, next) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
+// Middleware central de autenticação e contexto seguro da empresa (req.auth e req.tenantDb)
+const authenticateToken = createAuthMiddleware(() => db, JWT_SECRET);
+const requireAdmin = requireCompanyAdmin(() => db);
 
-  if (!token) {
-    return res.status(401).json({ error: 'Acesso negado. Token não fornecido.' });
+/**
+ * Verifica se um caminho relativo de arquivo em /uploads pertence à empresa informada
+ * (tanto pela pasta física uploads/empresa_<id>/ quanto pelos metadados registrados no banco).
+ */
+async function verifyFileBelongsToCompany(database, empresaId, normalizedRelPath) {
+  const empId = Number(empresaId);
+  if (!Number.isInteger(empId) || empId <= 0 || !normalizedRelPath) return false;
+
+  const cleanNoLeadingSlash = normalizedRelPath.replace(/^\/+/, '');
+  const withLeadingSlash = `/${cleanNoLeadingSlash}`;
+  const fileNameOnly = path.basename(cleanNoLeadingSlash);
+
+  // Se o caminho aponta explicitamente para a pasta de outra empresa (ex: uploads/empresa_2/...), bloqueia imediatamente!
+  const empFolderMatch = cleanNoLeadingSlash.match(/^uploads\/empresa_(\d+)\//i);
+  if (empFolderMatch && Number(empFolderMatch[1]) !== empId) {
+    return false;
   }
 
-  jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) {
-      return res.status(403).json({ error: 'Token inválido ou expirado.' });
+  // Confirma propriedade nos registros de arquivos do banco de dados para a empresa autenticada
+  const anexo = await database.get(
+    `SELECT id FROM projeto_anexos
+     WHERE empresa_id = ? AND (caminho = ? OR caminho = ? OR nome_arquivo = ?)
+     LIMIT 1`,
+    [empId, cleanNoLeadingSlash, withLeadingSlash, fileNameOnly]
+  );
+  if (anexo) return true;
+
+  const arqImp = await database.get(
+    `SELECT id FROM arquivos_importados
+     WHERE empresa_id = ? AND (caminho_arquivo = ? OR caminho_arquivo = ? OR caminho_arquivo LIKE ?)
+     LIMIT 1`,
+    [empId, cleanNoLeadingSlash, withLeadingSlash, `%${fileNameOnly}`]
+  );
+  if (arqImp) return true;
+
+  const matImg = await database.get(
+    `SELECT MaterialReferencia FROM Material
+     WHERE empresa_id = ? AND (MaterialImagem = ? OR MaterialImagem = ? OR MaterialImagem LIKE ?)
+     LIMIT 1`,
+    [empId, cleanNoLeadingSlash, withLeadingSlash, `%${fileNameOnly}`]
+  );
+  if (matImg) return true;
+
+  const paramImg = await database.get(
+    `SELECT id FROM parametros_empresa
+     WHERE empresa_id = ? AND (conteudo = ? OR conteudo = ? OR conteudo LIKE ?)
+     LIMIT 1`,
+    [empId, cleanNoLeadingSlash, withLeadingSlash, `%${fileNameOnly}`]
+  );
+  if (paramImg) return true;
+
+  const projUrl = await database.get(
+    `SELECT id FROM projetos
+     WHERE empresa_id = ? AND (ProjetoURL = ? OR ProjetoURL = ? OR ProjetoURL LIKE ?)
+     LIMIT 1`,
+    [empId, cleanNoLeadingSlash, withLeadingSlash, `%${fileNameOnly}`]
+  );
+  if (projUrl) return true;
+
+  return false;
+}
+
+/**
+ * Entrega autenticada e controlada de arquivos sob /uploads/* (substitui express.static público).
+ * Suporta:
+ * 1) Usuário autenticado da empresa proprietária do arquivo (Bearer token ou ?token=...).
+ * 2) Proposta pública compartilhada (?share_token=...) APENAS para anexos/imagens autorizados daquela proposta.
+ */
+app.get('/uploads/*', async (req, res) => {
+  try {
+    // Validação estrita contra Path Traversal na URL bruta antes mesmo da normalização do Express
+    const rawUrlPath = decodeURIComponent((req.originalUrl || req.url || '').split('?')[0]);
+    if (rawUrlPath.includes('..') || rawUrlPath.includes('\\') || rawUrlPath.includes('\0')) {
+      return res.status(400).json({ error: 'Caminho de arquivo inválido.' });
     }
-    req.user = user;
-    next();
-  });
-};
+
+    const safeResolved = resolveSafeUploadPath(uploadsBaseDir, rawUrlPath);
+    if (!safeResolved) {
+      return res.status(400).json({ error: 'Caminho de arquivo inválido.' });
+    }
+
+    // Caso 1: Acesso via token de proposta pública (?share_token=...)
+    const shareToken = req.query?.share_token ? String(req.query.share_token).trim() : null;
+    if (shareToken && !req.headers['authorization'] && !req.query?.token) {
+      const share = await db.get(
+        `SELECT pc.*, e.ativo AS empresa_ativo, e.status AS empresa_status
+         FROM proposta_compartilhamentos pc
+         INNER JOIN empresas e ON e.id = pc.empresa_id
+         WHERE pc.token = ?
+         LIMIT 1`,
+        [shareToken]
+      );
+      if (!share || Number(share.empresa_ativo) !== 1 || share.status === 'revogado') {
+        return res.status(404).json({ error: 'Arquivo não encontrado.' });
+      }
+      if (share.expira_em && new Date(share.expira_em) < new Date()) {
+        return res.status(404).json({ error: 'Arquivo não encontrado.' });
+      }
+
+      const empId = Number(share.empresa_id);
+      const orcNum = share.orcamento_numero;
+      const cleanRel = safeResolved.normalizedRelPath;
+      const withSlash = `/${cleanRel}`;
+      const fileNameOnly = path.basename(cleanRel);
+
+      // Bloqueia pastas de outras empresas
+      const empFolderMatch = cleanRel.match(/^uploads\/empresa_(\d+)\//i);
+      if (empFolderMatch && Number(empFolderMatch[1]) !== empId) {
+        return res.status(404).json({ error: 'Arquivo não encontrado.' });
+      }
+
+      // Verifica se o arquivo é um anexo autorizado na proposta pública (exibir_na_proposta = 'Sim'), imagem de material do orçamento ou parâmetro da empresa
+      const allowedAnexo = await db.get(
+        `SELECT pa.id
+         FROM projeto_anexos pa
+         INNER JOIN projetos p ON p.empresa_id = pa.empresa_id AND p.id = pa.projeto_id
+         WHERE pa.empresa_id = ? AND p.orcamento_numero = ?
+           AND LOWER(COALESCE(pa.exibir_na_proposta, 'sim')) = 'sim'
+           AND (pa.caminho = ? OR pa.caminho = ? OR pa.nome_arquivo = ?)
+         LIMIT 1`,
+        [empId, orcNum, cleanRel, withSlash, fileNameOnly]
+      );
+
+      const allowedParam = !allowedAnexo && await db.get(
+        `SELECT id FROM parametros_empresa
+         WHERE empresa_id = ? AND chave IN ('EMP_LOGO', 'EMP_ASS')
+           AND (conteudo = ? OR conteudo = ? OR conteudo LIKE ?)
+         LIMIT 1`,
+        [empId, cleanRel, withSlash, `%${fileNameOnly}`]
+      );
+
+      const allowedMat = !allowedAnexo && !allowedParam && await db.get(
+        `SELECT m.MaterialReferencia
+         FROM Material m
+         INNER JOIN ProjetoItem pi ON pi.empresa_id = m.empresa_id AND pi.MaterialReferencia = m.MaterialReferencia
+         INNER JOIN projetos p ON p.empresa_id = pi.empresa_id AND p.id = pi.ProjetoID
+         WHERE m.empresa_id = ? AND p.orcamento_numero = ?
+           AND (m.MaterialImagem = ? OR m.MaterialImagem = ? OR m.MaterialImagem LIKE ?)
+         LIMIT 1`,
+        [empId, orcNum, cleanRel, withSlash, `%${fileNameOnly}`]
+      );
+
+      if (!allowedAnexo && !allowedParam && !allowedMat) {
+        await logAuditoria(db, req, {
+          empresaId: empId,
+          acao: 'DOWNLOAD_PUBLICO_NAO_AUTORIZADO',
+          recurso: 'UPLOADS',
+          recursoId: cleanRel
+        });
+        return res.status(404).json({ error: 'Arquivo não encontrado.' });
+      }
+
+      if (!fs.existsSync(safeResolved.fullPath)) {
+        return res.status(404).json({ error: 'Arquivo não encontrado.' });
+      }
+      return res.sendFile(safeResolved.fullPath);
+    }
+
+    // Caso 2: Acesso autenticado (valida JWT, usuário ativo, empresa ativa e vínculo)
+    return authenticateToken(req, res, async () => {
+      const empId = req.auth.empresaId;
+      const belongs = await verifyFileBelongsToCompany(db, empId, safeResolved.normalizedRelPath);
+      if (!belongs || !fs.existsSync(safeResolved.fullPath)) {
+        await logAuditoria(db, req, {
+          empresaId: empId,
+          usuarioId: req.auth.userId,
+          acao: 'ACESSO_ARQUIVO_NEGADO_OU_INEXISTENTE',
+          recurso: 'UPLOADS',
+          recursoId: safeResolved.normalizedRelPath
+        });
+        return res.status(404).json({ error: 'Arquivo não encontrado.' });
+      }
+      return res.sendFile(safeResolved.fullPath);
+    });
+  } catch (err) {
+    console.error('[Uploads] Erro ao servir arquivo protegido:', err);
+    return res.status(500).json({ error: 'Erro interno ao processar arquivo.' });
+  }
+});
 
 function formatDateTimeForMySQL(date) {
   if (!date) return null;
@@ -250,32 +467,113 @@ function formatDateTimeForMySQL(date) {
 
 // ---------------- API Routes ----------------
 
-// 1. Authentication Routes
+// 1. Authentication, RBAC & User Management Routes
 app.post('/api/auth/login', async (req, res) => {
-  const { email, senha } = req.body;
+  const email = req.body?.email;
+  const senha = req.body?.senha || req.body?.password;
   if (!email || !senha) {
     return res.status(400).json({ error: 'Email e senha são obrigatórios.' });
   }
 
   try {
-    const user = await db.get('SELECT * FROM usuarios WHERE email = ?', [email]);
+    const user = await db.get(
+      `SELECT u.*, e.razao_social AS empresa_razao_social, e.nome_fantasia AS empresa_nome_fantasia,
+              e.status AS empresa_status, e.ativo AS empresa_ativo,
+              p.nome AS perfil_nome, p.ativo AS perfil_ativo
+       FROM usuarios u
+       INNER JOIN empresas e ON e.id = u.empresa_id
+       LEFT JOIN perfis p ON p.empresa_id = u.empresa_id AND p.id = u.perfil_id
+       WHERE u.email = ?
+       LIMIT 1`,
+      [String(email).trim()]
+    );
     if (!user) {
+      await logAuditoria(db, req, { acao: 'LOGIN_FALHA', recurso: 'AUTH', detalhes: { email } });
       return res.status(401).json({ error: 'Email ou senha incorretos.' });
     }
 
     const validPassword = await bcrypt.compare(senha, user.senha);
     if (!validPassword) {
+      await logAuditoria(db, req, {
+        empresaId: user.empresa_id,
+        usuarioId: user.id,
+        acao: 'LOGIN_FALHA_SENHA',
+        recurso: 'AUTH',
+        recursoId: user.id
+      });
       return res.status(401).json({ error: 'Email ou senha incorretos.' });
     }
 
-    const token = jwt.sign({ id: user.id, nome: user.nome, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
+    if (Number(user.ativo) !== 1) {
+      await logAuditoria(db, req, {
+        empresaId: user.empresa_id,
+        usuarioId: user.id,
+        acao: 'LOGIN_BLOQUEADO_USUARIO_INATIVO',
+        recurso: 'AUTH',
+        recursoId: user.id
+      });
+      return res.status(403).json({ error: 'Usuário inativo. Contate o administrador da sua empresa.' });
+    }
+
+    const empStatusOk = String(user.empresa_status || 'Ativo').trim().toLowerCase() === 'ativo';
+    if (Number(user.empresa_ativo) !== 1 || !empStatusOk) {
+      await logAuditoria(db, req, {
+        empresaId: user.empresa_id,
+        usuarioId: user.id,
+        acao: 'LOGIN_BLOQUEADO_EMPRESA_INATIVA',
+        recurso: 'AUTH',
+        recursoId: user.empresa_id
+      });
+      return res.status(403).json({ error: 'Empresa inativa ou suspensa.' });
+    }
+
+    const isAdmin = String(user.role || '').toLowerCase() === 'admin' || String(user.perfil_nome || '').toLowerCase() === 'administrador';
+    let permissoes = [];
+    if (isAdmin) {
+      const allFuncs = await db.all('SELECT codigo FROM funcoes');
+      permissoes = allFuncs.map(f => f.codigo);
+    } else if (user.perfil_id && Number(user.perfil_ativo) === 1) {
+      const pfRows = await db.all(
+        `SELECT f.codigo
+         FROM perfil_funcoes pf
+         INNER JOIN funcoes f ON f.id = pf.funcao_id
+         WHERE pf.empresa_id = ? AND pf.perfil_id = ?`,
+        [user.empresa_id, user.perfil_id]
+      );
+      permissoes = pfRows.map(r => r.codigo);
+    }
+
+    const tokenPayload = {
+      id: Number(user.id),
+      empresa_id: Number(user.empresa_id),
+      nome: user.nome,
+      email: user.email,
+      role: isAdmin ? 'admin' : user.role,
+      perfil_id: user.perfil_id ? Number(user.perfil_id) : null
+    };
+
+    const token = jwt.sign(tokenPayload, JWT_SECRET, { expiresIn: '7d' });
+
+    await logAuditoria(db, req, {
+      empresaId: user.empresa_id,
+      usuarioId: user.id,
+      acao: 'LOGIN_SUCESSO',
+      recurso: 'AUTH',
+      recursoId: user.id
+    });
+
     res.json({
       token,
       user: {
-        id: user.id,
+        id: Number(user.id),
+        empresa_id: Number(user.empresa_id),
+        empresa_nome: user.empresa_nome_fantasia || user.empresa_razao_social,
         nome: user.nome,
         email: user.email,
-        role: user.role
+        role: isAdmin ? 'admin' : user.role,
+        perfil_id: user.perfil_id ? Number(user.perfil_id) : null,
+        perfil_nome: user.perfil_nome || null,
+        permissoes
       }
     });
   } catch (error) {
@@ -286,39 +584,464 @@ app.post('/api/auth/login', async (req, res) => {
 
 app.get('/api/auth/me', authenticateToken, async (req, res) => {
   try {
-    const user = await db.get('SELECT id, nome, email, role, assinatura, created_at FROM usuarios WHERE id = ?', [req.user.id]);
+    const user = await req.tenantDb.get(
+      `SELECT u.id, u.empresa_id, u.perfil_id, u.nome, u.email, u.role, u.ativo, u.assinatura, u.created_at,
+              e.razao_social AS empresa_razao_social, e.nome_fantasia AS empresa_nome_fantasia,
+              p.nome AS perfil_nome
+       FROM usuarios u
+       INNER JOIN empresas e ON e.id = u.empresa_id
+       LEFT JOIN perfis p ON p.empresa_id = u.empresa_id AND p.id = u.perfil_id
+       WHERE u.empresa_id = ? AND u.id = ?`,
+      [req.auth.empresaId, req.auth.userId]
+    );
     if (!user) {
       return res.status(404).json({ error: 'Usuário não encontrado.' });
     }
-    res.json(user);
+    res.json({
+      ...user,
+      permissoes: req.auth.permissoes
+    });
   } catch (error) {
     res.status(500).json({ error: 'Erro no servidor.' });
   }
 });
 
-// 2. Dashboard Stats Route
+// Catálogo global de funções do sistema (somente leitura para todas as empresas; protegido contra mutação)
+app.get('/api/funcoes', authenticateToken, async (req, res) => {
+  try {
+    const funcoes = await db.all('SELECT id, codigo, nome, modulo, descricao FROM funcoes ORDER BY modulo ASC, id ASC');
+    res.json(funcoes);
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao listar catálogo de funções.' });
+  }
+});
+
+app.all('/api/funcoes*', authenticateToken, async (req, res, next) => {
+  if (req.method === 'GET' && req.path === '/api/funcoes') return next();
+  await logAuditoria(db, req, {
+    acao: 'TENTATIVA_MUTACAO_CATALOGO_GLOBAL_FUNCOES',
+    recurso: 'funcoes',
+    detalhes: { method: req.method, path: req.path }
+  });
+  return res.status(403).json({
+    error: 'O catálogo global de funções do sistema é protegido contra alterações por administradores de empresas.'
+  });
+});
+
+// Perfis de acesso (isolados por empresa_id)
+app.get('/api/perfis', authenticateToken, async (req, res) => {
+  try {
+    const perfis = await req.tenantDb.all(
+      'SELECT id, empresa_id, nome, descricao, ativo, sistema, created_at FROM perfis WHERE empresa_id = ? ORDER BY id ASC',
+      [req.auth.empresaId]
+    );
+    const vinculos = await req.tenantDb.all(
+      `SELECT pf.perfil_id, pf.funcao_id, pf.permissao, f.codigo, f.nome AS funcao_nome, f.modulo
+       FROM perfil_funcoes pf
+       INNER JOIN funcoes f ON f.id = pf.funcao_id
+       WHERE pf.empresa_id = ?`,
+      [req.auth.empresaId]
+    );
+    const result = perfis.map(p => ({
+      ...p,
+      funcoes: vinculos.filter(v => v.perfil_id === p.id)
+    }));
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao listar perfis da empresa.' });
+  }
+});
+
+app.post('/api/perfis', authenticateToken, requirePermission('ADMIN_PERFIS'), async (req, res) => {
+  const { nome, descricao, ativo = 1, funcoes = [] } = req.body;
+  if (!nome || !String(nome).trim()) {
+    return res.status(400).json({ error: 'O nome do perfil é obrigatório.' });
+  }
+
+  try {
+    const created = await req.tenantDb.transaction(async (tx) => {
+      const existing = await tx.get(
+        'SELECT id FROM perfis WHERE empresa_id = ? AND LOWER(nome) = LOWER(?) LIMIT 1',
+        [req.auth.empresaId, String(nome).trim()]
+      );
+      if (existing) {
+        const err = new Error('Já existe um perfil com este nome na sua empresa.');
+        err.status = 400;
+        throw err;
+      }
+
+      const ins = await tx.run(
+        'INSERT INTO perfis (empresa_id, nome, descricao, ativo, sistema) VALUES (?, ?, ?, ?, 0)',
+        [req.auth.empresaId, String(nome).trim(), descricao || null, Number(ativo) ? 1 : 0]
+      );
+      const perfilId = ins.lastID;
+
+      if (Array.isArray(funcoes) && funcoes.length > 0) {
+        for (const item of funcoes) {
+          const codigoOrId = typeof item === 'object' ? (item.codigo || item.funcao_id || item.id) : item;
+          const funcRow = await tx.get(
+            'SELECT id, codigo FROM funcoes WHERE id = ? OR codigo = ? LIMIT 1',
+            [codigoOrId, String(codigoOrId)]
+          );
+          if (!funcRow) {
+            const err = new Error(`Função inválida informada: ${codigoOrId}`);
+            err.status = 400;
+            throw err;
+          }
+          // Impede conceder privilégios superiores aos autorizados ao próprio usuário
+          if (req.auth.role !== 'admin' && !req.auth.permissoes.includes(funcRow.codigo)) {
+            const err = new Error(`Não é permitido conceder a permissão "${funcRow.codigo}" superior às suas próprias permissões.`);
+            err.status = 403;
+            throw err;
+          }
+          await tx.run(
+            'INSERT INTO perfil_funcoes (empresa_id, perfil_id, funcao_id, permissao) VALUES (?, ?, ?, ?)',
+            [req.auth.empresaId, perfilId, funcRow.id, (typeof item === 'object' && item.permissao) ? item.permissao : 'TOTAL']
+          );
+        }
+      }
+
+      return tx.get('SELECT * FROM perfis WHERE empresa_id = ? AND id = ?', [req.auth.empresaId, perfilId]);
+    });
+
+    await logAuditoria(db, req, {
+      acao: 'CRIAR_PERFIL',
+      recurso: 'perfis',
+      recursoId: created.id,
+      detalhes: { nome: created.nome }
+    });
+
+    res.status(201).json(created);
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message || 'Erro ao criar perfil.' });
+  }
+});
+
+app.put('/api/perfis/:id', authenticateToken, requirePermission('ADMIN_PERFIS'), async (req, res) => {
+  const perfilId = Number(req.params.id);
+  const { nome, descricao, ativo, funcoes } = req.body;
+
+  try {
+    const updated = await req.tenantDb.transaction(async (tx) => {
+      const existing = await tx.get(
+        'SELECT * FROM perfis WHERE empresa_id = ? AND id = ? LIMIT 1',
+        [req.auth.empresaId, perfilId]
+      );
+      if (!existing) {
+        const err = new Error('Perfil não encontrado.');
+        err.status = 404;
+        throw err;
+      }
+
+      const novoNome = nome !== undefined ? String(nome).trim() : existing.nome;
+      const novaDesc = descricao !== undefined ? descricao : existing.descricao;
+      const novoAtivo = ativo !== undefined ? (Number(ativo) ? 1 : 0) : existing.ativo;
+
+      await tx.run(
+        'UPDATE perfis SET nome = ?, descricao = ?, ativo = ? WHERE empresa_id = ? AND id = ?',
+        [novoNome, novaDesc, novoAtivo, req.auth.empresaId, perfilId]
+      );
+
+      if (Array.isArray(funcoes)) {
+        await tx.run('DELETE FROM perfil_funcoes WHERE empresa_id = ? AND perfil_id = ?', [req.auth.empresaId, perfilId]);
+        for (const item of funcoes) {
+          const codigoOrId = typeof item === 'object' ? (item.codigo || item.funcao_id || item.id) : item;
+          const funcRow = await tx.get(
+            'SELECT id, codigo FROM funcoes WHERE id = ? OR codigo = ? LIMIT 1',
+            [codigoOrId, String(codigoOrId)]
+          );
+          if (!funcRow) continue;
+          if (req.auth.role !== 'admin' && !req.auth.permissoes.includes(funcRow.codigo)) {
+            const err = new Error(`Não é permitido conceder a permissão "${funcRow.codigo}" superior às suas próprias permissões.`);
+            err.status = 403;
+            throw err;
+          }
+          await tx.run(
+            'INSERT INTO perfil_funcoes (empresa_id, perfil_id, funcao_id, permissao) VALUES (?, ?, ?, ?)',
+            [req.auth.empresaId, perfilId, funcRow.id, (typeof item === 'object' && item.permissao) ? item.permissao : 'TOTAL']
+          );
+        }
+      }
+
+      return tx.get('SELECT * FROM perfis WHERE empresa_id = ? AND id = ?', [req.auth.empresaId, perfilId]);
+    });
+
+    await logAuditoria(db, req, {
+      acao: 'ATUALIZAR_PERFIL',
+      recurso: 'perfis',
+      recursoId: perfilId
+    });
+
+    res.json(updated);
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message || 'Erro ao atualizar perfil.' });
+  }
+});
+
+app.delete('/api/perfis/:id', authenticateToken, requirePermission('ADMIN_PERFIS'), async (req, res) => {
+  const perfilId = Number(req.params.id);
+  try {
+    const existing = await req.tenantDb.get(
+      'SELECT * FROM perfis WHERE empresa_id = ? AND id = ? LIMIT 1',
+      [req.auth.empresaId, perfilId]
+    );
+    if (!existing) {
+      return res.status(404).json({ error: 'Perfil não encontrado.' });
+    }
+    if (Number(existing.sistema) === 1) {
+      return res.status(400).json({ error: 'Perfis padrão do sistema não podem ser excluídos.' });
+    }
+    await req.tenantDb.run('DELETE FROM perfis WHERE empresa_id = ? AND id = ?', [req.auth.empresaId, perfilId]);
+    await logAuditoria(db, req, { acao: 'EXCLUIR_PERFIL', recurso: 'perfis', recursoId: perfilId });
+    res.json({ message: 'Perfil excluído com sucesso.' });
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao excluir perfil.' });
+  }
+});
+
+// Administração de usuários da empresa (restrita à própria empresa)
+app.get('/api/usuarios', authenticateToken, requirePermission('ADMIN_USUARIOS'), async (req, res) => {
+  try {
+    const users = await req.tenantDb.all(
+      `SELECT u.id, u.empresa_id, u.perfil_id, u.nome, u.email, u.role, u.ativo, u.created_at,
+              p.nome AS perfil_nome
+       FROM usuarios u
+       LEFT JOIN perfis p ON p.empresa_id = u.empresa_id AND p.id = u.perfil_id
+       WHERE u.empresa_id = ?
+       ORDER BY u.id ASC`,
+      [req.auth.empresaId]
+    );
+    res.json(users);
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao listar usuários da empresa.' });
+  }
+});
+
+app.get('/api/usuarios/:id', authenticateToken, requirePermission('ADMIN_USUARIOS'), async (req, res, next) => {
+  if (req.params.id === 'assinatura') return next();
+  try {
+    const user = await req.tenantDb.get(
+      `SELECT u.id, u.empresa_id, u.perfil_id, u.nome, u.email, u.role, u.ativo, u.created_at,
+              p.nome AS perfil_nome
+       FROM usuarios u
+       LEFT JOIN perfis p ON p.empresa_id = u.empresa_id AND p.id = u.perfil_id
+       WHERE u.empresa_id = ? AND u.id = ?
+       LIMIT 1`,
+      [req.auth.empresaId, req.params.id]
+    );
+    if (!user) {
+      return res.status(404).json({ error: 'Usuário não encontrado.' });
+    }
+    res.json(user);
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao buscar usuário.' });
+  }
+});
+
+app.post('/api/usuarios', authenticateToken, requirePermission('ADMIN_USUARIOS'), async (req, res) => {
+  const { nome, email, senha, role = 'user', perfil_id = null, ativo = 1 } = req.body;
+  if (!nome || !email || !senha) {
+    return res.status(400).json({ error: 'Nome, e-mail e senha são obrigatórios.' });
+  }
+
+  try {
+    // Impede que não-admin crie um usuário admin
+    const targetRole = String(role || 'user').toLowerCase() === 'admin' ? 'admin' : 'user';
+    if (targetRole === 'admin' && req.auth.role !== 'admin') {
+      return res.status(403).json({ error: 'Apenas administradores podem conceder perfil de administrador.' });
+    }
+
+    // Se perfil_id foi informado, valida que pertence estritamente à mesma empresa autenticada
+    let validPerfilId = null;
+    if (perfil_id !== null && perfil_id !== undefined && perfil_id !== '') {
+      const perfilRow = await req.tenantDb.get(
+        'SELECT id, nome FROM perfis WHERE empresa_id = ? AND id = ? LIMIT 1',
+        [req.auth.empresaId, Number(perfil_id)]
+      );
+      if (!perfilRow) {
+        await logAuditoria(db, req, {
+          acao: 'TENTATIVA_VINCULO_PERFIL_OUTRA_EMPRESA',
+          recurso: 'usuarios',
+          detalhes: { perfil_id }
+        });
+        return res.status(404).json({ error: 'Perfil de acesso não encontrado na empresa.' });
+      }
+      if (String(perfilRow.nome).toLowerCase() === 'administrador' && req.auth.role !== 'admin') {
+        return res.status(403).json({ error: 'Não é permitido atribuir perfil com privilégios superiores aos seus.' });
+      }
+      validPerfilId = perfilRow.id;
+    }
+
+    const emailClean = String(email).trim().toLowerCase();
+    const existingEmail = await db.get('SELECT id FROM usuarios WHERE LOWER(email) = ? LIMIT 1', [emailClean]);
+    if (existingEmail) {
+      return res.status(400).json({ error: 'Este endereço de e-mail já está em uso.' });
+    }
+
+    const hashed = await bcrypt.hash(String(senha), 10);
+    const ins = await req.tenantDb.run(
+      `INSERT INTO usuarios (empresa_id, perfil_id, nome, email, senha, role, ativo)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [req.auth.empresaId, validPerfilId, String(nome).trim(), emailClean, hashed, targetRole, Number(ativo) ? 1 : 0]
+    );
+
+    await logAuditoria(db, req, {
+      acao: 'CRIAR_USUARIO',
+      recurso: 'usuarios',
+      recursoId: ins.lastID,
+      detalhes: { email: emailClean, role: targetRole, perfil_id: validPerfilId }
+    });
+
+    const created = await req.tenantDb.get(
+      'SELECT id, empresa_id, perfil_id, nome, email, role, ativo, created_at FROM usuarios WHERE empresa_id = ? AND id = ?',
+      [req.auth.empresaId, ins.lastID]
+    );
+    res.status(201).json(created);
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'Erro ao criar usuário.' });
+  }
+});
+
+app.put('/api/usuarios/:id', authenticateToken, requirePermission('ADMIN_USUARIOS'), async (req, res, next) => {
+  if (req.params.id === 'assinatura') return next();
+  const targetUserId = Number(req.params.id);
+  const { nome, email, senha, role, perfil_id, ativo } = req.body;
+
+  try {
+    const existing = await req.tenantDb.get(
+      'SELECT * FROM usuarios WHERE empresa_id = ? AND id = ? LIMIT 1',
+      [req.auth.empresaId, targetUserId]
+    );
+    if (!existing) {
+      return res.status(404).json({ error: 'Usuário não encontrado.' });
+    }
+
+    const newRole = role !== undefined ? (String(role).toLowerCase() === 'admin' ? 'admin' : 'user') : existing.role;
+    if (newRole === 'admin' && req.auth.role !== 'admin') {
+      return res.status(403).json({ error: 'Não é permitido conceder privilégio de administrador.' });
+    }
+
+    let validPerfilId = existing.perfil_id;
+    if (perfil_id !== undefined) {
+      if (perfil_id === null || perfil_id === '') {
+        validPerfilId = null;
+      } else {
+        const perfilRow = await req.tenantDb.get(
+          'SELECT id, nome FROM perfis WHERE empresa_id = ? AND id = ? LIMIT 1',
+          [req.auth.empresaId, Number(perfil_id)]
+        );
+        if (!perfilRow) {
+          await logAuditoria(db, req, {
+            acao: 'TENTATIVA_ATRIBUIR_PERFIL_OUTRA_EMPRESA',
+            recurso: 'usuarios',
+            recursoId: targetUserId,
+            detalhes: { perfil_id }
+          });
+          return res.status(404).json({ error: 'Perfil de acesso não encontrado na empresa.' });
+        }
+        if (String(perfilRow.nome).toLowerCase() === 'administrador' && req.auth.role !== 'admin') {
+          return res.status(403).json({ error: 'Não é permitido conceder perfil com privilégios superiores aos seus.' });
+        }
+        validPerfilId = perfilRow.id;
+      }
+    }
+
+    const newEmail = email !== undefined ? String(email).trim().toLowerCase() : existing.email;
+    if (newEmail !== existing.email.toLowerCase()) {
+      const dup = await db.get('SELECT id FROM usuarios WHERE LOWER(email) = ? AND id <> ? LIMIT 1', [newEmail, targetUserId]);
+      if (dup) {
+        return res.status(400).json({ error: 'Este endereço de e-mail já está em uso.' });
+      }
+    }
+
+    const newNome = nome !== undefined ? String(nome).trim() : existing.nome;
+    const newAtivo = ativo !== undefined ? (Number(ativo) ? 1 : 0) : existing.ativo;
+    const newSenha = (senha && String(senha).trim().length > 0)
+      ? await bcrypt.hash(String(senha), 10)
+      : existing.senha;
+
+    await req.tenantDb.run(
+      `UPDATE usuarios
+       SET nome = ?, email = ?, senha = ?, role = ?, perfil_id = ?, ativo = ?
+       WHERE empresa_id = ? AND id = ?`,
+      [newNome, newEmail, newSenha, newRole, validPerfilId, newAtivo, req.auth.empresaId, targetUserId]
+    );
+
+    await logAuditoria(db, req, {
+      acao: 'ATUALIZAR_USUARIO',
+      recurso: 'usuarios',
+      recursoId: targetUserId,
+      detalhes: { role: newRole, perfil_id: validPerfilId, ativo: newAtivo }
+    });
+
+    const updated = await req.tenantDb.get(
+      'SELECT id, empresa_id, perfil_id, nome, email, role, ativo, created_at FROM usuarios WHERE empresa_id = ? AND id = ?',
+      [req.auth.empresaId, targetUserId]
+    );
+    res.json(updated);
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'Erro ao atualizar usuário.' });
+  }
+});
+
+app.delete('/api/usuarios/:id', authenticateToken, requirePermission('ADMIN_USUARIOS'), async (req, res) => {
+  const targetUserId = Number(req.params.id);
+  if (targetUserId === req.auth.userId) {
+    return res.status(400).json({ error: 'Não é permitido excluir o próprio usuário autenticado.' });
+  }
+  try {
+    const result = await req.tenantDb.run(
+      'DELETE FROM usuarios WHERE empresa_id = ? AND id = ?',
+      [req.auth.empresaId, targetUserId]
+    );
+    if (result.changes === 0) {
+      return res.status(404).json({ error: 'Usuário não encontrado.' });
+    }
+    await logAuditoria(db, req, { acao: 'EXCLUIR_USUARIO', recurso: 'usuarios', recursoId: targetUserId });
+    res.json({ message: 'Usuário excluído com sucesso.' });
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao excluir usuário.' });
+  }
+});
+
+// 2. Dashboard Stats Route (isolada por empresa_id)
 app.get('/api/dashboard/stats', authenticateToken, async (req, res) => {
   try {
-    const clientsCount = await db.get('SELECT COUNT(*) as count FROM clientes WHERE status = "Ativo"');
-    const totalRevenue = await db.get('SELECT SUM(valor) as total FROM contratos WHERE status = "Ativo"');
-    const contractsCount = await db.get('SELECT COUNT(*) as count FROM contratos');
-    const inactiveClients = await db.get('SELECT COUNT(*) as count FROM clientes WHERE status = "Inativo"');
+    const empId = req.auth.empresaId;
+    const clientsCount = await req.tenantDb.get('SELECT COUNT(*) as count FROM clientes WHERE empresa_id = ? AND status = "Ativo"', [empId]);
+    const totalRevenue = await req.tenantDb.get('SELECT SUM(valor) as total FROM contratos WHERE empresa_id = ? AND status = "Ativo"', [empId]);
+    const contractsCount = await req.tenantDb.get('SELECT COUNT(*) as count FROM contratos WHERE empresa_id = ?', [empId]);
+    const inactiveClients = await req.tenantDb.get('SELECT COUNT(*) as count FROM clientes WHERE empresa_id = ? AND status = "Inativo"', [empId]);
 
     res.json({
-      clientesAtivos: clientsCount.count || 0,
-      clientesInativos: inactiveClients.count || 0,
-      faturamentoMensal: totalRevenue.total || 0,
-      totalContratos: contractsCount.count || 0
+      clientesAtivos: Number(clientsCount?.count || 0),
+      clientesInativos: Number(inactiveClients?.count || 0),
+      faturamentoMensal: Number(totalRevenue?.total || 0),
+      totalContratos: Number(contractsCount?.count || 0)
     });
   } catch (error) {
     res.status(500).json({ error: 'Erro ao buscar estatísticas do painel.' });
   }
 });
 
-// 3. Clients Routes
+// 3. Clients Routes (isoladas por empresa_id)
 app.get('/api/clientes', authenticateToken, async (req, res) => {
   try {
-    const list = await db.all('SELECT * FROM clientes ORDER BY nome ASC');
+    const empId = req.auth.empresaId;
+    const { busca, status } = req.query;
+    let sql = 'SELECT * FROM clientes WHERE empresa_id = ?';
+    const params = [empId];
+
+    if (status) {
+      sql += ' AND status = ?';
+      params.push(status);
+    }
+    if (busca) {
+      sql += ' AND (nome LIKE ? OR documento LIKE ? OR email LIKE ?)';
+      params.push(`%${busca}%`, `%${busca}%`, `%${busca}%`);
+    }
+    sql += ' ORDER BY nome ASC';
+    const list = await req.tenantDb.all(sql, params);
     res.json(list);
   } catch (error) {
     res.status(500).json({ error: 'Erro ao buscar clientes.' });
@@ -328,7 +1051,7 @@ app.get('/api/clientes', authenticateToken, async (req, res) => {
 app.get('/api/clientes/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
   try {
-    const client = await db.get('SELECT * FROM clientes WHERE id = ?', [id]);
+    const client = await req.tenantDb.get('SELECT * FROM clientes WHERE empresa_id = ? AND id = ?', [req.auth.empresaId, id]);
     if (!client) {
       return res.status(404).json({ error: 'Cliente não encontrado.' });
     }
@@ -346,11 +1069,12 @@ app.post('/api/clientes', authenticateToken, async (req, res) => {
   }
 
   try {
-    const result = await db.run(
-      'INSERT INTO clientes (nome, documento, email, telefone, status, tipo_pessoa, cidade, uf) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      [nome.trim(), documento || null, email || null, telefone || null, status || 'Ativo', tipo_pessoa || 'Física', cidade || null, uf || null]
+    const empId = req.auth.empresaId;
+    const result = await req.tenantDb.run(
+      'INSERT INTO clientes (empresa_id, nome, documento, email, telefone, status, tipo_pessoa, cidade, uf) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [empId, nome.trim(), documento || null, email || null, telefone || null, status || 'Ativo', tipo_pessoa || 'Física', cidade || null, uf || null]
     );
-    const newClient = await db.get('SELECT * FROM clientes WHERE id = ?', [result.lastID]);
+    const newClient = await req.tenantDb.get('SELECT * FROM clientes WHERE empresa_id = ? AND id = ?', [empId, result.lastID]);
     res.status(201).json(newClient);
   } catch (error) {
     if (error.code === 'ER_DUP_ENTRY' || (error.message && (error.message.includes('UNIQUE constraint failed') || error.message.includes('Duplicate entry')))) {
@@ -369,38 +1093,19 @@ app.put('/api/clientes/:id', authenticateToken, async (req, res) => {
   } = req.body;
 
   try {
-    const client = await db.get('SELECT * FROM clientes WHERE id = ?', [id]);
+    const empId = req.auth.empresaId;
+    const client = await req.tenantDb.get('SELECT * FROM clientes WHERE empresa_id = ? AND id = ?', [empId, id]);
     if (!client) {
       return res.status(404).json({ error: 'Cliente não encontrado.' });
     }
 
-    // Ensure columns exist in clientes
-    const cliCols = await db.all("PRAGMA table_info(clientes)");
-    const colNames = cliCols.map(c => c.name);
-    if (!colNames.includes('tipo_pessoa')) await db.exec("ALTER TABLE clientes ADD COLUMN tipo_pessoa VARCHAR(20) DEFAULT 'Física'");
-    if (!colNames.includes('rg')) await db.exec("ALTER TABLE clientes ADD COLUMN rg TEXT");
-    if (!colNames.includes('endereco')) await db.exec("ALTER TABLE clientes ADD COLUMN endereco TEXT");
-    if (!colNames.includes('numero')) await db.exec("ALTER TABLE clientes ADD COLUMN numero TEXT");
-    if (!colNames.includes('complemento')) await db.exec("ALTER TABLE clientes ADD COLUMN complemento TEXT");
-    if (!colNames.includes('bairro')) await db.exec("ALTER TABLE clientes ADD COLUMN bairro TEXT");
-    if (!colNames.includes('cidade')) await db.exec("ALTER TABLE clientes ADD COLUMN cidade TEXT");
-    if (!colNames.includes('uf')) await db.exec("ALTER TABLE clientes ADD COLUMN uf TEXT");
-    if (!colNames.includes('cep')) await db.exec("ALTER TABLE clientes ADD COLUMN cep TEXT");
-    if (!colNames.includes('entrega_endereco')) await db.exec("ALTER TABLE clientes ADD COLUMN entrega_endereco TEXT");
-    if (!colNames.includes('entrega_numero')) await db.exec("ALTER TABLE clientes ADD COLUMN entrega_numero TEXT");
-    if (!colNames.includes('entrega_complemento')) await db.exec("ALTER TABLE clientes ADD COLUMN entrega_complemento TEXT");
-    if (!colNames.includes('entrega_bairro')) await db.exec("ALTER TABLE clientes ADD COLUMN entrega_bairro TEXT");
-    if (!colNames.includes('entrega_cidade')) await db.exec("ALTER TABLE clientes ADD COLUMN entrega_cidade TEXT");
-    if (!colNames.includes('entrega_uf')) await db.exec("ALTER TABLE clientes ADD COLUMN entrega_uf TEXT");
-    if (!colNames.includes('entrega_cep')) await db.exec("ALTER TABLE clientes ADD COLUMN entrega_cep TEXT");
-
-    await db.run(`
+    await req.tenantDb.run(`
       UPDATE clientes 
       SET 
         nome = ?, documento = ?, email = ?, telefone = ?, status = ?, tipo_pessoa = ?,
         rg = ?, endereco = ?, numero = ?, complemento = ?, bairro = ?, cidade = ?, uf = ?, cep = ?,
         entrega_endereco = ?, entrega_numero = ?, entrega_complemento = ?, entrega_bairro = ?, entrega_cidade = ?, entrega_uf = ?, entrega_cep = ?
-      WHERE id = ?
+      WHERE empresa_id = ? AND id = ?
     `, [
       nome !== undefined ? nome : client.nome,
       documento !== undefined ? documento : client.documento,
@@ -423,10 +1128,11 @@ app.put('/api/clientes/:id', authenticateToken, async (req, res) => {
       entrega_cidade !== undefined ? entrega_cidade : client.entrega_cidade,
       entrega_uf !== undefined ? entrega_uf : client.entrega_uf,
       entrega_cep !== undefined ? entrega_cep : client.entrega_cep,
+      empId,
       id
     ]);
 
-    const updatedClient = await db.get('SELECT * FROM clientes WHERE id = ?', [id]);
+    const updatedClient = await req.tenantDb.get('SELECT * FROM clientes WHERE empresa_id = ? AND id = ?', [empId, id]);
     res.json(updatedClient);
   } catch (error) {
     console.error('Error updating client:', error);
@@ -437,26 +1143,31 @@ app.put('/api/clientes/:id', authenticateToken, async (req, res) => {
 app.delete('/api/clientes/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
   try {
-    const client = await db.get('SELECT * FROM clientes WHERE id = ?', [id]);
-    if (!client) {
+    const empId = req.auth.empresaId;
+    const result = await req.tenantDb.run('DELETE FROM clientes WHERE empresa_id = ? AND id = ?', [empId, id]);
+    if (result.changes === 0) {
       return res.status(404).json({ error: 'Cliente não encontrado.' });
     }
-    await db.run('DELETE FROM clientes WHERE id = ?', [id]);
     res.json({ message: 'Cliente removido com sucesso.' });
   } catch (error) {
+    if (error.code === 'ER_ROW_IS_REFERENCED_2' || error.errno === 1451) {
+      return res.status(400).json({ error: 'Não é possível excluir cliente com orçamentos ou contratos vinculados.' });
+    }
     res.status(500).json({ error: 'Erro ao excluir cliente.' });
   }
 });
 
-// 4. Contracts Routes
+// 4. Contracts Routes (isoladas por empresa_id)
 app.get('/api/contratos', authenticateToken, async (req, res) => {
   try {
-    const list = await db.all(`
+    const empId = req.auth.empresaId;
+    const list = await req.tenantDb.all(`
       SELECT contratos.*, clientes.nome as cliente_nome 
       FROM contratos 
-      JOIN clientes ON contratos.cliente_id = clientes.id 
+      INNER JOIN clientes ON contratos.empresa_id = clientes.empresa_id AND contratos.cliente_id = clientes.id 
+      WHERE contratos.empresa_id = ?
       ORDER BY contratos.created_at DESC
-    `);
+    `, [empId]);
     res.json(list);
   } catch (error) {
     res.status(500).json({ error: 'Erro ao buscar contratos.' });
@@ -469,24 +1180,37 @@ app.post('/api/contratos', authenticateToken, upload.single('documento'), async 
     return res.status(400).json({ error: 'Todos os campos obrigatórios devem ser fornecidos.' });
   }
 
-  // Handle uploaded file (Mocking upload or Google Drive linkage)
-  let drive_file_id = null;
-  if (req.file) {
-    drive_file_id = `MOCK_GD_ID_${Date.now()}`;
-    console.log(`Document received: ${req.file.originalname}. Google Drive integration would save this and return id: ${drive_file_id}`);
-  }
-
   try {
-    const result = await db.run(
-      'INSERT INTO contratos (cliente_id, numero, valor, data_inicio, data_fim, status, drive_file_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [cliente_id, numero, parseFloat(valor), data_inicio, data_fim, status || 'Ativo', drive_file_id]
+    const empId = req.auth.empresaId;
+    // Valida que o cliente pertence à mesma empresa autenticada
+    const clientOwned = await req.tenantDb.get(
+      'SELECT id FROM clientes WHERE empresa_id = ? AND id = ? LIMIT 1',
+      [empId, cliente_id]
+    );
+    if (!clientOwned) {
+      await logAuditoria(db, req, {
+        acao: 'TENTATIVA_VINCULO_CLIENTE_OUTRA_EMPRESA',
+        recurso: 'contratos',
+        detalhes: { cliente_id, numero }
+      });
+      return res.status(404).json({ error: 'Cliente informado não encontrado na empresa.' });
+    }
+
+    let drive_file_id = null;
+    if (req.file) {
+      drive_file_id = `GD_EMP${empId}_${Date.now()}`;
+    }
+
+    const result = await req.tenantDb.run(
+      'INSERT INTO contratos (empresa_id, cliente_id, numero, valor, data_inicio, data_fim, status, drive_file_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [empId, cliente_id, numero, parseFloat(valor), data_inicio, data_fim, status || 'Ativo', drive_file_id]
     );
 
-    const newContract = await db.get('SELECT * FROM contratos WHERE id = ?', [result.lastID]);
+    const newContract = await req.tenantDb.get('SELECT * FROM contratos WHERE empresa_id = ? AND id = ?', [empId, result.lastID]);
     res.status(201).json(newContract);
   } catch (error) {
     if (error.code === 'ER_DUP_ENTRY' || (error.message && (error.message.includes('UNIQUE constraint failed') || error.message.includes('Duplicate entry')))) {
-      return res.status(400).json({ error: 'Número de contrato já existente.' });
+      return res.status(400).json({ error: 'Número de contrato já existente nesta empresa.' });
     }
     res.status(500).json({ error: 'Erro ao cadastrar contrato.' });
   }
@@ -497,17 +1221,18 @@ app.put('/api/contratos/:id', authenticateToken, async (req, res) => {
   const { valor, status, data_fim } = req.body;
 
   try {
-    const contract = await db.get('SELECT * FROM contratos WHERE id = ?', [id]);
+    const empId = req.auth.empresaId;
+    const contract = await req.tenantDb.get('SELECT * FROM contratos WHERE empresa_id = ? AND id = ?', [empId, id]);
     if (!contract) {
       return res.status(404).json({ error: 'Contrato não encontrado.' });
     }
 
-    await db.run(
-      'UPDATE contratos SET valor = ?, status = ?, data_fim = ? WHERE id = ?',
-      [valor !== undefined ? parseFloat(valor) : contract.valor, status || contract.status, data_fim || contract.data_fim, id]
+    await req.tenantDb.run(
+      'UPDATE contratos SET valor = ?, status = ?, data_fim = ? WHERE empresa_id = ? AND id = ?',
+      [valor !== undefined ? parseFloat(valor) : contract.valor, status || contract.status, data_fim || contract.data_fim, empId, id]
     );
 
-    const updatedContract = await db.get('SELECT * FROM contratos WHERE id = ?', [id]);
+    const updatedContract = await req.tenantDb.get('SELECT * FROM contratos WHERE empresa_id = ? AND id = ?', [empId, id]);
     res.json(updatedContract);
   } catch (error) {
     res.status(500).json({ error: 'Erro ao atualizar contrato.' });
@@ -517,21 +1242,24 @@ app.put('/api/contratos/:id', authenticateToken, async (req, res) => {
 app.delete('/api/contratos/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
   try {
-    const contract = await db.get('SELECT * FROM contratos WHERE id = ?', [id]);
-    if (!contract) {
+    const empId = req.auth.empresaId;
+    const result = await req.tenantDb.run('DELETE FROM contratos WHERE empresa_id = ? AND id = ?', [empId, id]);
+    if (result.changes === 0) {
       return res.status(404).json({ error: 'Contrato não encontrado.' });
     }
-    await db.run('DELETE FROM contratos WHERE id = ?', [id]);
     res.json({ message: 'Contrato removido com sucesso.' });
   } catch (error) {
     res.status(500).json({ error: 'Erro ao excluir contrato.' });
   }
 });
 
-// 5. Services Routes
+// 5. Services Routes (isoladas por empresa_id)
 app.get('/api/servicos', authenticateToken, async (req, res) => {
   try {
-    const list = await db.all('SELECT * FROM servicos ORDER BY sequencia ASC, nome ASC');
+    const list = await req.tenantDb.all(
+      'SELECT * FROM servicos WHERE empresa_id = ? ORDER BY sequencia ASC, nome ASC',
+      [req.auth.empresaId]
+    );
     res.json(list);
   } catch (error) {
     res.status(500).json({ error: 'Erro ao buscar serviços.' });
@@ -545,11 +1273,12 @@ app.post('/api/servicos', authenticateToken, async (req, res) => {
   }
 
   try {
-    const result = await db.run(
-      'INSERT INTO servicos (nome, unidade, tempo, sequencia) VALUES (?, ?, ?, ?)',
-      [nome, parseInt(unidade), parseInt(tempo), sequencia !== undefined ? parseInt(sequencia) : 0]
+    const empId = req.auth.empresaId;
+    const result = await req.tenantDb.run(
+      'INSERT INTO servicos (empresa_id, nome, unidade, tempo, sequencia) VALUES (?, ?, ?, ?, ?)',
+      [empId, nome, parseInt(unidade), parseInt(tempo), sequencia !== undefined ? parseInt(sequencia) : 0]
     );
-    const newService = await db.get('SELECT * FROM servicos WHERE id = ?', [result.lastID]);
+    const newService = await req.tenantDb.get('SELECT * FROM servicos WHERE empresa_id = ? AND id = ?', [empId, result.lastID]);
     res.status(201).json(newService);
   } catch (error) {
     res.status(500).json({ error: 'Erro ao cadastrar serviço.' });
@@ -561,23 +1290,25 @@ app.put('/api/servicos/:id', authenticateToken, async (req, res) => {
   const { nome, unidade, tempo, sequencia } = req.body;
 
   try {
-    const service = await db.get('SELECT * FROM servicos WHERE id = ?', [id]);
+    const empId = req.auth.empresaId;
+    const service = await req.tenantDb.get('SELECT * FROM servicos WHERE empresa_id = ? AND id = ?', [empId, id]);
     if (!service) {
       return res.status(404).json({ error: 'Serviço não encontrado.' });
     }
 
-    await db.run(
-      'UPDATE servicos SET nome = ?, unidade = ?, tempo = ?, sequencia = ? WHERE id = ?',
+    await req.tenantDb.run(
+      'UPDATE servicos SET nome = ?, unidade = ?, tempo = ?, sequencia = ? WHERE empresa_id = ? AND id = ?',
       [
         nome || service.nome,
         unidade !== undefined ? parseInt(unidade) : service.unidade,
         tempo !== undefined ? parseInt(tempo) : service.tempo,
         sequencia !== undefined ? parseInt(sequencia) : service.sequencia,
+        empId,
         id
       ]
     );
 
-    const updatedService = await db.get('SELECT * FROM servicos WHERE id = ?', [id]);
+    const updatedService = await req.tenantDb.get('SELECT * FROM servicos WHERE empresa_id = ? AND id = ?', [empId, id]);
     res.json(updatedService);
   } catch (error) {
     res.status(500).json({ error: 'Erro ao atualizar serviço.' });
@@ -587,21 +1318,22 @@ app.put('/api/servicos/:id', authenticateToken, async (req, res) => {
 app.delete('/api/servicos/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
   try {
-    const service = await db.get('SELECT * FROM servicos WHERE id = ?', [id]);
-    if (!service) {
+    const empId = req.auth.empresaId;
+    const result = await req.tenantDb.run('DELETE FROM servicos WHERE empresa_id = ? AND id = ?', [empId, id]);
+    if (result.changes === 0) {
       return res.status(404).json({ error: 'Serviço não encontrado.' });
     }
-    await db.run('DELETE FROM servicos WHERE id = ?', [id]);
     res.json({ message: 'Serviço removido com sucesso.' });
   } catch (error) {
     res.status(500).json({ error: 'Erro ao excluir serviço.' });
   }
 });
 
-// 5.2. Product (Produtos) Routes
+// 5.2. Product (Produtos / Material) Routes (isoladas por empresa_id)
 app.get('/api/produtos', authenticateToken, async (req, res) => {
   try {
-    const list = await db.all(`
+    const empId = req.auth.empresaId;
+    const list = await req.tenantDb.all(`
       SELECT 
         MaterialReferencia AS id,
         MaterialReferencia AS codigo,
@@ -616,13 +1348,16 @@ app.get('/api/produtos', authenticateToken, async (req, res) => {
         MaterialTempo AS tempo,
         COALESCE(ExibirNaProposta, 'Nao') AS ExibirNaProposta
       FROM Material 
+      WHERE empresa_id = ?
       ORDER BY MaterialDescricao ASC
-    `);
+    `, [empId]);
 
-    // Busca tabela de serviços para vincular campo sequencia
     let servicosList = [];
     try {
-      servicosList = await db.all('SELECT id, nome, sequencia FROM servicos ORDER BY sequencia ASC, nome ASC');
+      servicosList = await req.tenantDb.all(
+        'SELECT id, nome, sequencia FROM servicos WHERE empresa_id = ? ORDER BY sequencia ASC, nome ASC',
+        [empId]
+      );
     } catch (e) {
       servicosList = [];
     }
@@ -665,15 +1400,18 @@ app.get('/api/produtos', authenticateToken, async (req, res) => {
 });
 
 app.post('/api/produtos', authenticateToken, upload.single('imagem'), async (req, res) => {
-  const { codigo, nome, preco, unidade, tipo, tempo, ExibirNaProposta, ProdutoGrupo, produtoGrupo } = req.body;
+  const codigo = req.body.codigo || req.body.MaterialReferencia;
+  const nome = req.body.nome || req.body.MaterialDescricao;
+  const preco = req.body.preco !== undefined ? req.body.preco : req.body.MaterialValorUnitario;
+  const unidade = req.body.unidade || req.body.MaterialUnidade;
+  const { tipo, tempo, ExibirNaProposta, ProdutoGrupo, produtoGrupo } = req.body;
   if (!codigo || !nome || !unidade) {
-    if (req.file) {
+    if (req.file && fs.existsSync(req.file.path)) {
       fs.unlinkSync(req.file.path);
     }
     return res.status(400).json({ error: 'Código, nome e unidade são obrigatórios.' });
   }
 
-  // Normalizar a unidade para atender a constraint CHECK do SQLite
   let normUn = (unidade || '').toUpperCase().trim();
   if (normUn === 'UN') normUn = 'UNI';
   const allowedUnits = ['CHP', 'M2', 'M', 'L', 'UNI', 'PAR', 'KG', 'CXA', 'VAR', 'DIA'];
@@ -681,36 +1419,37 @@ app.post('/api/produtos', authenticateToken, upload.single('imagem'), async (req
     normUn = 'UNI';
   }
 
-  // Normalizar o tipo
   let normTipo = (tipo || 'Produto').trim();
   if (normTipo !== 'Serviço') normTipo = 'Produto';
 
   const tempoVal = normTipo === 'Serviço' ? (parseInt(tempo, 10) || 0) : 0;
   const normExibir = (ExibirNaProposta === 'Sim' || ExibirNaProposta === true || ExibirNaProposta === 'true' || ExibirNaProposta === '1') ? 'Sim' : 'Nao';
 
-  // Normalizar ProdutoGrupo (1 a 8, default 8)
   const rawGrupo = ProdutoGrupo !== undefined ? ProdutoGrupo : produtoGrupo;
   let grupoVal = parseInt(rawGrupo, 10);
   if (isNaN(grupoVal) || grupoVal < 1 || grupoVal > 8) {
     grupoVal = 8;
   }
 
-  // Obter caminho da imagem
-  const imagem = req.file ? `uploads/${req.file.filename}` : null;
+  const imagem = req.file ? (req.file.tenantRelPath || `uploads/empresa_${req.auth.empresaId}/produtos/${req.file.filename}`) : null;
 
   try {
-    const existing = await db.get('SELECT MaterialReferencia FROM Material WHERE MaterialReferencia = ?', [codigo]);
+    const empId = req.auth.empresaId;
+    const existing = await req.tenantDb.get(
+      'SELECT MaterialReferencia FROM Material WHERE empresa_id = ? AND MaterialReferencia = ?',
+      [empId, codigo]
+    );
     if (existing) {
-      if (req.file) {
+      if (req.file && fs.existsSync(req.file.path)) {
         fs.unlinkSync(req.file.path);
       }
-      return res.status(400).json({ error: 'Já existe um produto cadastrado com este código.' });
+      return res.status(400).json({ error: 'Já existe um produto cadastrado com este código na sua empresa.' });
     }
 
-    await db.run(
-      `INSERT INTO Material (MaterialReferencia, MaterialDescricao, MaterialUnidade, MaterialValorUnitario, GrupoSigla, ProdutoGrupo, MaterialTipo, MaterialImagem, MaterialTempo, ExibirNaProposta)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [codigo, nome, normUn, parseFloat(preco) || 0.0, null, grupoVal, normTipo, imagem, tempoVal, normExibir]
+    await req.tenantDb.run(
+      `INSERT INTO Material (empresa_id, MaterialReferencia, MaterialDescricao, MaterialUnidade, MaterialValorUnitario, GrupoSigla, ProdutoGrupo, MaterialTipo, MaterialImagem, MaterialTempo, ExibirNaProposta)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [empId, codigo, nome, normUn, parseFloat(preco) || 0.0, null, grupoVal, normTipo, imagem, tempoVal, normExibir]
     );
 
     const newProduct = {
@@ -729,7 +1468,7 @@ app.post('/api/produtos', authenticateToken, upload.single('imagem'), async (req
     };
     res.status(201).json(newProduct);
   } catch (error) {
-    if (req.file) {
+    if (req.file && fs.existsSync(req.file.path)) {
       fs.unlinkSync(req.file.path);
     }
     res.status(500).json({ error: 'Erro ao criar produto.' });
@@ -741,15 +1480,18 @@ app.put('/api/produtos/:id', authenticateToken, upload.single('imagem'), async (
   const { nome, preco, unidade, tipo, tempo, ExibirNaProposta, ProdutoGrupo, produtoGrupo } = req.body;
 
   try {
-    const product = await db.get('SELECT * FROM Material WHERE MaterialReferencia = ?', [id]);
+    const empId = req.auth.empresaId;
+    const product = await req.tenantDb.get(
+      'SELECT * FROM Material WHERE empresa_id = ? AND MaterialReferencia = ?',
+      [empId, id]
+    );
     if (!product) {
-      if (req.file) {
+      if (req.file && fs.existsSync(req.file.path)) {
         fs.unlinkSync(req.file.path);
       }
       return res.status(404).json({ error: 'Produto não encontrado.' });
     }
 
-    // Normalizar a unidade para atender a constraint CHECK do SQLite
     let normUn = (unidade || '').toUpperCase().trim();
     if (normUn === 'UN') normUn = 'UNI';
     const allowedUnits = ['CHP', 'M2', 'M', 'L', 'UNI', 'PAR', 'KG', 'CXA', 'VAR', 'DIA'];
@@ -757,7 +1499,6 @@ app.put('/api/produtos/:id', authenticateToken, upload.single('imagem'), async (
       normUn = 'UNI';
     }
 
-    // Normalizar o tipo
     let normTipo = (tipo || product.MaterialTipo || 'Produto').trim();
     if (normTipo !== 'Serviço') normTipo = 'Produto';
 
@@ -766,7 +1507,6 @@ app.put('/api/produtos/:id', authenticateToken, upload.single('imagem'), async (
       ? ((ExibirNaProposta === 'Sim' || ExibirNaProposta === true || ExibirNaProposta === 'true' || ExibirNaProposta === '1') ? 'Sim' : 'Nao')
       : (product.ExibirNaProposta || 'Nao');
 
-    // Normalizar ProdutoGrupo
     const rawGrupo = ProdutoGrupo !== undefined ? ProdutoGrupo : produtoGrupo;
     let grupoVal;
     if (rawGrupo !== undefined && rawGrupo !== null && rawGrupo !== '') {
@@ -776,23 +1516,22 @@ app.put('/api/produtos/:id', authenticateToken, upload.single('imagem'), async (
       grupoVal = product.ProdutoGrupo || 8;
     }
 
-    // Se uma nova imagem foi enviada, substitui a antiga
     let imagem = product.MaterialImagem;
     if (req.file) {
-      imagem = `uploads/${req.file.filename}`;
+      imagem = req.file.tenantRelPath || `uploads/empresa_${empId}/produtos/${req.file.filename}`;
       if (product.MaterialImagem) {
-        const oldPath = path.resolve(product.MaterialImagem);
-        if (fs.existsSync(oldPath)) {
+        const oldPath = getUploadPhysicalPath(product.MaterialImagem);
+        if (oldPath && fs.existsSync(oldPath)) {
           fs.unlinkSync(oldPath);
         }
       }
     }
 
-    await db.run(
+    await req.tenantDb.run(
       `UPDATE Material 
        SET MaterialDescricao = ?, MaterialUnidade = ?, MaterialValorUnitario = ?, MaterialTipo = ?, MaterialImagem = ?, MaterialTempo = ?, ExibirNaProposta = ?, ProdutoGrupo = ?
-       WHERE MaterialReferencia = ?`,
-      [nome, normUn, parseFloat(preco) || 0.0, normTipo, imagem, tempoVal, normExibir, grupoVal, id]
+       WHERE empresa_id = ? AND MaterialReferencia = ?`,
+      [nome, normUn, parseFloat(preco) || 0.0, normTipo, imagem, tempoVal, normExibir, grupoVal, empId, id]
     );
 
     const updatedProduct = {
@@ -811,7 +1550,7 @@ app.put('/api/produtos/:id', authenticateToken, upload.single('imagem'), async (
     };
     res.json(updatedProduct);
   } catch (error) {
-    if (req.file) {
+    if (req.file && fs.existsSync(req.file.path)) {
       fs.unlinkSync(req.file.path);
     }
     res.status(500).json({ error: 'Erro ao atualizar produto.' });
@@ -821,18 +1560,22 @@ app.put('/api/produtos/:id', authenticateToken, upload.single('imagem'), async (
 app.delete('/api/produtos/:id', authenticateToken, async (req, res) => {
   const { id } = req.params; // MaterialReferencia
   try {
-    const product = await db.get('SELECT * FROM Material WHERE MaterialReferencia = ?', [id]);
+    const empId = req.auth.empresaId;
+    const product = await req.tenantDb.get(
+      'SELECT * FROM Material WHERE empresa_id = ? AND MaterialReferencia = ?',
+      [empId, id]
+    );
     if (!product) {
       return res.status(404).json({ error: 'Produto não encontrado.' });
     }
 
-    // Verificar se o produto está vinculado a algum item de projeto
-    const linkedProjects = await db.all(`
+    // Verificar se o produto está vinculado a algum item de projeto da própria empresa
+    const linkedProjects = await req.tenantDb.all(`
       SELECT DISTINCT p.id, p.nome 
       FROM ProjetoItem pi 
-      JOIN projetos p ON pi.ProjetoID = p.id 
-      WHERE pi.MaterialReferencia = ?
-    `, [id]);
+      INNER JOIN projetos p ON pi.empresa_id = p.empresa_id AND pi.ProjetoID = p.id 
+      WHERE pi.empresa_id = ? AND pi.MaterialReferencia = ?
+    `, [empId, id]);
 
     if (linkedProjects && linkedProjects.length > 0) {
       const projectNames = linkedProjects.map(p => `"${p.nome}" (ID: ${p.id})`).join(', ');
@@ -841,11 +1584,10 @@ app.delete('/api/produtos/:id', authenticateToken, async (req, res) => {
       });
     }
 
-    // Deletar arquivo de imagem se existir e for caminho local
     if (product.MaterialImagem && typeof product.MaterialImagem === 'string' && !product.MaterialImagem.startsWith('data:')) {
       try {
-        const imgPath = path.resolve(product.MaterialImagem);
-        if (fs.existsSync(imgPath)) {
+        const imgPath = getUploadPhysicalPath(product.MaterialImagem);
+        if (imgPath && fs.existsSync(imgPath)) {
           fs.unlinkSync(imgPath);
         }
       } catch (imgErr) {
@@ -853,12 +1595,11 @@ app.delete('/api/produtos/:id', authenticateToken, async (req, res) => {
       }
     }
 
-    // Limpa eventuais vínculos em Projeto_Materiais se não estiver em ProjetoItem
     try {
-      await db.run('DELETE FROM Projeto_Materiais WHERE referencia = ?', [id]);
+      await req.tenantDb.run('DELETE FROM Projeto_Materiais WHERE empresa_id = ? AND referencia = ?', [empId, id]);
     } catch (e) {}
 
-    await db.run('DELETE FROM Material WHERE MaterialReferencia = ?', [id]);
+    await req.tenantDb.run('DELETE FROM Material WHERE empresa_id = ? AND MaterialReferencia = ?', [empId, id]);
     res.json({ message: 'Produto removido com sucesso.' });
   } catch (error) {
     console.error('DELETE PRODUCT ERROR:', error);
@@ -871,11 +1612,10 @@ app.delete('/api/produtos/:id', authenticateToken, async (req, res) => {
   }
 });
 
-
-
-// Rotas: Ordem_Servico
+// Rotas: Ordem_Servico (isoladas por empresa_id)
 async function handleGetOrdemServico(req, res) {
   try {
+    const empId = req.auth.empresaId;
     const { situacao, busca } = req.query;
     let query = `
       SELECT 
@@ -891,11 +1631,11 @@ async function handleGetOrdemServico(req, res) {
         o.total_venda AS orcamento_total,
         c.nome AS cliente_nome
       FROM Ordem_Servico os
-      LEFT JOIN orcamentos o ON os.Numero = o.numero
-      LEFT JOIN clientes c ON o.cliente_id = c.id
-      WHERE 1=1
+      LEFT JOIN orcamentos o ON os.empresa_id = o.empresa_id AND os.Numero = o.numero
+      LEFT JOIN clientes c ON o.empresa_id = c.empresa_id AND o.cliente_id = c.id
+      WHERE os.empresa_id = ?
     `;
-    const params = [];
+    const params = [empId];
 
     if (situacao && situacao !== 'TODAS' && situacao !== 'Todos') {
       query += ' AND os.Situacao = ?';
@@ -909,7 +1649,7 @@ async function handleGetOrdemServico(req, res) {
 
     query += ' ORDER BY os.Numero DESC, os.ProjetoID ASC';
 
-    const items = await db.all(query, params);
+    const items = await req.tenantDb.all(query, params);
     res.json(items);
   } catch (error) {
     console.error('GET ORDEM SERVICO ERROR:', error);
@@ -922,13 +1662,14 @@ app.get('/api/ordem-controle', authenticateToken, handleGetOrdemServico);
 
 async function handleGetOrdemServicoById(req, res) {
   try {
+    const empId = req.auth.empresaId;
     const { numero } = req.params;
     const { projetoId } = req.query;
     
     if (projetoId !== undefined && projetoId !== null && projetoId !== '') {
-      const item = await db.get(
-        'SELECT Numero, ProjetoID, NomeProjeto, Tempo, DataCriacao, DataConclusao, Situacao, Responsavel FROM Ordem_Servico WHERE Numero = ? AND ProjetoID = ?',
-        [numero, projetoId]
+      const item = await req.tenantDb.get(
+        'SELECT Numero, ProjetoID, NomeProjeto, Tempo, DataCriacao, DataConclusao, Situacao, Responsavel FROM Ordem_Servico WHERE empresa_id = ? AND Numero = ? AND ProjetoID = ?',
+        [empId, numero, projetoId]
       );
       if (!item) {
         return res.status(404).json({ error: 'Ordem de serviço não encontrada.' });
@@ -936,9 +1677,9 @@ async function handleGetOrdemServicoById(req, res) {
       return res.json(item);
     }
 
-    const items = await db.all(
-      'SELECT Numero, ProjetoID, NomeProjeto, Tempo, DataCriacao, DataConclusao, Situacao, Responsavel FROM Ordem_Servico WHERE Numero = ? ORDER BY ProjetoID ASC',
-      [numero]
+    const items = await req.tenantDb.all(
+      'SELECT Numero, ProjetoID, NomeProjeto, Tempo, DataCriacao, DataConclusao, Situacao, Responsavel FROM Ordem_Servico WHERE empresa_id = ? AND Numero = ? ORDER BY ProjetoID ASC',
+      [empId, numero]
     );
     if (!items || items.length === 0) {
       return res.status(404).json({ error: 'Ordem de serviço não encontrada.' });
@@ -955,15 +1696,19 @@ app.get('/api/ordem-controle/:numero', authenticateToken, handleGetOrdemServicoB
 
 async function handlePostOrdemServico(req, res) {
   try {
+    const empId = req.auth.empresaId;
     let { Numero, ProjetoID, DataCriacao, DataConclusao, Situacao, Responsavel, NomeProjeto, Tempo } = req.body;
 
     if (!Numero) {
-      const maxRow = await db.get('SELECT MAX(Numero) as maxNum FROM Ordem_Servico');
+      const maxRow = await req.tenantDb.get('SELECT MAX(Numero) as maxNum FROM Ordem_Servico WHERE empresa_id = ?', [empId]);
       Numero = (maxRow && maxRow.maxNum ? maxRow.maxNum : 0) + 1;
     }
 
     if (!ProjetoID) {
-      const maxProjRow = await db.get('SELECT MAX(ProjetoID) as maxProj FROM Ordem_Servico WHERE Numero = ?', [Numero]);
+      const maxProjRow = await req.tenantDb.get(
+        'SELECT MAX(ProjetoID) as maxProj FROM Ordem_Servico WHERE empresa_id = ? AND Numero = ?',
+        [empId, Numero]
+      );
       ProjetoID = (maxProjRow && maxProjRow.maxProj ? parseInt(maxProjRow.maxProj, 10) : 0) + 1;
     }
 
@@ -974,12 +1719,15 @@ async function handlePostOrdemServico(req, res) {
     const nomeProjVal = NomeProjeto || null;
     const tempoVal = parseInt(Tempo, 10) || 0;
 
-    await db.run(
-      'INSERT INTO Ordem_Servico (Numero, ProjetoID, DataCriacao, DataConclusao, Situacao, Responsavel, NomeProjeto, Tempo) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      [Numero, ProjetoID, dataCriacaoVal, dataConclusaoVal, situacaoVal, responsavelVal, nomeProjVal, tempoVal]
+    await req.tenantDb.run(
+      'INSERT INTO Ordem_Servico (empresa_id, Numero, ProjetoID, DataCriacao, DataConclusao, Situacao, Responsavel, NomeProjeto, Tempo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [empId, Numero, ProjetoID, dataCriacaoVal, dataConclusaoVal, situacaoVal, responsavelVal, nomeProjVal, tempoVal]
     );
 
-    const created = await db.get('SELECT * FROM Ordem_Servico WHERE Numero = ? AND ProjetoID = ?', [Numero, ProjetoID]);
+    const created = await req.tenantDb.get(
+      'SELECT * FROM Ordem_Servico WHERE empresa_id = ? AND Numero = ? AND ProjetoID = ?',
+      [empId, Numero, ProjetoID]
+    );
     res.status(201).json(created);
   } catch (error) {
     console.error('CREATE ORDEM SERVICO ERROR:', error);
@@ -992,14 +1740,21 @@ app.post('/api/ordem-controle', authenticateToken, handlePostOrdemServico);
 
 async function handlePutOrdemServico(req, res) {
   try {
+    const empId = req.auth.empresaId;
     const { numero } = req.params;
     const projetoId = req.query.projetoId || req.body.ProjetoID || req.body.projetoId;
     
     let existing;
     if (projetoId !== undefined && projetoId !== null && projetoId !== '') {
-      existing = await db.get('SELECT * FROM Ordem_Servico WHERE Numero = ? AND ProjetoID = ?', [numero, projetoId]);
+      existing = await req.tenantDb.get(
+        'SELECT * FROM Ordem_Servico WHERE empresa_id = ? AND Numero = ? AND ProjetoID = ?',
+        [empId, numero, projetoId]
+      );
     } else {
-      existing = await db.get('SELECT * FROM Ordem_Servico WHERE Numero = ? ORDER BY ProjetoID ASC LIMIT 1', [numero]);
+      existing = await req.tenantDb.get(
+        'SELECT * FROM Ordem_Servico WHERE empresa_id = ? AND Numero = ? ORDER BY ProjetoID ASC LIMIT 1',
+        [empId, numero]
+      );
     }
 
     if (!existing) {
@@ -1009,8 +1764,8 @@ async function handlePutOrdemServico(req, res) {
     const targetProjId = existing.ProjetoID;
     const { DataCriacao, DataConclusao, Situacao, Responsavel, NomeProjeto, Tempo } = req.body;
 
-    await db.run(
-      'UPDATE Ordem_Servico SET DataCriacao = ?, DataConclusao = ?, Situacao = ?, Responsavel = ?, NomeProjeto = ?, Tempo = ? WHERE Numero = ? AND ProjetoID = ?',
+    await req.tenantDb.run(
+      'UPDATE Ordem_Servico SET DataCriacao = ?, DataConclusao = ?, Situacao = ?, Responsavel = ?, NomeProjeto = ?, Tempo = ? WHERE empresa_id = ? AND Numero = ? AND ProjetoID = ?',
       [
         DataCriacao !== undefined ? DataCriacao : existing.DataCriacao,
         DataConclusao !== undefined ? DataConclusao : existing.DataConclusao,
@@ -1018,12 +1773,16 @@ async function handlePutOrdemServico(req, res) {
         Responsavel !== undefined ? Responsavel : existing.Responsavel,
         NomeProjeto !== undefined ? NomeProjeto : existing.NomeProjeto,
         Tempo !== undefined ? parseInt(Tempo, 10) : existing.Tempo,
+        empId,
         numero,
         targetProjId
       ]
     );
 
-    const updated = await db.get('SELECT * FROM Ordem_Servico WHERE Numero = ? AND ProjetoID = ?', [numero, targetProjId]);
+    const updated = await req.tenantDb.get(
+      'SELECT * FROM Ordem_Servico WHERE empresa_id = ? AND Numero = ? AND ProjetoID = ?',
+      [empId, numero, targetProjId]
+    );
     res.json(updated);
   } catch (error) {
     console.error('UPDATE ORDEM SERVICO ERROR:', error);
@@ -1036,21 +1795,26 @@ app.put('/api/ordem-controle/:numero', authenticateToken, handlePutOrdemServico)
 
 async function handleDeleteOrdemServico(req, res) {
   try {
+    const empId = req.auth.empresaId;
     const { numero } = req.params;
     const projetoId = req.query.projetoId || req.body?.ProjetoID || req.body?.projetoId;
 
     if (projetoId !== undefined && projetoId !== null && projetoId !== '') {
-      const existing = await db.get('SELECT * FROM Ordem_Servico WHERE Numero = ? AND ProjetoID = ?', [numero, projetoId]);
-      if (!existing) {
+      const result = await req.tenantDb.run(
+        'DELETE FROM Ordem_Servico WHERE empresa_id = ? AND Numero = ? AND ProjetoID = ?',
+        [empId, numero, projetoId]
+      );
+      if (result.changes === 0) {
         return res.status(404).json({ error: 'Ordem de serviço não encontrada.' });
       }
-      await db.run('DELETE FROM Ordem_Servico WHERE Numero = ? AND ProjetoID = ?', [numero, projetoId]);
     } else {
-      const existing = await db.get('SELECT * FROM Ordem_Servico WHERE Numero = ?', [numero]);
-      if (!existing) {
+      const result = await req.tenantDb.run(
+        'DELETE FROM Ordem_Servico WHERE empresa_id = ? AND Numero = ?',
+        [empId, numero]
+      );
+      if (result.changes === 0) {
         return res.status(404).json({ error: 'Ordem de serviço não encontrada.' });
       }
-      await db.run('DELETE FROM Ordem_Servico WHERE Numero = ?', [numero]);
     }
 
     res.json({ message: 'Ordem de serviço excluída com sucesso.' });
@@ -1064,24 +1828,25 @@ app.delete('/api/ordem-servico/:numero', authenticateToken, handleDeleteOrdemSer
 app.delete('/api/ordem-controle/:numero', authenticateToken, handleDeleteOrdemServico);
 
 // ==========================================
-// ROTAS: Revisão Técnica da Ordem de Serviço
+// ROTAS: Revisão Técnica da Ordem de Serviço (isoladas por empresa_id)
 // ==========================================
 async function handleGetRevisaoTecnica(req, res) {
   try {
+    const empId = req.auth.empresaId;
     const { numero, projetoId: paramProjId } = req.params;
     const queryProjId = req.query.projetoId || req.query.item;
     const targetProjId = paramProjId !== undefined ? paramProjId : (queryProjId || 1);
 
     // 1. Ordem de Serviço
-    let os = await db.get(
-      'SELECT Numero, ProjetoID, NomeProjeto, Tempo, DataCriacao, DataConclusao, Situacao, Responsavel FROM Ordem_Servico WHERE Numero = ? AND ProjetoID = ?',
-      [numero, targetProjId]
+    let os = await req.tenantDb.get(
+      'SELECT Numero, ProjetoID, NomeProjeto, Tempo, DataCriacao, DataConclusao, Situacao, Responsavel FROM Ordem_Servico WHERE empresa_id = ? AND Numero = ? AND ProjetoID = ?',
+      [empId, numero, targetProjId]
     );
 
     if (!os) {
-      os = await db.get(
-        'SELECT Numero, ProjetoID, NomeProjeto, Tempo, DataCriacao, DataConclusao, Situacao, Responsavel FROM Ordem_Servico WHERE Numero = ? ORDER BY ProjetoID ASC LIMIT 1',
-        [numero]
+      os = await req.tenantDb.get(
+        'SELECT Numero, ProjetoID, NomeProjeto, Tempo, DataCriacao, DataConclusao, Situacao, Responsavel FROM Ordem_Servico WHERE empresa_id = ? AND Numero = ? ORDER BY ProjetoID ASC LIMIT 1',
+        [empId, numero]
       );
     }
 
@@ -1090,7 +1855,7 @@ async function handleGetRevisaoTecnica(req, res) {
     }
 
     // 2. Orçamento com dados do cliente
-    const orcamento = await db.get(`
+    const orcamento = await req.tenantDb.get(`
       SELECT 
         o.numero,
         o.data_criacao,
@@ -1107,12 +1872,15 @@ async function handleGetRevisaoTecnica(req, res) {
         c.cidade as cliente_cidade,
         c.uf as cliente_uf
       FROM orcamentos o
-      LEFT JOIN clientes c ON o.cliente_id = c.id
-      WHERE o.numero = ?
-    `, [numero]);
+      LEFT JOIN clientes c ON o.empresa_id = c.empresa_id AND o.cliente_id = c.id
+      WHERE o.empresa_id = ? AND o.numero = ?
+    `, [empId, numero]);
 
-    // 3. Todos os projetos do orçamento
-    const projetos = await db.all('SELECT * FROM projetos WHERE orcamento_numero = ? ORDER BY id ASC', [numero]);
+    // 3. Todos os projetos do orçamento da mesma empresa
+    const projetos = await req.tenantDb.all(
+      'SELECT * FROM projetos WHERE empresa_id = ? AND orcamento_numero = ? ORDER BY id ASC',
+      [empId, numero]
+    );
 
     // 4. Selecionar projeto correspondente ao item da OS
     let matchedProject = null;
@@ -1137,9 +1905,9 @@ async function handleGetRevisaoTecnica(req, res) {
     let anexos = [];
 
     if (matchedProject && matchedProject.id) {
-      await ensureProjetoItemsPopulated(matchedProject.id);
+      await ensureProjetoItemsPopulated(matchedProject.id, empId);
 
-      const rawItens = await db.all(`
+      const rawItens = await req.tenantDb.all(`
         SELECT 
           pi.ProjetoID,
           pi.ProjetoItemID,
@@ -1156,19 +1924,22 @@ async function handleGetRevisaoTecnica(req, res) {
           m.MaterialImagem,
           COALESCE(m.ExibirNaProposta, 'Nao') AS ExibirNaProposta
         FROM ProjetoItem pi
-        LEFT JOIN Material m ON pi.MaterialReferencia = m.MaterialReferencia
-        WHERE pi.ProjetoID = ?
+        LEFT JOIN Material m ON pi.empresa_id = m.empresa_id AND pi.MaterialReferencia = m.MaterialReferencia
+        WHERE pi.empresa_id = ? AND pi.ProjetoID = ?
         ORDER BY pi.ProjetoItemID ASC
-      `, [matchedProject.id]);
+      `, [empId, matchedProject.id]);
 
-      itens = await enrichProjectItemsWithServicoSequencia(rawItens);
-      anexos = await db.all('SELECT * FROM projeto_anexos WHERE projeto_id = ? ORDER BY criado_em DESC', [matchedProject.id]);
+      itens = await enrichProjectItemsWithServicoSequencia(rawItens, empId);
+      anexos = await req.tenantDb.all(
+        'SELECT * FROM projeto_anexos WHERE empresa_id = ? AND projeto_id = ? ORDER BY criado_em DESC',
+        [empId, matchedProject.id]
+      );
     }
 
     // 6. Checklist salvo da Ordem de Serviço
-    const checklist = await db.all(
-      'SELECT id, numero, projeto_id, tarefa_key, tarefa_texto, concluido, data_conclusao, responsavel, observacao, updated_at FROM ordem_servico_checklist WHERE numero = ? AND projeto_id = ? ORDER BY tarefa_key ASC, id ASC',
-      [numero, os.ProjetoID]
+    const checklist = await req.tenantDb.all(
+      'SELECT id, numero, projeto_id, tarefa_key, tarefa_texto, concluido, data_conclusao, responsavel, observacao, updated_at FROM ordem_servico_checklist WHERE empresa_id = ? AND numero = ? AND projeto_id = ? ORDER BY tarefa_key ASC, id ASC',
+      [empId, numero, os.ProjetoID]
     );
 
     res.json({
@@ -1188,10 +1959,20 @@ async function handleGetRevisaoTecnica(req, res) {
 
 async function handlePutRevisaoChecklist(req, res) {
   try {
+    const empId = req.auth.empresaId;
     const { numero, projetoId: paramProjId } = req.params;
     const queryProjId = req.query.projetoId || req.body.projeto_id || req.body.ProjetoID;
     const targetProjId = paramProjId !== undefined ? paramProjId : (queryProjId || 1);
     const responsavelPadrao = req.user?.nome || req.user?.email || 'Usuário';
+
+    // Confirma que a OS pertence à empresa autenticada antes de gravar o checklist
+    const osExists = await req.tenantDb.get(
+      'SELECT Numero, ProjetoID FROM Ordem_Servico WHERE empresa_id = ? AND Numero = ? AND ProjetoID = ?',
+      [empId, numero, targetProjId]
+    );
+    if (!osExists) {
+      return res.status(404).json({ error: 'Ordem de serviço não encontrada.' });
+    }
 
     const formatDateTimeForSql = (val) => {
       if (!val) return null;
@@ -1219,10 +2000,10 @@ async function handlePutRevisaoChecklist(req, res) {
       const texto = tarefa_texto || '';
       const obs = observacao !== undefined ? observacao : null;
 
-      await db.run(`
+      await req.tenantDb.run(`
         INSERT INTO ordem_servico_checklist 
-          (numero, projeto_id, tarefa_key, tarefa_texto, concluido, data_conclusao, responsavel, observacao)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          (empresa_id, numero, projeto_id, tarefa_key, tarefa_texto, concluido, data_conclusao, responsavel, observacao)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE
           tarefa_texto = COALESCE(VALUES(tarefa_texto), tarefa_texto),
           concluido = VALUES(concluido),
@@ -1230,12 +2011,12 @@ async function handlePutRevisaoChecklist(req, res) {
           responsavel = VALUES(responsavel),
           observacao = COALESCE(VALUES(observacao), observacao),
           updated_at = CURRENT_TIMESTAMP
-      `, [numero, targetProjId, tarefa_key, texto, isConcluido, dataConclusao, resp, obs]);
+      `, [empId, numero, targetProjId, tarefa_key, texto, isConcluido, dataConclusao, resp, obs]);
     }
 
-    const updatedChecklist = await db.all(
-      'SELECT id, numero, projeto_id, tarefa_key, tarefa_texto, concluido, data_conclusao, responsavel, observacao, updated_at FROM ordem_servico_checklist WHERE numero = ? AND projeto_id = ? ORDER BY tarefa_key ASC, id ASC',
-      [numero, targetProjId]
+    const updatedChecklist = await req.tenantDb.all(
+      'SELECT id, numero, projeto_id, tarefa_key, tarefa_texto, concluido, data_conclusao, responsavel, observacao, updated_at FROM ordem_servico_checklist WHERE empresa_id = ? AND numero = ? AND projeto_id = ? ORDER BY tarefa_key ASC, id ASC',
+      [empId, numero, targetProjId]
     );
 
     res.json({
@@ -1251,11 +2032,20 @@ async function handlePutRevisaoChecklist(req, res) {
 
 async function handlePutSituacaoOrdemServico(req, res) {
   try {
+    const empId = req.auth.empresaId;
     const { numero, projetoId } = req.params;
     const { Situacao, situacao, Responsavel, responsavel } = req.body;
     const novaSituacao = Situacao || situacao;
     if (!novaSituacao) {
       return res.status(400).json({ error: 'Situação é obrigatória.' });
+    }
+
+    const existing = await req.tenantDb.get(
+      'SELECT * FROM Ordem_Servico WHERE empresa_id = ? AND Numero = ? AND ProjetoID = ?',
+      [empId, numero, projetoId]
+    );
+    if (!existing) {
+      return res.status(404).json({ error: 'Ordem de serviço não encontrada.' });
     }
 
     const dataConclusao = novaSituacao === 'Concluida' ? new Date().toISOString().split('T')[0] : null;
@@ -1269,12 +2059,15 @@ async function handlePutSituacaoOrdemServico(req, res) {
       params.push(resp);
     }
 
-    query += ' WHERE Numero = ? AND ProjetoID = ?';
-    params.push(numero, projetoId);
+    query += ' WHERE empresa_id = ? AND Numero = ? AND ProjetoID = ?';
+    params.push(empId, numero, projetoId);
 
-    await db.run(query, params);
+    await req.tenantDb.run(query, params);
 
-    const updated = await db.get('SELECT * FROM Ordem_Servico WHERE Numero = ? AND ProjetoID = ?', [numero, projetoId]);
+    const updated = await req.tenantDb.get(
+      'SELECT * FROM Ordem_Servico WHERE empresa_id = ? AND Numero = ? AND ProjetoID = ?',
+      [empId, numero, projetoId]
+    );
     res.json({ success: true, item: updated });
   } catch (error) {
     console.error('PUT SITUACAO OS ERROR:', error);
@@ -1442,19 +2235,22 @@ app.get('/api/planta-baixa/dados', authenticateToken, async (req, res) => {
 
 // 8. Layout Files Routes (Importação de Layouts)
 app.get('/api/arquivos-importados', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   try {
     const list = await db.all(`
       SELECT 
         id, 
+        empresa_id,
         nome_arquivo, 
         tamanho, 
         tipo_layout, 
         caminho_arquivo, 
         data_upload,
-        COALESCE(projeto_id, (SELECT id FROM projetos ORDER BY id ASC LIMIT 1)) as projeto_id
+        COALESCE(projeto_id, (SELECT id FROM projetos WHERE empresa_id = ? ORDER BY id ASC LIMIT 1)) as projeto_id
       FROM arquivos_importados 
+      WHERE empresa_id = ?
       ORDER BY data_upload DESC
-    `);
+    `, [empresaId, empresaId]);
     res.json(list);
   } catch (error) {
     console.error('GET LAYOUTS ERROR:', error);
@@ -1544,7 +2340,7 @@ function cleanMdfDescription(desc) {
 }
 
 // Rotina de Carga de Materiais (CarregarMateriais)
-async function CarregarMateriais(file, finalProjectId) {
+async function CarregarMateriais(file, finalProjectId, empresaId = 1) {
   try {
     const pdf = await getPdfParse();
     const fileBuffer = fs.readFileSync(file.path);
@@ -1556,7 +2352,7 @@ async function CarregarMateriais(file, finalProjectId) {
     const materials = parseMaterialsFromText(text);
     if (materials.length > 0 && finalProjectId) {
       // Limpa materiais anteriores desse projeto para evitar duplicatas
-      await db.run('DELETE FROM Projeto_Materiais WHERE projeto_id = ?', [finalProjectId]);
+      await db.run('DELETE FROM Projeto_Materiais WHERE empresa_id = ? AND projeto_id = ?', [empresaId, finalProjectId]);
       
       // Converte chapas de MDF de M2 para CHP se necessário e limpa descrições de MDF
       for (const m of materials) {
@@ -1582,8 +2378,8 @@ async function CarregarMateriais(file, finalProjectId) {
       // 1. Inserir itens lidos do arquivo na tabela Projeto_Materiais
       for (const m of materials) {
         await db.run(
-          'INSERT INTO Projeto_Materiais (projeto_id, referencia, descricao, qtd, un) VALUES (?, ?, ?, ?, ?)',
-          [finalProjectId, m.referencia, m.descricao, m.qtd, m.un]
+          'INSERT INTO Projeto_Materiais (empresa_id, projeto_id, referencia, descricao, qtd, un) VALUES (?, ?, ?, ?, ?, ?)',
+          [empresaId, finalProjectId, m.referencia, m.descricao, m.qtd, m.un]
         );
       }
 
@@ -1615,18 +2411,21 @@ async function CarregarMateriais(file, finalProjectId) {
 
       for (const item of extraItems) {
         await db.run(
-          'INSERT INTO Projeto_Materiais (projeto_id, referencia, descricao, qtd, un) VALUES (?, ?, ?, ?, ?)',
-          [finalProjectId, item.referencia, item.descricao, item.qtd, item.un]
+          'INSERT INTO Projeto_Materiais (empresa_id, projeto_id, referencia, descricao, qtd, un) VALUES (?, ?, ?, ?, ?, ?)',
+          [empresaId, finalProjectId, item.referencia, item.descricao, item.qtd, item.un]
         );
       }
 
-      // 3. Inserir todos na tabela global Material se a referência não existir
+      // 3. Inserir todos na tabela Material da empresa se a referência não existir
       const mappedMaterials = materials.map(m => ({ ...m, tipo: 'Produto' }));
       const mappedExtras = extraItems.map(e => ({ ...e, tipo: 'Serviço' }));
       const allItems = [...mappedMaterials, ...mappedExtras];
 
       for (const m of allItems) {
-        const existing = await db.get('SELECT MaterialReferencia FROM Material WHERE MaterialReferencia = ?', [m.referencia]);
+        const existing = await db.get(
+          'SELECT MaterialReferencia FROM Material WHERE empresa_id = ? AND MaterialReferencia = ?',
+          [empresaId, m.referencia]
+        );
         if (!existing) {
           // Normaliza unidade para respeitar o constraint do banco
           let normUn = (m.un || '').toUpperCase().trim();
@@ -1637,19 +2436,19 @@ async function CarregarMateriais(file, finalProjectId) {
           }
 
           await db.run(
-            `INSERT INTO Material (MaterialReferencia, MaterialDescricao, MaterialUnidade, MaterialValorUnitario, GrupoSigla, ProdutoGrupo, MaterialTipo, MaterialTempo)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-            [m.referencia, m.descricao, normUn, 0.0, null, 8, m.tipo, 0]
+            `INSERT INTO Material (empresa_id, MaterialReferencia, MaterialDescricao, MaterialUnidade, MaterialValorUnitario, GrupoSigla, ProdutoGrupo, MaterialTipo, MaterialTempo)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [empresaId, m.referencia, m.descricao, normUn, 0.0, null, 8, m.tipo, 0]
           );
         }
       }
 
-      console.log(`[CarregarMateriais] Gravados ${materials.length} materiais e ${extraItems.length} itens de fabricação para o projeto ID ${finalProjectId}`);
+      console.log(`[CarregarMateriais] Gravados ${materials.length} materiais e ${extraItems.length} itens de fabricação para o projeto ID ${finalProjectId} (empresa ${empresaId})`);
       
       // Sincroniza e recalcula custos e preços do projeto
-      await db.run('DELETE FROM ProjetoItem WHERE ProjetoID = ?', [finalProjectId]);
-      await ensureProjetoItemsPopulated(finalProjectId);
-      await recalculateProjectCosts(finalProjectId);
+      await db.run('DELETE FROM ProjetoItem WHERE empresa_id = ? AND ProjetoID = ?', [empresaId, finalProjectId]);
+      await ensureProjetoItemsPopulated(finalProjectId, empresaId);
+      await recalculateProjectCosts(finalProjectId, empresaId);
     }
   } catch (err) {
     console.error('Erro na rotina CarregarMateriais:', err);
@@ -1731,7 +2530,7 @@ function parsePecasFromText(text) {
 }
 
 // Rotina de Carga de Peças e Etiquetas (CarregarPecas)
-async function CarregarPecas(file, finalProjectId) {
+async function CarregarPecas(file, finalProjectId, empresaId = 1) {
   try {
     const pdfjs = await getPdfJs();
     const pdf = await getPdfParse();
@@ -1791,7 +2590,7 @@ async function CarregarPecas(file, finalProjectId) {
     const pecas = parsePecasFromText(text);
     if (pecas.length > 0 && finalProjectId) {
       // Limpa peças anteriores desse projeto
-      await db.run('DELETE FROM Projeto_Pecas WHERE projeto_id = ?', [finalProjectId]);
+      await db.run('DELETE FROM Projeto_Pecas WHERE empresa_id = ? AND projeto_id = ?', [empresaId, finalProjectId]);
 
       for (let idx = 0; idx < pecas.length; idx++) {
         const p = pecas[idx];
@@ -1801,16 +2600,16 @@ async function CarregarPecas(file, finalProjectId) {
         const base64Barcode = imageBase64List[2 * idx + 1] || null;
 
         await db.run(
-          'INSERT INTO Projeto_Pecas (projeto_id, peca, etiqueta, dimen, chapa, modulo, cod_item, imagem, cor_barras) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-          [finalProjectId, p.peca || '', p.etiqueta || '', p.dimen || '', p.chapa || '', p.modulo || '', p.cod_item || '', base64Image, base64Barcode]
+          'INSERT INTO Projeto_Pecas (empresa_id, projeto_id, peca, etiqueta, dimen, chapa, modulo, cod_item, imagem, cor_barras) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          [empresaId, finalProjectId, p.peca || '', p.etiqueta || '', p.dimen || '', p.chapa || '', p.modulo || '', p.cod_item || '', base64Image, base64Barcode]
         );
       }
       console.log(`[CarregarPecas] Gravadas ${pecas.length} peças para o projeto ID ${finalProjectId}`);
 
       // Atualiza a quantidade de peças no campo ProjetoQtdPecas da tabela projetos
       await db.run(
-        'UPDATE projetos SET ProjetoQtdPecas = ? WHERE id = ?',
-        [pecas.length, finalProjectId]
+        'UPDATE projetos SET ProjetoQtdPecas = ? WHERE empresa_id = ? AND id = ?',
+        [pecas.length, empresaId, finalProjectId]
       );
       console.log(`[CarregarPecas] Atualizado ProjetoQtdPecas com quantidade ${pecas.length} para o projeto ID ${finalProjectId}`);
     }
@@ -1821,6 +2620,7 @@ async function CarregarPecas(file, finalProjectId) {
 }
 
 app.post('/api/arquivos-importados', authenticateToken, uploadLayouts.array('arquivos'), async (req, res) => {
+  const empresaId = req.auth.empresaId;
   if (!req.files || req.files.length === 0) {
     return res.status(400).json({ error: 'Nenhum arquivo enviado.' });
   }
@@ -1828,28 +2628,26 @@ app.post('/api/arquivos-importados', authenticateToken, uploadLayouts.array('arq
   const { projeto_id } = req.body;
   let targetProjetoId = null;
   if (projeto_id && projeto_id !== 'null' && projeto_id !== 'undefined') {
-    targetProjetoId = parseInt(projeto_id);
+    targetProjetoId = parseInt(projeto_id, 10);
     if (isNaN(targetProjetoId)) {
       targetProjetoId = null;
     }
   }
 
-  // Resolve finalProjectId (if null, fallback to the first project in database)
   let finalProjectId = targetProjetoId;
-  if (!finalProjectId) {
-    const firstProj = await db.get('SELECT id FROM projetos ORDER BY id ASC LIMIT 1');
+  if (finalProjectId) {
+    const ownedProj = await db.get('SELECT id FROM projetos WHERE empresa_id = ? AND id = ?', [empresaId, finalProjectId]);
+    if (!ownedProj) {
+      return res.status(404).json({ error: 'Projeto não encontrado.' });
+    }
+  } else {
+    const firstProj = await db.get('SELECT id FROM projetos WHERE empresa_id = ? ORDER BY id ASC LIMIT 1', [empresaId]);
     if (firstProj) {
       finalProjectId = firstProj.id;
     }
   }
 
   try {
-    // Ordena os arquivos conforme as prioridades de layout:
-    // 1 - Lista de Materiais ('Materiais')
-    // 2 - Plano de Corte ('PlanoCorte')
-    // 3 - Modulo ('Modulo')
-    // 4 - Etiqueta ('Etiqueta')
-    // 5 - Outro
     const getFilePriority = (file) => {
       let originalName = file.originalname || '';
       try {
@@ -1886,34 +2684,32 @@ app.post('/api/arquivos-importados', authenticateToken, uploadLayouts.array('arq
     for (const file of req.files) {
       let originalName = file.originalname || '';
       try {
-        // Correção de bug do multer/multipart que decodifica cabeçalhos UTF-8 como ISO-8859-1
         originalName = Buffer.from(originalName, 'latin1').toString('utf8');
       } catch (err) {
         console.error('Erro ao converter encoding do nome do arquivo:', err);
       }
 
-      // Se o arquivo com o mesmo nome já existe neste projeto, removemos o antigo (registro e arquivo físico)
+      // Se o arquivo com o mesmo nome já existe neste projeto da empresa, removemos o antigo
       try {
         const existingFile = await db.get(
-          'SELECT * FROM arquivos_importados WHERE projeto_id = ? AND nome_arquivo = ?',
-          [finalProjectId, originalName]
+          'SELECT * FROM arquivos_importados WHERE empresa_id = ? AND projeto_id = ? AND nome_arquivo = ?',
+          [empresaId, finalProjectId, originalName]
         );
         if (existingFile) {
           console.log(`[Upload] Arquivo duplicado detectado para o projeto ${finalProjectId}: "${originalName}". Removendo carga antiga.`);
           if (fs.existsSync(existingFile.caminho_arquivo)) {
             fs.unlinkSync(existingFile.caminho_arquivo);
           }
-          await db.run('DELETE FROM arquivos_importados WHERE id = ?', [existingFile.id]);
+          await db.run('DELETE FROM arquivos_importados WHERE empresa_id = ? AND id = ?', [empresaId, existingFile.id]);
         }
       } catch (err) {
         console.error('Erro ao limpar arquivo duplicado:', err);
       }
 
-      // Normalização do nome para remover acentos e caracteres especiais para a comparação
       const normalizedName = originalName
         .normalize("NFD")
-        .replace(/[\u0300-\u036f]/g, "") // Remove acentos
-        .replace(/[^a-zA-Z0-9_\-\s]/g, ""); // Remove caracteres especiais
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^a-zA-Z0-9_\-\s]/g, "");
 
       const lowerName = normalizedName.toLowerCase();
       let resolvedLayout = 'Outro';
@@ -1931,26 +2727,23 @@ app.post('/api/arquivos-importados', authenticateToken, uploadLayouts.array('arq
       console.log(`[Upload] Arquivo original: "${file.originalname}" -> Decodificado: "${originalName}" -> Normalizado: "${normalizedName}" -> Layout: "${resolvedLayout}" -> Projeto: ${finalProjectId}`);
 
       const result = await db.run(
-        'INSERT INTO arquivos_importados (nome_arquivo, tamanho, tipo_layout, caminho_arquivo, projeto_id) VALUES (?, ?, ?, ?, ?)',
-        [originalName, file.size, resolvedLayout, file.path, finalProjectId]
+        'INSERT INTO arquivos_importados (empresa_id, nome_arquivo, tamanho, tipo_layout, caminho_arquivo, projeto_id) VALUES (?, ?, ?, ?, ?, ?)',
+        [empresaId, originalName, file.size, resolvedLayout, file.path, finalProjectId]
       );
       insertedIds.push(result.lastID);
 
-      // Se for Layout do tipo 'Materiais', extrai os dados do PDF e popula a tabela Projeto_Materiais usando CarregarMateriais
       if (resolvedLayout === 'Materiais') {
         try {
-          await CarregarMateriais(file, finalProjectId);
+          await CarregarMateriais(file, finalProjectId, empresaId);
         } catch (parseErr) {
           console.error('Erro no upload ao invocar rotina CarregarMateriais:', parseErr);
         }
       }
 
-      // Se for Layout do tipo 'Modulo' (Assembly), extrai os dados do PDF e popula a tabela Projeto_Modulo
       if (resolvedLayout === 'Modulo') {
         try {
           const pdfjs = await getPdfJs();
           const pdf = await getPdfParse();
-          // Extração das imagens reais do PDF usando a build legacy do pdfjs
           console.log(`[CargaModulos] Iniciando extração de imagens reais de: "${file.path}"`);
           const loadingTask = pdfjs.getDocument(file.path);
           const pdfDoc = await loadingTask.promise;
@@ -1975,7 +2768,6 @@ app.post('/api/arquivos-importados', authenticateToken, uploadLayouts.array('arq
                 if (imgObj) {
                   const { width, height, data: imgData } = imgObj;
                   if (imgData instanceof Uint8Array && typeof width === 'number' && typeof height === 'number') {
-                    // Converter RGB para RGBA
                     const rgbaData = new Uint8ClampedArray((imgData.length / 3) * 4);
                     for (let k = 0; k < imgData.length; k += 3) {
                       rgbaData[(k * 4) / 3] = imgData[k];
@@ -1996,7 +2788,6 @@ app.post('/api/arquivos-importados', authenticateToken, uploadLayouts.array('arq
           }
           console.log(`[CargaModulos] Extraídas ${imageBase64List.length} imagens reais do PDF.`);
 
-          // Extração dos módulos e peças em texto
           const fileBuffer = fs.readFileSync(file.path);
           const instance = new pdf.PDFParse(new Uint8Array(fileBuffer));
           if (instance.load) await instance.load();
@@ -2005,23 +2796,19 @@ app.post('/api/arquivos-importados', authenticateToken, uploadLayouts.array('arq
           
           const modules = parseModulesFromText(text);
           if (modules.length > 0 && finalProjectId) {
-            // Limpa módulos anteriores desse projeto para evitar duplicatas
-            await db.run('DELETE FROM Projeto_Modulo WHERE projeto_id = ?', [finalProjectId]);
+            await db.run('DELETE FROM Projeto_Modulo WHERE empresa_id = ? AND projeto_id = ?', [empresaId, finalProjectId]);
             
             for (let idx = 0; idx < modules.length; idx++) {
               const m = modules[idx];
-              // Associa a imagem correspondente da lista se disponível, senão gera o vetor SVG padrão
               const base64Image = imageBase64List[idx] || `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="80" height="80"><rect x="15" y="15" width="70" height="70" rx="4" fill="none" stroke="%2306b6d4" stroke-width="3" /><line x1="15" y1="45" x2="85" y2="45" stroke="%2306b6d4" stroke-width="2" /><line x1="50" y1="15" x2="50" y2="85" stroke="%2306b6d4" stroke-width="2" /><circle cx="43" cy="30" r="2.5" fill="%2306b6d4" /><circle cx="57" cy="30" r="2.5" fill="%2306b6d4" /><circle cx="43" cy="65" r="2.5" fill="%2306b6d4" /><circle cx="57" cy="65" r="2.5" fill="%2306b6d4" /></svg>`;
 
               await db.run(
-                'INSERT INTO Projeto_Modulo (projeto_id, modulo, peca, imagem) VALUES (?, ?, ?, ?)',
-                [finalProjectId, m.modulo, m.peca, base64Image]
+                'INSERT INTO Projeto_Modulo (empresa_id, projeto_id, modulo, peca, imagem) VALUES (?, ?, ?, ?, ?)',
+                [empresaId, finalProjectId, m.modulo, m.peca, base64Image]
               );
             }
             console.log(`[Modules] Gravados ${modules.length} módulos (com ${imageBase64List.length} imagens reais) para o projeto ID ${finalProjectId}`);
 
-            // Classifica os módulos para FAB.MON.CXA (Caixas) e FAB.ESP.PCA (Itens Especiais)
-            // Item Especial: Módulos cujo nome contenha "vidro", "espelho", "perfil", "provençal" / "provencal" ou "ripado" (case-insensitive)
             const especialKeywords = ['vidro', 'espelho', 'perfil', 'provençal', 'provencal', 'ripado'];
 
             let validModuloCount = 0;
@@ -2037,34 +2824,25 @@ app.post('/api/arquivos-importados', authenticateToken, uploadLayouts.array('arq
               }
             }
 
-            // Atualiza a quantidade do registro 'FAB.MON.CXA' em Projeto_Materiais
             await db.run(
-              "UPDATE Projeto_Materiais SET qtd = ? WHERE projeto_id = ? AND referencia = 'FAB.MON.CXA'",
-              [validModuloCount, finalProjectId]
+              "UPDATE Projeto_Materiais SET qtd = ? WHERE empresa_id = ? AND projeto_id = ? AND referencia = 'FAB.MON.CXA'",
+              [validModuloCount, empresaId, finalProjectId]
             );
-            console.log(`[Modules] Atualizado FAB.MON.CXA com quantidade ${validModuloCount} para o projeto ID ${finalProjectId}`);
-
-            // Atualiza a quantidade do registro 'FAB.ESP.PCA' em Projeto_Materiais
             await db.run(
-              "UPDATE Projeto_Materiais SET qtd = ? WHERE projeto_id = ? AND referencia = 'FAB.ESP.PCA'",
-              [especialModuloCount, finalProjectId]
+              "UPDATE Projeto_Materiais SET qtd = ? WHERE empresa_id = ? AND projeto_id = ? AND referencia = 'FAB.ESP.PCA'",
+              [especialModuloCount, empresaId, finalProjectId]
             );
-            console.log(`[Modules] Atualizado FAB.ESP.PCA com quantidade ${especialModuloCount} para o projeto ID ${finalProjectId}`);
-
-            // Atualiza a quantidade do registro 'FAB.EMB.UND' em Projeto_Materiais com a soma de FAB.MON.CXA + FAB.ESP.PCA
             const totalEmbalagem = validModuloCount + especialModuloCount;
             await db.run(
-              "UPDATE Projeto_Materiais SET qtd = ? WHERE projeto_id = ? AND referencia = 'FAB.EMB.UND'",
-              [totalEmbalagem, finalProjectId]
+              "UPDATE Projeto_Materiais SET qtd = ? WHERE empresa_id = ? AND projeto_id = ? AND referencia = 'FAB.EMB.UND'",
+              [totalEmbalagem, empresaId, finalProjectId]
             );
-            console.log(`[Modules] Atualizado FAB.EMB.UND com quantidade ${totalEmbalagem} para o projeto ID ${finalProjectId}`);
           }
         } catch (parseErr) {
           console.error('Erro ao fazer parse ou salvar módulos do PDF:', parseErr);
         }
       }
 
-      // Se for Layout do tipo 'PlanoCorte' (CuttingPlan), extrai os dados do PDF e popula a tabela Projeto_Chapa
       if (resolvedLayout === 'PlanoCorte') {
         try {
           const pdf = await getPdfParse();
@@ -2075,8 +2853,7 @@ app.post('/api/arquivos-importados', authenticateToken, uploadLayouts.array('arq
           
           const chapas = parsePdfText(pdfData.pages);
           if (chapas.length > 0 && finalProjectId) {
-            // Limpa registros anteriores de chapa desse projeto para evitar duplicatas
-            await db.run('DELETE FROM Projeto_Chapa WHERE projeto_id = ?', [finalProjectId]);
+            await db.run('DELETE FROM Projeto_Chapa WHERE empresa_id = ? AND projeto_id = ?', [empresaId, finalProjectId]);
             
             for (const c of chapas) {
               let updatedAcabamento = c.acabamento || '';
@@ -2097,37 +2874,32 @@ app.post('/api/arquivos-importados', authenticateToken, uploadLayouts.array('arq
               }
               for (const p of c.pecas) {
                 await db.run(
-                  'INSERT INTO Projeto_Chapa (projeto_id, chapa, acabamento, DescChapa, item, descricao, dimensao) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                  [finalProjectId, c.chapa, updatedAcabamento, c.descChapa || null, p.item, p.descricao, p.dimensao]
+                  'INSERT INTO Projeto_Chapa (empresa_id, projeto_id, chapa, acabamento, DescChapa, item, descricao, dimensao) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                  [empresaId, finalProjectId, c.chapa, updatedAcabamento, c.descChapa || null, p.item, p.descricao, p.dimensao]
                 );
               }
             }
             console.log(`[Cuts] Gravados ${chapas.reduce((acc, c) => acc + c.pecas.length, 0)} cortes para o projeto ID ${finalProjectId}`);
             
-            // Atualizar a quantidade de chapas do registro FAB.USI.CHP em Projeto_Materiais
             await db.run(
-              "UPDATE Projeto_Materiais SET qtd = ? WHERE projeto_id = ? AND referencia = 'FAB.USI.CHP'",
-              [chapas.length, finalProjectId]
+              "UPDATE Projeto_Materiais SET qtd = ? WHERE empresa_id = ? AND projeto_id = ? AND referencia = 'FAB.USI.CHP'",
+              [chapas.length, empresaId, finalProjectId]
             );
-            console.log(`[Cuts] Atualizado FAB.USI.CHP com quantidade ${chapas.length} para o projeto ID ${finalProjectId}`);
 
-            // Atualizar a quantidade de peças no campo ProjetoQtdPecas da tabela projetos
             const totalPecas = chapas.reduce((acc, c) => acc + c.pecas.length, 0);
             await db.run(
-              'UPDATE projetos SET ProjetoQtdPecas = ? WHERE id = ?',
-              [totalPecas, finalProjectId]
+              'UPDATE projetos SET ProjetoQtdPecas = ? WHERE empresa_id = ? AND id = ?',
+              [totalPecas, empresaId, finalProjectId]
             );
-            console.log(`[Cuts] Atualizado ProjetoQtdPecas com quantidade ${totalPecas} para o projeto ID ${finalProjectId}`);
           }
         } catch (parseErr) {
           console.error('Erro ao fazer parse ou salvar plano de corte do PDF:', parseErr);
         }
       }
 
-      // Se for Layout do tipo 'Etiqueta' (Program Etiqueta), extrai os dados e popula a tabela Projeto_Pecas usando CarregarPecas
       if (resolvedLayout === 'Etiqueta') {
         try {
-          await CarregarPecas(file, finalProjectId);
+          await CarregarPecas(file, finalProjectId, empresaId);
         } catch (parseErr) {
           console.error('Erro no upload ao invocar rotina CarregarPecas:', parseErr);
         }
@@ -2137,8 +2909,8 @@ app.post('/api/arquivos-importados', authenticateToken, uploadLayouts.array('arq
     await db.run('COMMIT');
 
     const uploadedFiles = await db.all(
-      `SELECT * FROM arquivos_importados WHERE id IN (${insertedIds.map(() => '?').join(',')})`,
-      insertedIds
+      `SELECT * FROM arquivos_importados WHERE empresa_id = ? AND id IN (${insertedIds.map(() => '?').join(',')})`,
+      [empresaId, ...insertedIds]
     );
     res.status(201).json(uploadedFiles);
   } catch (error) {
@@ -2149,9 +2921,10 @@ app.post('/api/arquivos-importados', authenticateToken, uploadLayouts.array('arq
 });
 
 app.get('/api/arquivos-importados/download/:id', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { id } = req.params;
   try {
-    const file = await db.get('SELECT * FROM arquivos_importados WHERE id = ?', [id]);
+    const file = await db.get('SELECT * FROM arquivos_importados WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     if (!file) {
       return res.status(404).json({ error: 'Arquivo não encontrado.' });
     }
@@ -2168,9 +2941,10 @@ app.get('/api/arquivos-importados/download/:id', authenticateToken, async (req, 
 });
 
 app.delete('/api/arquivos-importados/:id', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { id } = req.params;
   try {
-    const file = await db.get('SELECT * FROM arquivos_importados WHERE id = ?', [id]);
+    const file = await db.get('SELECT * FROM arquivos_importados WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     if (!file) {
       return res.status(404).json({ error: 'Arquivo não encontrado.' });
     }
@@ -2185,17 +2959,17 @@ app.delete('/api/arquivos-importados/:id', authenticateToken, async (req, res) =
     }
 
     // Exclui do banco
-    await db.run('DELETE FROM arquivos_importados WHERE id = ?', [id]);
+    await db.run('DELETE FROM arquivos_importados WHERE empresa_id = ? AND id = ?', [empresaId, id]);
 
     // Se for layout Etiqueta, remove as peças vinculadas se não houver outro arquivo de etiqueta para este projeto
     if (file.tipo_layout === 'Etiqueta' && file.projeto_id) {
       const remaining = await db.get(
-        "SELECT id FROM arquivos_importados WHERE projeto_id = ? AND tipo_layout = 'Etiqueta' AND id != ?",
-        [file.projeto_id, id]
+        "SELECT id FROM arquivos_importados WHERE empresa_id = ? AND projeto_id = ? AND tipo_layout = 'Etiqueta' AND id != ?",
+        [empresaId, file.projeto_id, id]
       );
       if (!remaining) {
-        await db.run('DELETE FROM Projeto_Pecas WHERE projeto_id = ?', [file.projeto_id]);
-        await db.run('UPDATE projetos SET ProjetoQtdPecas = 0 WHERE id = ?', [file.projeto_id]);
+        await db.run('DELETE FROM Projeto_Pecas WHERE empresa_id = ? AND projeto_id = ?', [empresaId, file.projeto_id]);
+        await db.run('UPDATE projetos SET ProjetoQtdPecas = 0 WHERE empresa_id = ? AND id = ?', [empresaId, file.projeto_id]);
       }
     }
 
@@ -2212,11 +2986,16 @@ app.delete('/api/arquivos-importados/:id', authenticateToken, async (req, res) =
 
 // GET /api/projetos/:id/anexos - Listar anexos do projeto
 app.get('/api/projetos/:id/anexos', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { id } = req.params;
   try {
+    const proj = await db.get('SELECT id FROM projetos WHERE empresa_id = ? AND id = ?', [empresaId, id]);
+    if (!proj) {
+      return res.status(404).json({ error: 'Projeto não encontrado.' });
+    }
     const list = await db.all(
-      `SELECT * FROM projeto_anexos WHERE projeto_id = ? ORDER BY criado_em DESC, id DESC`,
-      [id]
+      `SELECT * FROM projeto_anexos WHERE empresa_id = ? AND projeto_id = ? ORDER BY criado_em DESC, id DESC`,
+      [empresaId, id]
     );
     res.json(list);
   } catch (error) {
@@ -2227,10 +3006,11 @@ app.get('/api/projetos/:id/anexos', authenticateToken, async (req, res) => {
 
 // POST /api/projetos/:id/anexos - Upload de anexos para o projeto
 app.post('/api/projetos/:id/anexos', authenticateToken, uploadAnexos.array('arquivos'), async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { id } = req.params;
   const exibirNaProposta = req.body?.exibir_na_proposta === 'Nao' ? 'Nao' : 'Sim';
   try {
-    const proj = await db.get('SELECT * FROM projetos WHERE id = ?', [id]);
+    const proj = await db.get('SELECT * FROM projetos WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     if (!proj) {
       return res.status(404).json({ error: 'Projeto não encontrado.' });
     }
@@ -2239,7 +3019,7 @@ app.post('/api/projetos/:id/anexos', authenticateToken, uploadAnexos.array('arqu
       return res.status(400).json({ error: 'Nenhum arquivo enviado.' });
     }
 
-    const userName = req.user?.nome || req.user?.name || req.user?.login || 'Usuário';
+    const userName = req.auth.nome || req.user?.nome || req.user?.name || req.user?.login || 'Usuário';
     const inserted = [];
 
     for (const file of req.files) {
@@ -2248,14 +3028,14 @@ app.post('/api/projetos/:id/anexos', authenticateToken, uploadAnexos.array('arqu
         originalName = Buffer.from(originalName, 'latin1').toString('utf8');
       } catch (e) {}
 
-      const relativePath = `uploads/anexos/${file.filename}`;
+      const relativePath = `uploads/empresa_${empresaId}/anexos/${file.filename}`;
       const result = await db.run(
-        `INSERT INTO projeto_anexos (projeto_id, nome_original, nome_arquivo, caminho, tipo_mime, tamanho, exibir_na_proposta, criado_por_nome)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [id, originalName, file.filename, relativePath, file.mimetype, file.size, exibirNaProposta, userName]
+        `INSERT INTO projeto_anexos (empresa_id, projeto_id, nome_original, nome_arquivo, caminho, tipo_mime, tamanho, exibir_na_proposta, criado_por_nome)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [empresaId, id, originalName, file.filename, relativePath, file.mimetype, file.size, exibirNaProposta, userName]
       );
 
-      const item = await db.get('SELECT * FROM projeto_anexos WHERE id = ?', [result.lastID]);
+      const item = await db.get('SELECT * FROM projeto_anexos WHERE empresa_id = ? AND id = ?', [empresaId, result.lastID]);
       if (item) inserted.push(item);
     }
 
@@ -2268,10 +3048,11 @@ app.post('/api/projetos/:id/anexos', authenticateToken, uploadAnexos.array('arqu
 
 // PUT /api/projetos/anexos/:id - Atualizar configurações do anexo (ex: exibir_na_proposta)
 app.put('/api/projetos/anexos/:id', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { id } = req.params;
   const { exibir_na_proposta, nome_original } = req.body;
   try {
-    const anexo = await db.get('SELECT * FROM projeto_anexos WHERE id = ?', [id]);
+    const anexo = await db.get('SELECT * FROM projeto_anexos WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     if (!anexo) {
       return res.status(404).json({ error: 'Anexo não encontrado.' });
     }
@@ -2280,11 +3061,11 @@ app.put('/api/projetos/anexos/:id', authenticateToken, async (req, res) => {
     const newNome = nome_original || anexo.nome_original;
 
     await db.run(
-      `UPDATE projeto_anexos SET exibir_na_proposta = ?, nome_original = ? WHERE id = ?`,
-      [newExibir, newNome, id]
+      `UPDATE projeto_anexos SET exibir_na_proposta = ?, nome_original = ? WHERE empresa_id = ? AND id = ?`,
+      [newExibir, newNome, empresaId, id]
     );
 
-    const updated = await db.get('SELECT * FROM projeto_anexos WHERE id = ?', [id]);
+    const updated = await db.get('SELECT * FROM projeto_anexos WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     res.json(updated);
   } catch (error) {
     console.error('UPDATE ANEXO ERROR:', error);
@@ -2294,14 +3075,15 @@ app.put('/api/projetos/anexos/:id', authenticateToken, async (req, res) => {
 
 // GET /api/projetos/anexos/download/:id - Download de anexo do projeto
 app.get('/api/projetos/anexos/download/:id', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { id } = req.params;
   try {
-    const anexo = await db.get('SELECT * FROM projeto_anexos WHERE id = ?', [id]);
+    const anexo = await db.get('SELECT * FROM projeto_anexos WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     if (!anexo) {
       return res.status(404).json({ error: 'Anexo não encontrado.' });
     }
 
-    const fullPath = path.resolve(anexo.caminho);
+    const fullPath = getUploadPhysicalPath(anexo.caminho) || path.resolve(anexo.caminho);
     if (!fs.existsSync(fullPath)) {
       return res.status(404).json({ error: 'Arquivo físico não encontrado.' });
     }
@@ -2315,15 +3097,16 @@ app.get('/api/projetos/anexos/download/:id', authenticateToken, async (req, res)
 
 // DELETE /api/projetos/anexos/:id - Excluir anexo do projeto
 app.delete('/api/projetos/anexos/:id', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { id } = req.params;
   try {
-    const anexo = await db.get('SELECT * FROM projeto_anexos WHERE id = ?', [id]);
+    const anexo = await db.get('SELECT * FROM projeto_anexos WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     if (!anexo) {
       return res.status(404).json({ error: 'Anexo não encontrado.' });
     }
 
     try {
-      const fullPath = path.resolve(anexo.caminho);
+      const fullPath = getUploadPhysicalPath(anexo.caminho) || path.resolve(anexo.caminho);
       if (fs.existsSync(fullPath)) {
         fs.unlinkSync(fullPath);
       }
@@ -2331,7 +3114,7 @@ app.delete('/api/projetos/anexos/:id', authenticateToken, async (req, res) => {
       console.error('Erro ao excluir arquivo físico de anexo:', e);
     }
 
-    await db.run('DELETE FROM projeto_anexos WHERE id = ?', [id]);
+    await db.run('DELETE FROM projeto_anexos WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     res.json({ message: 'Anexo excluído com sucesso.' });
   } catch (error) {
     console.error('DELETE ANEXO ERROR:', error);
@@ -2340,9 +3123,12 @@ app.delete('/api/projetos/anexos/:id', authenticateToken, async (req, res) => {
 });
 
 app.get('/api/projetos/:projeto_id/materiais', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { projeto_id } = req.params;
   try {
-    const list = await db.all('SELECT * FROM Projeto_Materiais WHERE projeto_id = ? ORDER BY id ASC', [projeto_id]);
+    const proj = await db.get('SELECT id FROM projetos WHERE empresa_id = ? AND id = ?', [empresaId, projeto_id]);
+    if (!proj) return res.status(404).json({ error: 'Projeto não encontrado.' });
+    const list = await db.all('SELECT * FROM Projeto_Materiais WHERE empresa_id = ? AND projeto_id = ? ORDER BY id ASC', [empresaId, projeto_id]);
     res.json(list);
   } catch (error) {
     console.error('GET PROJECT MATERIALS ERROR:', error);
@@ -2351,9 +3137,12 @@ app.get('/api/projetos/:projeto_id/materiais', authenticateToken, async (req, re
 });
 
 app.get('/api/projetos/:projeto_id/modulos', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { projeto_id } = req.params;
   try {
-    const list = await db.all('SELECT * FROM Projeto_Modulo WHERE projeto_id = ? ORDER BY id ASC', [projeto_id]);
+    const proj = await db.get('SELECT id FROM projetos WHERE empresa_id = ? AND id = ?', [empresaId, projeto_id]);
+    if (!proj) return res.status(404).json({ error: 'Projeto não encontrado.' });
+    const list = await db.all('SELECT * FROM Projeto_Modulo WHERE empresa_id = ? AND projeto_id = ? ORDER BY id ASC', [empresaId, projeto_id]);
     res.json(list);
   } catch (error) {
     console.error('GET PROJECT MODULES ERROR:', error);
@@ -2362,9 +3151,12 @@ app.get('/api/projetos/:projeto_id/modulos', authenticateToken, async (req, res)
 });
 
 app.get('/api/projetos/:projeto_id/chapas', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { projeto_id } = req.params;
   try {
-    const list = await db.all('SELECT * FROM Projeto_Chapa WHERE projeto_id = ? ORDER BY id ASC', [projeto_id]);
+    const proj = await db.get('SELECT id FROM projetos WHERE empresa_id = ? AND id = ?', [empresaId, projeto_id]);
+    if (!proj) return res.status(404).json({ error: 'Projeto não encontrado.' });
+    const list = await db.all('SELECT * FROM Projeto_Chapa WHERE empresa_id = ? AND projeto_id = ? ORDER BY id ASC', [empresaId, projeto_id]);
     res.json(list);
   } catch (error) {
     console.error('GET PROJECT CHAPAS ERROR:', error);
@@ -2373,21 +3165,25 @@ app.get('/api/projetos/:projeto_id/chapas', authenticateToken, async (req, res) 
 });
 
 app.get('/api/projetos/:projeto_id/pecas', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { projeto_id } = req.params;
   try {
-    let list = await db.all('SELECT * FROM Projeto_Pecas WHERE projeto_id = ? ORDER BY id ASC', [projeto_id]);
+    const proj = await db.get('SELECT id FROM projetos WHERE empresa_id = ? AND id = ?', [empresaId, projeto_id]);
+    if (!proj) return res.status(404).json({ error: 'Projeto não encontrado.' });
+
+    let list = await db.all('SELECT * FROM Projeto_Pecas WHERE empresa_id = ? AND projeto_id = ? ORDER BY id ASC', [empresaId, projeto_id]);
     
     // Auto-recuperação: Se a tabela estiver vazia, mas existir um arquivo de Etiqueta importado para este projeto, carrega automaticamente
     if (list.length === 0) {
       const etiquetaFile = await db.get(
-        "SELECT * FROM arquivos_importados WHERE projeto_id = ? AND tipo_layout = 'Etiqueta' ORDER BY id DESC LIMIT 1",
-        [projeto_id]
+        "SELECT * FROM arquivos_importados WHERE empresa_id = ? AND projeto_id = ? AND tipo_layout = 'Etiqueta' ORDER BY id DESC LIMIT 1",
+        [empresaId, projeto_id]
       );
       if (etiquetaFile && fs.existsSync(etiquetaFile.caminho_arquivo)) {
         console.log(`[GET /pecas] Auto-recuperando peças do arquivo "${etiquetaFile.nome_arquivo}" para o projeto ${projeto_id}...`);
         try {
-          await CarregarPecas({ path: etiquetaFile.caminho_arquivo }, projeto_id);
-          list = await db.all('SELECT * FROM Projeto_Pecas WHERE projeto_id = ? ORDER BY id ASC', [projeto_id]);
+          await CarregarPecas({ path: etiquetaFile.caminho_arquivo }, projeto_id, empresaId);
+          list = await db.all('SELECT * FROM Projeto_Pecas WHERE empresa_id = ? AND projeto_id = ? ORDER BY id ASC', [empresaId, projeto_id]);
         } catch (procErr) {
           console.error('[GET /pecas] Erro ao auto-processar peças:', procErr);
         }
@@ -2403,11 +3199,13 @@ app.get('/api/projetos/:projeto_id/pecas', authenticateToken, async (req, res) =
 
 // 9. Budget Routes (Orçamentos)
 app.get('/api/orcamentos', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   try {
     await ensureOrcamentosSchema(db);
     const list = await db.all(`
       SELECT 
         o.numero,
+        o.empresa_id,
         o.data_criacao,
         o.cliente_id,
         o.descricao,
@@ -2457,24 +3255,25 @@ app.get('/api/orcamentos', authenticateToken, async (req, res) => {
         COALESCE((
           SELECT SUM(p.CustoMaterial)
           FROM projetos p
-          WHERE p.orcamento_numero = o.numero
+          WHERE p.empresa_id = o.empresa_id AND p.orcamento_numero = o.numero
         ), 0.0) as CustoMaterial,
         COALESCE((
           SELECT SUM(p.CustoProducao)
           FROM projetos p
-          WHERE p.orcamento_numero = o.numero
+          WHERE p.empresa_id = o.empresa_id AND p.orcamento_numero = o.numero
         ), 0.0) as CustoProducao,
         COALESCE((
           SELECT SUM(COALESCE(p.CustoTotal, (COALESCE(p.CustoMaterial, 0) + COALESCE(p.CustoProducao, 0))))
           FROM projetos p
-          WHERE p.orcamento_numero = o.numero
+          WHERE p.empresa_id = o.empresa_id AND p.orcamento_numero = o.numero
         ), 0.0) as CustoTotal
       FROM orcamentos o
-      JOIN clientes c ON o.cliente_id = c.id
-      LEFT JOIN Parametro_Financeiro pf ON pf.id = o.parametro_financeiro_id
-      LEFT JOIN configuracoes_financeiras cf ON cf.parametro_id = pf.id
+      JOIN clientes c ON o.cliente_id = c.id AND c.empresa_id = o.empresa_id
+      LEFT JOIN Parametro_Financeiro pf ON pf.id = o.parametro_financeiro_id AND pf.empresa_id = o.empresa_id
+      LEFT JOIN configuracoes_financeiras cf ON cf.parametro_id = pf.id AND cf.empresa_id = o.empresa_id
+      WHERE o.empresa_id = ?
       ORDER BY o.numero DESC
-    `);
+    `, [empresaId]);
     res.json(list);
   } catch (error) {
     console.error('GET BUDGETS ERROR:', error);
@@ -2483,12 +3282,38 @@ app.get('/api/orcamentos', authenticateToken, async (req, res) => {
 });
 
 app.post('/api/orcamentos', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { cliente_id, descricao, status, parametro_financeiro_id } = req.body;
   if (!cliente_id) {
     return res.status(400).json({ error: 'O cliente é obrigatório.' });
   }
 
   try {
+    // Valida que o cliente pertence à empresa autenticada
+    const ownedClient = await db.get('SELECT id FROM clientes WHERE empresa_id = ? AND id = ?', [empresaId, parseInt(cliente_id, 10)]);
+    if (!ownedClient) {
+      return res.status(404).json({ error: 'Cliente não encontrado.' });
+    }
+
+    // Resolve e valida o parâmetro financeiro na empresa autenticada
+    let paramIdVal = null;
+    if (parametro_financeiro_id !== undefined && parametro_financeiro_id !== null && parametro_financeiro_id !== '') {
+      const ownedParam = await db.get(
+        'SELECT id FROM Parametro_Financeiro WHERE empresa_id = ? AND id = ?',
+        [empresaId, parseInt(parametro_financeiro_id, 10)]
+      );
+      if (!ownedParam) {
+        return res.status(404).json({ error: 'Parâmetro financeiro não encontrado.' });
+      }
+      paramIdVal = ownedParam.id;
+    } else {
+      const defaultParam = await db.get(
+        'SELECT id FROM Parametro_Financeiro WHERE empresa_id = ? ORDER BY id ASC LIMIT 1',
+        [empresaId]
+      );
+      paramIdVal = defaultParam ? defaultParam.id : null;
+    }
+
     // Generate Budget Numero: Year(4) + Sequential(6)
     const currentYear = new Date().getFullYear();
     const minRange = currentYear * 1000000;
@@ -2504,16 +3329,16 @@ app.post('/api/orcamentos', authenticateToken, async (req, res) => {
       nextSeq = (row.maxNum % 1000000) + 1;
     }
     const orcamentoNumero = currentYear * 1000000 + nextSeq;
-    const paramIdVal = parametro_financeiro_id !== undefined && parametro_financeiro_id !== null ? parseInt(parametro_financeiro_id, 10) : 1;
 
     await db.run(
-      'INSERT INTO orcamentos (numero, cliente_id, descricao, status, parametro_financeiro_id) VALUES (?, ?, ?, ?, ?)',
-      [orcamentoNumero, parseInt(cliente_id), descricao || null, status || 'Em Aberto', paramIdVal]
+      'INSERT INTO orcamentos (empresa_id, numero, cliente_id, descricao, status, parametro_financeiro_id) VALUES (?, ?, ?, ?, ?, ?)',
+      [empresaId, orcamentoNumero, parseInt(cliente_id, 10), descricao || null, status || 'Em Aberto', paramIdVal]
     );
 
     const newBudget = await db.get(`
       SELECT 
         o.numero,
+        o.empresa_id,
         o.data_criacao,
         o.cliente_id,
         o.descricao,
@@ -2539,11 +3364,11 @@ app.post('/api/orcamentos', authenticateToken, async (req, res) => {
         0.0 as CustoMaterial,
         0.0 as CustoProducao
       FROM orcamentos o
-      JOIN clientes c ON o.cliente_id = c.id
-      LEFT JOIN Parametro_Financeiro pf ON pf.id = o.parametro_financeiro_id
-      LEFT JOIN configuracoes_financeiras cf ON cf.parametro_id = pf.id
-      WHERE o.numero = ?
-    `, [orcamentoNumero]);
+      JOIN clientes c ON o.cliente_id = c.id AND c.empresa_id = o.empresa_id
+      LEFT JOIN Parametro_Financeiro pf ON pf.id = o.parametro_financeiro_id AND pf.empresa_id = o.empresa_id
+      LEFT JOIN configuracoes_financeiras cf ON cf.parametro_id = pf.id AND cf.empresa_id = o.empresa_id
+      WHERE o.empresa_id = ? AND o.numero = ?
+    `, [empresaId, orcamentoNumero]);
     res.status(201).json(newBudget);
   } catch (error) {
     console.error('CREATE BUDGET ERROR:', error);
@@ -2552,23 +3377,37 @@ app.post('/api/orcamentos', authenticateToken, async (req, res) => {
 });
 
 app.put('/api/orcamentos/:numero', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { numero } = req.params;
   const { cliente_id, descricao, status, forma_pagamento_selecionada, anotacoes_cliente, parametro_financeiro_id } = req.body;
   try {
-    const budget = await db.get('SELECT * FROM orcamentos WHERE numero = ?', [numero]);
+    const budget = await db.get('SELECT * FROM orcamentos WHERE empresa_id = ? AND numero = ?', [empresaId, numero]);
     if (!budget) {
       return res.status(404).json({ error: 'Orçamento não encontrado.' });
     }
 
     const updatedClienteId = cliente_id !== undefined ? parseInt(cliente_id, 10) : budget.cliente_id;
+    if (cliente_id !== undefined) {
+      const ownedClient = await db.get('SELECT id FROM clientes WHERE empresa_id = ? AND id = ?', [empresaId, updatedClienteId]);
+      if (!ownedClient) {
+        return res.status(404).json({ error: 'Cliente não encontrado.' });
+      }
+    }
+
     const updatedDescricao = descricao !== undefined ? descricao : budget.descricao;
     const updatedStatus = status !== undefined ? status : (budget.status || 'Em Aberto');
     const updatedFormaPag = forma_pagamento_selecionada !== undefined ? forma_pagamento_selecionada : budget.forma_pagamento_selecionada;
     const updatedAnotacoes = anotacoes_cliente !== undefined ? anotacoes_cliente : budget.anotacoes_cliente;
     const isBudgetEmAberto = !budget.status || budget.status === 'Em Aberto' || budget.status === 'Em Negociação' || budget.status === 'Pendente';
-    const updatedParamId = (isBudgetEmAberto && parametro_financeiro_id !== undefined && parametro_financeiro_id !== null)
-      ? parseInt(parametro_financeiro_id, 10)
-      : (budget.parametro_financeiro_id || 1);
+    let updatedParamId = budget.parametro_financeiro_id;
+    if (isBudgetEmAberto && parametro_financeiro_id !== undefined && parametro_financeiro_id !== null) {
+      const ownedParam = await db.get('SELECT id FROM Parametro_Financeiro WHERE empresa_id = ? AND id = ?', [empresaId, parseInt(parametro_financeiro_id, 10)]);
+      if (!ownedParam) {
+        return res.status(404).json({ error: 'Parâmetro financeiro não encontrado.' });
+      }
+      updatedParamId = ownedParam.id;
+    }
+
     const dataAprovacao = (updatedStatus === 'Aprovado' && !budget.data_aprovacao)
       ? formatDateTimeForMySQL(new Date())
       : (updatedStatus !== 'Aprovado' && updatedStatus !== 'Efetivado' ? null : budget.data_aprovacao);
@@ -2585,7 +3424,7 @@ app.put('/api/orcamentos/:numero', authenticateToken, async (req, res) => {
 
     if (updatedStatus === 'Em Aberto') {
       // Se retornar para Em Aberto, exclui parcelas do fluxo financeiro e limpa assinatura
-      await db.run('DELETE FROM FluxoRecebimento WHERE orcamento_numero = ?', [numero]);
+      await db.run('DELETE FROM FluxoRecebimento WHERE empresa_id = ? AND orcamento_numero = ?', [empresaId, numero]);
     }
 
     const dataAssinaturaVal = updatedStatus === 'Em Aberto' ? null : budget.data_assinatura;
@@ -2593,13 +3432,14 @@ app.put('/api/orcamentos/:numero', authenticateToken, async (req, res) => {
     const usuarioAssinaturaVal = updatedStatus === 'Em Aberto' ? null : budget.usuario_assinatura_nome;
 
     await db.run(
-      'UPDATE orcamentos SET cliente_id = ?, descricao = ?, status = ?, forma_pagamento_selecionada = ?, anotacoes_cliente = ?, data_aprovacao = ?, fluxo_efetivado = ?, parametro_financeiro_id = ?, fluxo_financeiro = ?, data_assinatura = ?, assinatura_responsavel = ?, usuario_assinatura_nome = ? WHERE numero = ?',
-      [updatedClienteId, updatedDescricao, updatedStatus, updatedFormaPag, updatedAnotacoes, dataAprovacao, fluxoEfetivadoVal, updatedParamId, updatedFluxoFinanceiro, dataAssinaturaVal, assinaturaRespVal, usuarioAssinaturaVal, numero]
+      'UPDATE orcamentos SET cliente_id = ?, descricao = ?, status = ?, forma_pagamento_selecionada = ?, anotacoes_cliente = ?, data_aprovacao = ?, fluxo_efetivado = ?, parametro_financeiro_id = ?, fluxo_financeiro = ?, data_assinatura = ?, assinatura_responsavel = ?, usuario_assinatura_nome = ? WHERE empresa_id = ? AND numero = ?',
+      [updatedClienteId, updatedDescricao, updatedStatus, updatedFormaPag, updatedAnotacoes, dataAprovacao, fluxoEfetivadoVal, updatedParamId, updatedFluxoFinanceiro, dataAssinaturaVal, assinaturaRespVal, usuarioAssinaturaVal, empresaId, numero]
     );
 
     const updated = await db.get(`
       SELECT 
         o.numero,
+        o.empresa_id,
         o.data_criacao,
         o.cliente_id,
         o.descricao,
@@ -2630,19 +3470,19 @@ app.put('/api/orcamentos/:numero', authenticateToken, async (req, res) => {
         COALESCE((
           SELECT SUM(p.CustoMaterial)
           FROM projetos p
-          WHERE p.orcamento_numero = o.numero
+          WHERE p.empresa_id = o.empresa_id AND p.orcamento_numero = o.numero
         ), 0.0) as CustoMaterial,
         COALESCE((
           SELECT SUM(p.CustoProducao)
           FROM projetos p
-          WHERE p.orcamento_numero = o.numero
+          WHERE p.empresa_id = o.empresa_id AND p.orcamento_numero = o.numero
         ), 0.0) as CustoProducao
       FROM orcamentos o
-      JOIN clientes c ON o.cliente_id = c.id
-      LEFT JOIN Parametro_Financeiro pf ON pf.id = o.parametro_financeiro_id
-      LEFT JOIN configuracoes_financeiras cf ON cf.parametro_id = pf.id
-      WHERE o.numero = ?
-    `, [numero]);
+      JOIN clientes c ON o.cliente_id = c.id AND c.empresa_id = o.empresa_id
+      LEFT JOIN Parametro_Financeiro pf ON pf.id = o.parametro_financeiro_id AND pf.empresa_id = o.empresa_id
+      LEFT JOIN configuracoes_financeiras cf ON cf.parametro_id = pf.id AND cf.empresa_id = o.empresa_id
+      WHERE o.empresa_id = ? AND o.numero = ?
+    `, [empresaId, numero]);
 
     res.json(updated);
   } catch (error) {
@@ -2652,51 +3492,53 @@ app.put('/api/orcamentos/:numero', authenticateToken, async (req, res) => {
 });
 
 app.delete('/api/orcamentos/:numero', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { numero } = req.params;
   try {
-    const budget = await db.get('SELECT * FROM orcamentos WHERE numero = ?', [numero]);
+    const budget = await db.get('SELECT * FROM orcamentos WHERE empresa_id = ? AND numero = ?', [empresaId, numero]);
     if (!budget) {
       return res.status(404).json({ error: 'Orçamento não encontrado.' });
     }
 
     // 1. Buscar todos os projetos do orçamento para excluir seus dados subordinados e arquivos
-    const projs = await db.all('SELECT id FROM projetos WHERE orcamento_numero = ?', [numero]);
+    const projs = await db.all('SELECT id FROM projetos WHERE empresa_id = ? AND orcamento_numero = ?', [empresaId, numero]);
     for (const p of projs) {
-      const anexos = await db.all('SELECT * FROM projeto_anexos WHERE projeto_id = ?', [p.id]);
+      const anexos = await db.all('SELECT * FROM projeto_anexos WHERE empresa_id = ? AND projeto_id = ?', [empresaId, p.id]);
       for (const a of anexos) {
         try {
           if (a.caminho) {
-            const fullPath = path.resolve(a.caminho);
+            const fullPath = resolveSafeUploadPath(uploadsBaseDir, a.caminho) || path.resolve(a.caminho);
             if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
           }
         } catch (e) {}
       }
-      await db.run('DELETE FROM projeto_anexos WHERE projeto_id = ?', [p.id]);
+      await db.run('DELETE FROM projeto_anexos WHERE empresa_id = ? AND projeto_id = ?', [empresaId, p.id]);
 
-      const arquivos = await db.all('SELECT * FROM arquivos_importados WHERE projeto_id = ?', [p.id]);
+      const arquivos = await db.all('SELECT * FROM arquivos_importados WHERE empresa_id = ? AND projeto_id = ?', [empresaId, p.id]);
       for (const f of arquivos) {
         try {
           if (f.caminho_arquivo && fs.existsSync(f.caminho_arquivo)) fs.unlinkSync(f.caminho_arquivo);
         } catch (e) {}
       }
-      await db.run('DELETE FROM arquivos_importados WHERE projeto_id = ?', [p.id]);
+      await db.run('DELETE FROM arquivos_importados WHERE empresa_id = ? AND projeto_id = ?', [empresaId, p.id]);
 
-      await db.run('DELETE FROM ProjetoItem WHERE ProjetoID = ?', [p.id]);
-      await db.run('DELETE FROM Projeto_Materiais WHERE projeto_id = ?', [p.id]);
-      await db.run('DELETE FROM Projeto_Pecas WHERE projeto_id = ?', [p.id]);
-      await db.run('DELETE FROM Projeto_Modulo WHERE projeto_id = ?', [p.id]);
-      await db.run('DELETE FROM Projeto_Chapa WHERE projeto_id = ?', [p.id]);
+      await db.run('DELETE FROM ProjetoItem WHERE empresa_id = ? AND ProjetoID = ?', [empresaId, p.id]);
+      await db.run('DELETE FROM Projeto_Materiais WHERE empresa_id = ? AND projeto_id = ?', [empresaId, p.id]);
+      await db.run('DELETE FROM Projeto_Pecas WHERE empresa_id = ? AND projeto_id = ?', [empresaId, p.id]);
+      await db.run('DELETE FROM Projeto_Modulo WHERE empresa_id = ? AND projeto_id = ?', [empresaId, p.id]);
+      await db.run('DELETE FROM Projeto_Chapa WHERE empresa_id = ? AND projeto_id = ?', [empresaId, p.id]);
     }
 
-    // 2. Excluir links de compartilhamento e histórico de propostas
-    await db.run('DELETE FROM proposta_compartilhamentos WHERE orcamento_numero = ?', [numero]);
-    await db.run('DELETE FROM propostas WHERE orcamento_numero = ?', [numero]);
+    // 2. Excluir links de compartilhamento, fluxo de recebimento e histórico de propostas
+    await db.run('DELETE FROM FluxoRecebimento WHERE empresa_id = ? AND orcamento_numero = ?', [empresaId, numero]);
+    await db.run('DELETE FROM proposta_compartilhamentos WHERE empresa_id = ? AND orcamento_numero = ?', [empresaId, numero]);
+    await db.run('DELETE FROM propostas WHERE empresa_id = ? AND orcamento_numero = ?', [empresaId, numero]);
 
     // 3. Excluir os projetos do orçamento
-    await db.run('DELETE FROM projetos WHERE orcamento_numero = ?', [numero]);
+    await db.run('DELETE FROM projetos WHERE empresa_id = ? AND orcamento_numero = ?', [empresaId, numero]);
 
     // 4. Excluir o orçamento
-    await db.run('DELETE FROM orcamentos WHERE numero = ?', [numero]);
+    await db.run('DELETE FROM orcamentos WHERE empresa_id = ? AND numero = ?', [empresaId, numero]);
 
     res.json({ message: 'Orçamento, seus projetos e todos os dados subordinados foram removidos com sucesso.' });
   } catch (error) {
@@ -2706,12 +3548,14 @@ app.delete('/api/orcamentos/:numero', authenticateToken, async (req, res) => {
 });
 
 app.get('/api/orcamentos/:numero', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { numero } = req.params;
   try {
     await ensureOrcamentosSchema(db);
     const budget = await db.get(`
       SELECT 
         o.numero,
+        o.empresa_id,
         o.data_criacao,
         o.cliente_id,
         o.descricao,
@@ -2760,19 +3604,19 @@ app.get('/api/orcamentos/:numero', authenticateToken, async (req, res) => {
         COALESCE((
           SELECT SUM(p.CustoMaterial)
           FROM projetos p
-          WHERE p.orcamento_numero = o.numero
+          WHERE p.empresa_id = o.empresa_id AND p.orcamento_numero = o.numero
         ), 0.0) as CustoMaterial,
         COALESCE((
           SELECT SUM(p.CustoProducao)
           FROM projetos p
-          WHERE p.orcamento_numero = o.numero
+          WHERE p.empresa_id = o.empresa_id AND p.orcamento_numero = o.numero
         ), 0.0) as CustoProducao
       FROM orcamentos o
-      JOIN clientes c ON o.cliente_id = c.id
-      LEFT JOIN Parametro_Financeiro pf ON pf.id = o.parametro_financeiro_id
-      LEFT JOIN configuracoes_financeiras cf ON cf.parametro_id = pf.id
-      WHERE o.numero = ?
-    `, [numero]);
+      JOIN clientes c ON o.cliente_id = c.id AND c.empresa_id = o.empresa_id
+      LEFT JOIN Parametro_Financeiro pf ON pf.id = o.parametro_financeiro_id AND pf.empresa_id = o.empresa_id
+      LEFT JOIN configuracoes_financeiras cf ON cf.parametro_id = pf.id AND cf.empresa_id = o.empresa_id
+      WHERE o.empresa_id = ? AND o.numero = ?
+    `, [empresaId, numero]);
     if (!budget) {
       return res.status(404).json({ error: 'Orçamento não encontrado.' });
     }
@@ -2785,19 +3629,20 @@ app.get('/api/orcamentos/:numero', authenticateToken, async (req, res) => {
 
 // POST /api/orcamentos/:numero/assinar-contrato - Assinatura digital do contrato pelo usuário logado / empresa
 app.post('/api/orcamentos/:numero/assinar-contrato', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { numero } = req.params;
   try {
-    const budget = await db.get('SELECT * FROM orcamentos WHERE numero = ?', [numero]);
+    const budget = await db.get('SELECT * FROM orcamentos WHERE empresa_id = ? AND numero = ?', [empresaId, numero]);
     if (!budget) {
       return res.status(404).json({ error: 'Orçamento não encontrado.' });
     }
 
-    const userId = req.user?.id;
+    const userId = req.auth.userId;
     let userAssinatura = null;
-    let userName = req.user?.nome || '';
+    let userName = req.auth.nome || '';
 
     if (userId) {
-      const userRow = await db.get('SELECT * FROM usuarios WHERE id = ?', [userId]);
+      const userRow = await db.get('SELECT * FROM usuarios WHERE empresa_id = ? AND id = ?', [empresaId, userId]);
       if (userRow) {
         userAssinatura = userRow.assinatura || null;
         userName = userRow.nome || userName;
@@ -2807,7 +3652,7 @@ app.post('/api/orcamentos/:numero/assinar-contrato', authenticateToken, async (r
     // Se o usuário não tiver assinatura cadastrada, buscar na tabela de parâmetros a imagem da chave "EMP_ASS"
     if (!userAssinatura) {
       try {
-        const paramRow = await db.get('SELECT conteudo FROM parametros_empresa WHERE chave = ?', ['EMP_ASS']);
+        const paramRow = await db.get('SELECT conteudo FROM parametros_empresa WHERE empresa_id = ? AND chave = ?', [empresaId, 'EMP_ASS']);
         userAssinatura = paramRow?.conteudo || req.body.assinatura || '';
       } catch (paramErr) {
         userAssinatura = req.body.assinatura || '';
@@ -2822,10 +3667,10 @@ app.post('/api/orcamentos/:numero/assinar-contrato', authenticateToken, async (r
         data_assinatura = ?, 
         assinatura_responsavel = ?, 
         usuario_assinatura_nome = ? 
-      WHERE numero = ?
-    `, [dataAssinatura, userAssinatura, userName, numero]);
+      WHERE empresa_id = ? AND numero = ?
+    `, [dataAssinatura, userAssinatura, userName, empresaId, numero]);
 
-    const updated = await db.get('SELECT * FROM orcamentos WHERE numero = ?', [numero]);
+    const updated = await db.get('SELECT * FROM orcamentos WHERE empresa_id = ? AND numero = ?', [empresaId, numero]);
     res.json({
       message: 'Contrato assinado com sucesso!',
       data_assinatura: dataAssinatura,
@@ -2841,6 +3686,7 @@ app.post('/api/orcamentos/:numero/assinar-contrato', authenticateToken, async (r
 
 // POST /api/orcamentos/:numero/conclusao - Conclusão e fechamento de proposta com descontos e forma de pagamento
 app.post('/api/orcamentos/:numero/conclusao', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { numero } = req.params;
   const { 
     desconto_percentual, 
@@ -2853,7 +3699,7 @@ app.post('/api/orcamentos/:numero/conclusao', authenticateToken, async (req, res
   } = req.body;
 
   try {
-    const budget = await db.get('SELECT * FROM orcamentos WHERE numero = ?', [numero]);
+    const budget = await db.get('SELECT * FROM orcamentos WHERE empresa_id = ? AND numero = ?', [empresaId, numero]);
     if (!budget) {
       return res.status(404).json({ error: 'Orçamento não encontrado.' });
     }
@@ -2862,20 +3708,6 @@ app.post('/api/orcamentos/:numero/conclusao', authenticateToken, async (req, res
     if (currentStatus !== 'em aberto') {
       return res.status(400).json({ error: 'Não é permitido alterar proposta de orçamento que não esteja Em Aberto.' });
     }
-
-    // Garantir que todas as colunas existem na tabela orcamentos em tempo de execução
-    const tableInfo = await db.all("PRAGMA table_info(orcamentos)");
-    const colNames = tableInfo.map(c => c.name);
-    if (!colNames.includes('desconto_percentual')) await db.exec("ALTER TABLE orcamentos ADD COLUMN desconto_percentual DECIMAL(6,2) DEFAULT 0.0");
-    if (!colNames.includes('desconto_valor')) await db.exec("ALTER TABLE orcamentos ADD COLUMN desconto_valor DECIMAL(15,2) DEFAULT 0.0");
-    if (!colNames.includes('total_venda')) await db.exec("ALTER TABLE orcamentos ADD COLUMN total_venda DECIMAL(15,2) DEFAULT NULL");
-    if (!colNames.includes('forma_pagamento_selecionada')) await db.exec("ALTER TABLE orcamentos ADD COLUMN forma_pagamento_selecionada TEXT");
-    if (!colNames.includes('anotacoes_cliente')) await db.exec("ALTER TABLE orcamentos ADD COLUMN anotacoes_cliente TEXT");
-    if (!colNames.includes('anotacoes_conclusao')) await db.exec("ALTER TABLE orcamentos ADD COLUMN anotacoes_conclusao TEXT");
-    if (!colNames.includes('data_aprovacao')) await db.exec("ALTER TABLE orcamentos ADD COLUMN data_aprovacao TEXT");
-    if (!colNames.includes('data_entrada')) await db.exec("ALTER TABLE orcamentos ADD COLUMN data_entrada TEXT");
-    if (!colNames.includes('fluxo_financeiro')) await db.exec("ALTER TABLE orcamentos ADD COLUMN fluxo_financeiro TEXT");
-    if (!colNames.includes('status')) await db.exec("ALTER TABLE orcamentos ADD COLUMN status TEXT DEFAULT 'Em Aberto'");
 
     const descPerc = parseFloat(desconto_percentual) || 0.0;
     const descVlr = parseFloat(desconto_valor) || 0.0;
@@ -2911,8 +3743,8 @@ app.post('/api/orcamentos/:numero/conclusao', authenticateToken, async (req, res
         data_aprovacao = ?,
         data_entrada = ?,
         fluxo_financeiro = ?
-      WHERE numero = ?
-    `, [descPerc, descVlr, precoFinal, formaPag, anotacoesCli, anotacoesConc, novoStatus, novoStatus, dataAprovacao, dataEntrada, fluxoFinanceiro, numero]);
+      WHERE empresa_id = ? AND numero = ?
+    `, [descPerc, descVlr, precoFinal, formaPag, anotacoesCli, anotacoesConc, novoStatus, novoStatus, dataAprovacao, dataEntrada, fluxoFinanceiro, empresaId, numero]);
 
     // Sincronizar com a versão mais recente da proposta se houver
     if (formaPag || novoStatus === 'Aprovado') {
@@ -2922,29 +3754,24 @@ app.post('/api/orcamentos/:numero/conclusao', authenticateToken, async (req, res
           `UPDATE propostas 
            SET status = ?, 
                forma_pagamento_selecionada = COALESCE(?, forma_pagamento_selecionada) 
-           WHERE orcamento_numero = ? 
+           WHERE empresa_id = ? AND orcamento_numero = ? 
            ORDER BY versao DESC, id DESC LIMIT 1`,
-          [propStatus, formaPag, numero]
+          [propStatus, formaPag, empresaId, numero]
         );
       } else if (formaPag) {
         await db.run(
           `UPDATE propostas 
            SET forma_pagamento_selecionada = ? 
-           WHERE orcamento_numero = ? 
+           WHERE empresa_id = ? AND orcamento_numero = ? 
            ORDER BY versao DESC, id DESC LIMIT 1`,
-          [formaPag, numero]
+          [formaPag, empresaId, numero]
         );
       }
     }
 
     // Se houver projetos e um novo preço final, distribui proporcionalmente no preco_venda_final dos projetos
-    const projetos = await db.all('SELECT * FROM projetos WHERE orcamento_numero = ? ORDER BY id ASC', [numero]);
+    const projetos = await db.all('SELECT * FROM projetos WHERE empresa_id = ? AND orcamento_numero = ? ORDER BY id ASC', [empresaId, numero]);
     if (projetos.length > 0 && precoFinal !== null && precoFinal > 0) {
-      const projCols = await db.all("PRAGMA table_info(projetos)");
-      if (!projCols.some(c => c.name === 'preco_venda_final')) {
-        await db.exec("ALTER TABLE projetos ADD COLUMN preco_venda_final DECIMAL(15,2) DEFAULT 0.0");
-      }
-
       const somaOriginal = projetos.reduce((sum, p) => sum + (parseFloat(p.preco_venda_final) || 0), 0);
       let acumulado = 0;
       for (let i = 0; i < projetos.length; i++) {
@@ -2957,13 +3784,14 @@ app.post('/api/orcamentos/:numero/conclusao', authenticateToken, async (req, res
           novoPrecoProj = Math.round(precoFinal * ratio * 100) / 100;
           acumulado += novoPrecoProj;
         }
-        await db.run('UPDATE projetos SET preco_venda_final = ? WHERE id = ?', [novoPrecoProj, p.id]);
+        await db.run('UPDATE projetos SET preco_venda_final = ? WHERE empresa_id = ? AND id = ?', [novoPrecoProj, empresaId, p.id]);
       }
     }
 
     const updatedBudget = await db.get(`
       SELECT 
         o.numero,
+        o.empresa_id,
         o.data_criacao,
         o.cliente_id,
         o.descricao,
@@ -2979,12 +3807,12 @@ app.post('/api/orcamentos/:numero/conclusao', authenticateToken, async (req, res
         o.data_entrada,
         o.fluxo_financeiro,
         c.nome as cliente_nome,
-        COALESCE((SELECT SUM(p.CustoMaterial) FROM projetos p WHERE p.orcamento_numero = o.numero), 0.0) as CustoMaterial,
-        COALESCE((SELECT SUM(p.CustoProducao) FROM projetos p WHERE p.orcamento_numero = o.numero), 0.0) as CustoProducao
+        COALESCE((SELECT SUM(p.CustoMaterial) FROM projetos p WHERE p.empresa_id = o.empresa_id AND p.orcamento_numero = o.numero), 0.0) as CustoMaterial,
+        COALESCE((SELECT SUM(p.CustoProducao) FROM projetos p WHERE p.empresa_id = o.empresa_id AND p.orcamento_numero = o.numero), 0.0) as CustoProducao
       FROM orcamentos o
-      LEFT JOIN clientes c ON o.cliente_id = c.id
-      WHERE o.numero = ?
-    `, [numero]);
+      LEFT JOIN clientes c ON o.cliente_id = c.id AND c.empresa_id = o.empresa_id
+      WHERE o.empresa_id = ? AND o.numero = ?
+    `, [empresaId, numero]);
 
     res.json({
       success: true,
@@ -2998,10 +3826,17 @@ app.post('/api/orcamentos/:numero/conclusao', authenticateToken, async (req, res
 });
 
 // Garante que a tabela ProjetoItem está devidamente populada caso o projeto possua itens em Projeto_Materiais
-async function ensureProjetoItemsPopulated(projectId) {
-  const countRow = await db.get('SELECT COUNT(*) as count FROM ProjetoItem WHERE ProjetoID = ?', [projectId]);
+async function ensureProjetoItemsPopulated(projectId, empresaId = null) {
+  let resolvedEmpresaId = empresaId;
+  if (!resolvedEmpresaId) {
+    const pRow = await db.get('SELECT empresa_id FROM projetos WHERE id = ?', [projectId]);
+    if (!pRow) return;
+    resolvedEmpresaId = pRow.empresa_id;
+  }
+
+  const countRow = await db.get('SELECT COUNT(*) as count FROM ProjetoItem WHERE empresa_id = ? AND ProjetoID = ?', [resolvedEmpresaId, projectId]);
   if (!countRow || countRow.count === 0) {
-    const materials = await db.all('SELECT * FROM Projeto_Materiais WHERE projeto_id = ? ORDER BY id ASC', [projectId]);
+    const materials = await db.all('SELECT * FROM Projeto_Materiais WHERE empresa_id = ? AND projeto_id = ? ORDER BY id ASC', [resolvedEmpresaId, projectId]);
     if (materials && materials.length > 0) {
       let currentSeq = 1;
       const monItem = materials.find(m => m.referencia === 'FAB.MON.CXA');
@@ -3012,7 +3847,7 @@ async function ensureProjetoItemsPopulated(projectId) {
 
       for (const m of materials) {
         if (m.referencia === 'FAB.QTD.PCA') continue;
-        let globalMat = await db.get('SELECT * FROM Material WHERE MaterialReferencia = ?', [m.referencia]);
+        let globalMat = await db.get('SELECT * FROM Material WHERE empresa_id = ? AND MaterialReferencia = ?', [resolvedEmpresaId, m.referencia]);
         if (!globalMat) {
           let normUn = (m.un || '').toUpperCase().trim();
           if (normUn === 'UN') normUn = 'UNI';
@@ -3020,9 +3855,9 @@ async function ensureProjetoItemsPopulated(projectId) {
           if (!allowedUnits.includes(normUn)) normUn = 'UNI';
           const matTipo = (m.tipo || (m.referencia && m.referencia.startsWith('FAB.') ? 'Serviço' : 'Produto'));
           await db.run(
-            `INSERT INTO Material (MaterialReferencia, MaterialDescricao, MaterialUnidade, MaterialValorUnitario, GrupoSigla, ProdutoGrupo, MaterialTipo, MaterialTempo)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-            [m.referencia, m.descricao || m.referencia, normUn, 0.0, null, 8, matTipo, 0]
+            `INSERT INTO Material (empresa_id, MaterialReferencia, MaterialDescricao, MaterialUnidade, MaterialValorUnitario, GrupoSigla, ProdutoGrupo, MaterialTipo, MaterialTempo)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [resolvedEmpresaId, m.referencia, m.descricao || m.referencia, normUn, 0.0, null, 8, matTipo, 0]
           );
           globalMat = {
             MaterialReferencia: m.referencia,
@@ -3047,9 +3882,9 @@ async function ensureProjetoItemsPopulated(projectId) {
         const duracao = Math.round(tempo * qtd);
 
         await db.run(
-          `INSERT INTO ProjetoItem (ProjetoID, ProjetoItemID, MaterialReferencia, ProjetoItemVlrUnit, ProjetoItemUnidade, ProjetoItemQtd, ProjetoItemTotal, ProjetoItemTempo, ProjetoItemDuracao)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [projectId, currentSeq, m.referencia, vlrUnit, unidade, qtd, total, tempo, duracao]
+          `INSERT INTO ProjetoItem (empresa_id, ProjetoID, ProjetoItemID, MaterialReferencia, ProjetoItemVlrUnit, ProjetoItemUnidade, ProjetoItemQtd, ProjetoItemTotal, ProjetoItemTempo, ProjetoItemDuracao)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [resolvedEmpresaId, projectId, currentSeq, m.referencia, vlrUnit, unidade, qtd, total, tempo, duracao]
         );
         currentSeq++;
       }
@@ -3058,32 +3893,39 @@ async function ensureProjetoItemsPopulated(projectId) {
 }
 
 // Recalculate consolidated project costs (Material vs. Production) and total duration
-async function recalculateProjectCosts(projectId) {
+async function recalculateProjectCosts(projectId, empresaId = null) {
   try {
-    // 1. Garantir que ProjetoItem está populado se Projeto_Materiais tiver registros
-    await ensureProjetoItemsPopulated(projectId);
+    let resolvedEmpresaId = empresaId;
+    if (!resolvedEmpresaId) {
+      const pRow = await db.get('SELECT empresa_id FROM projetos WHERE id = ?', [projectId]);
+      if (!pRow) return;
+      resolvedEmpresaId = pRow.empresa_id;
+    }
 
-    // 2. Se o orçamento não estiver aprovado, sincroniza os preços/tempos unitários de ProjetoItem com o cadastro global Material
-    const projData = await db.get('SELECT * FROM projetos WHERE id = ?', [projectId]);
+    // 1. Garantir que ProjetoItem está populado se Projeto_Materiais tiver registros
+    await ensureProjetoItemsPopulated(projectId, resolvedEmpresaId);
+
+    // 2. Se o orçamento não estiver aprovado, sincroniza os preços/tempos unitários de ProjetoItem com o cadastro Material da empresa
+    const projData = await db.get('SELECT * FROM projetos WHERE empresa_id = ? AND id = ?', [resolvedEmpresaId, projectId]);
     if (projData && projData.orcamento_numero) {
-      const budgetCheck = await db.get('SELECT status FROM orcamentos WHERE numero = ?', [projData.orcamento_numero]);
+      const budgetCheck = await db.get('SELECT status FROM orcamentos WHERE empresa_id = ? AND numero = ?', [resolvedEmpresaId, projData.orcamento_numero]);
       if (budgetCheck?.status !== 'Aprovado') {
         await db.run(`
           UPDATE ProjetoItem pi
-          JOIN Material m ON pi.MaterialReferencia = m.MaterialReferencia
+          JOIN Material m ON pi.MaterialReferencia = m.MaterialReferencia AND pi.empresa_id = m.empresa_id
           SET 
             pi.ProjetoItemVlrUnit = m.MaterialValorUnitario,
             pi.ProjetoItemTotal = pi.ProjetoItemQtd * m.MaterialValorUnitario,
             pi.ProjetoItemTempo = m.MaterialTempo,
             pi.ProjetoItemDuracao = ROUND(m.MaterialTempo * pi.ProjetoItemQtd)
-          WHERE pi.ProjetoID = ?
-        `, [projectId]);
+          WHERE pi.empresa_id = ? AND pi.ProjetoID = ?
+        `, [resolvedEmpresaId, projectId]);
       }
     }
 
     const monCliItem = await db.get(
-      "SELECT ROUND(ProjetoItemQtd) as diasMontagem FROM ProjetoItem WHERE ProjetoID = ? AND MaterialReferencia = 'FAB.MON.CLI'",
-      [projectId]
+      "SELECT ROUND(ProjetoItemQtd) as diasMontagem FROM ProjetoItem WHERE empresa_id = ? AND ProjetoID = ? AND MaterialReferencia = 'FAB.MON.CLI'",
+      [resolvedEmpresaId, projectId]
     );
 
     let updateQuery = `
@@ -3092,49 +3934,60 @@ async function recalculateProjectCosts(projectId) {
         CustoMaterial = COALESCE((
           SELECT SUM(pi.ProjetoItemTotal)
           FROM ProjetoItem pi
-          LEFT JOIN Material m ON pi.MaterialReferencia = m.MaterialReferencia
-          WHERE pi.ProjetoID = ? AND (m.MaterialTipo = 'Produto' OR m.MaterialTipo IS NULL)
+          LEFT JOIN Material m ON pi.MaterialReferencia = m.MaterialReferencia AND pi.empresa_id = m.empresa_id
+          WHERE pi.empresa_id = ? AND pi.ProjetoID = ? AND (m.MaterialTipo = 'Produto' OR m.MaterialTipo IS NULL)
         ), 0.0),
         CustoProducao = COALESCE((
           SELECT SUM(pi.ProjetoItemTotal)
           FROM ProjetoItem pi
-          LEFT JOIN Material m ON pi.MaterialReferencia = m.MaterialReferencia
-          WHERE pi.ProjetoID = ? AND m.MaterialTipo = 'Serviço'
+          LEFT JOIN Material m ON pi.MaterialReferencia = m.MaterialReferencia AND pi.empresa_id = m.empresa_id
+          WHERE pi.empresa_id = ? AND pi.ProjetoID = ? AND m.MaterialTipo = 'Serviço'
         ), 0.0),
         CustoTotal = COALESCE((
           SELECT SUM(pi.ProjetoItemTotal)
           FROM ProjetoItem pi
-          WHERE pi.ProjetoID = ?
+          WHERE pi.empresa_id = ? AND pi.ProjetoID = ?
         ), 0.0),
         DuracaoFabricacao = COALESCE((
           SELECT SUM(pi.ProjetoItemDuracao)
           FROM ProjetoItem pi
-          WHERE pi.ProjetoID = ? AND pi.MaterialReferencia != 'FAB.MON.CLI'
+          WHERE pi.empresa_id = ? AND pi.ProjetoID = ? AND pi.MaterialReferencia != 'FAB.MON.CLI'
         ), 0)
     `;
-    const params = [projectId, projectId, projectId, projectId];
+    const params = [
+      resolvedEmpresaId, projectId,
+      resolvedEmpresaId, projectId,
+      resolvedEmpresaId, projectId,
+      resolvedEmpresaId, projectId
+    ];
 
     const diasMontagemVal = monCliItem && monCliItem.diasMontagem !== null && monCliItem.diasMontagem !== undefined
       ? parseInt(monCliItem.diasMontagem, 10)
       : null;
 
     if (diasMontagemVal !== null && !isNaN(diasMontagemVal)) {
-      updateQuery += `, DuracaoMontagem = ? WHERE id = ?`;
-      params.push(diasMontagemVal, projectId);
+      updateQuery += `, DuracaoMontagem = ? WHERE empresa_id = ? AND id = ?`;
+      params.push(diasMontagemVal, resolvedEmpresaId, projectId);
     } else {
-      updateQuery += ` WHERE id = ?`;
-      params.push(projectId);
+      updateQuery += ` WHERE empresa_id = ? AND id = ?`;
+      params.push(resolvedEmpresaId, projectId);
     }
 
     await db.run(updateQuery, params);
 
     // Recalcular Preço de Venda Sugerido e Final do Projeto e atualizar o Orçamento
-    const updatedProj = await db.get('SELECT * FROM projetos WHERE id = ?', [projectId]);
+    const updatedProj = await db.get('SELECT * FROM projetos WHERE empresa_id = ? AND id = ?', [resolvedEmpresaId, projectId]);
     if (updatedProj && updatedProj.orcamento_numero) {
       const custoTotal = parseFloat(updatedProj.CustoTotal) || 0.0;
-      const budget = await db.get('SELECT * FROM orcamentos WHERE numero = ?', [updatedProj.orcamento_numero]);
-      const paramId = (budget && budget.parametro_financeiro_id) ? budget.parametro_financeiro_id : (updatedProj.parametro_financeiro_id || 1);
-      const paramConfig = await db.get('SELECT * FROM configuracoes_financeiras WHERE parametro_id = ?', [paramId]);
+      const budget = await db.get('SELECT * FROM orcamentos WHERE empresa_id = ? AND numero = ?', [resolvedEmpresaId, updatedProj.orcamento_numero]);
+      const paramId = (budget && budget.parametro_financeiro_id) ? budget.parametro_financeiro_id : updatedProj.parametro_financeiro_id;
+      let paramConfig = null;
+      if (paramId) {
+        paramConfig = await db.get('SELECT * FROM configuracoes_financeiras WHERE empresa_id = ? AND parametro_id = ?', [resolvedEmpresaId, paramId]);
+      }
+      if (!paramConfig) {
+        paramConfig = await db.get('SELECT * FROM configuracoes_financeiras WHERE empresa_id = ? ORDER BY id ASC LIMIT 1', [resolvedEmpresaId]);
+      }
 
       const percImposto = (updatedProj.perc_imposto !== null && updatedProj.perc_imposto !== undefined && updatedProj.perc_imposto !== '')
         ? parseFloat(updatedProj.perc_imposto) 
@@ -3162,31 +4015,31 @@ async function recalculateProjectCosts(projectId) {
           SET 
             preco_venda_sugerido = ?, 
             preco_venda_final = ?
-          WHERE id = ?
-        `, [precoSugerido, precoSugerido, projectId]);
+          WHERE empresa_id = ? AND id = ?
+        `, [precoSugerido, precoSugerido, resolvedEmpresaId, projectId]);
       } else {
         await db.run(`
           UPDATE projetos 
           SET 
             preco_venda_sugerido = ?
-          WHERE id = ?
-        `, [precoSugerido, projectId]);
+          WHERE empresa_id = ? AND id = ?
+        `, [precoSugerido, resolvedEmpresaId, projectId]);
       }
 
       // Atualiza o total consolidado de venda do orçamento
       const sumProjs = await db.get(`
         SELECT SUM(COALESCE(preco_venda_final, preco_venda_sugerido, 0.0)) as somaVenda
         FROM projetos
-        WHERE orcamento_numero = ?
-      `, [updatedProj.orcamento_numero]);
+        WHERE empresa_id = ? AND orcamento_numero = ?
+      `, [resolvedEmpresaId, updatedProj.orcamento_numero]);
       const novoTotalVenda = sumProjs && sumProjs.somaVenda ? parseFloat(sumProjs.somaVenda) : 0.0;
 
       await db.run(`
         UPDATE orcamentos
         SET 
           total_venda = ?
-        WHERE numero = ?
-      `, [novoTotalVenda, updatedProj.orcamento_numero]);
+        WHERE empresa_id = ? AND numero = ?
+      `, [novoTotalVenda, resolvedEmpresaId, updatedProj.orcamento_numero]);
     }
   } catch (error) {
     console.error('Error recalculating project costs:', error);
@@ -3196,11 +4049,16 @@ async function recalculateProjectCosts(projectId) {
 
 // POST /api/projetos/:id/recalcular - Forçar recálculo completo de custos e preço de venda
 app.post('/api/projetos/:id/recalcular', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { id } = req.params;
   try {
-    await recalculateProjectCosts(id);
-    const updatedProj = await db.get('SELECT * FROM projetos WHERE id = ?', [id]);
-    const budget = updatedProj ? await db.get('SELECT * FROM orcamentos WHERE numero = ?', [updatedProj.orcamento_numero]) : null;
+    const ownedProj = await db.get('SELECT * FROM projetos WHERE empresa_id = ? AND id = ?', [empresaId, id]);
+    if (!ownedProj) {
+      return res.status(404).json({ error: 'Projeto não encontrado.' });
+    }
+    await recalculateProjectCosts(id, empresaId);
+    const updatedProj = await db.get('SELECT * FROM projetos WHERE empresa_id = ? AND id = ?', [empresaId, id]);
+    const budget = updatedProj ? await db.get('SELECT * FROM orcamentos WHERE empresa_id = ? AND numero = ?', [empresaId, updatedProj.orcamento_numero]) : null;
     res.json({
       success: true,
       message: 'Projeto e orçamento recalculados com sucesso.',
@@ -3215,6 +4073,7 @@ app.post('/api/projetos/:id/recalcular', authenticateToken, async (req, res) => 
 
 // 10. Project Routes (Projetos)
 app.get('/api/projetos', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { orcamento_numero } = req.query;
   try {
     let query = `
@@ -3224,15 +4083,16 @@ app.get('/api/projetos', authenticateToken, async (req, res) => {
         COALESCE(o.status, 'Em Aberto') AS orcamento_situacao,
         pf.nome AS parametro_nome,
         pf.situacao AS parametro_situacao,
-        (SELECT COUNT(*) FROM projeto_anexos pa WHERE pa.projeto_id = p.id) AS total_anexos
+        (SELECT COUNT(*) FROM projeto_anexos pa WHERE pa.empresa_id = p.empresa_id AND pa.projeto_id = p.id) AS total_anexos
       FROM projetos p
-      LEFT JOIN orcamentos o ON o.numero = p.orcamento_numero
-      LEFT JOIN Parametro_Financeiro pf ON pf.id = o.parametro_financeiro_id
+      LEFT JOIN orcamentos o ON o.numero = p.orcamento_numero AND o.empresa_id = p.empresa_id
+      LEFT JOIN Parametro_Financeiro pf ON pf.id = o.parametro_financeiro_id AND pf.empresa_id = p.empresa_id
+      WHERE p.empresa_id = ?
     `;
-    let params = [];
+    let params = [empresaId];
     if (orcamento_numero) {
-      query += ' WHERE p.orcamento_numero = ?';
-      params.push(parseInt(orcamento_numero));
+      query += ' AND p.orcamento_numero = ?';
+      params.push(parseInt(orcamento_numero, 10));
     }
     query += ' ORDER BY p.id DESC';
     const list = await db.all(query, params);
@@ -3245,6 +4105,7 @@ app.get('/api/projetos', authenticateToken, async (req, res) => {
 
 // GET /api/projetos/:id - Obter dados de um projeto específico
 app.get('/api/projetos/:id', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { id } = req.params;
   try {
     const query = `
@@ -3254,13 +4115,13 @@ app.get('/api/projetos/:id', authenticateToken, async (req, res) => {
         COALESCE(o.status, 'Em Aberto') AS orcamento_situacao,
         pf.nome AS parametro_nome,
         pf.situacao AS parametro_situacao,
-        (SELECT COUNT(*) FROM projeto_anexos pa WHERE pa.projeto_id = p.id) AS total_anexos
+        (SELECT COUNT(*) FROM projeto_anexos pa WHERE pa.empresa_id = p.empresa_id AND pa.projeto_id = p.id) AS total_anexos
       FROM projetos p
-      LEFT JOIN orcamentos o ON o.numero = p.orcamento_numero
-      LEFT JOIN Parametro_Financeiro pf ON pf.id = o.parametro_financeiro_id
-      WHERE p.id = ?
+      LEFT JOIN orcamentos o ON o.numero = p.orcamento_numero AND o.empresa_id = p.empresa_id
+      LEFT JOIN Parametro_Financeiro pf ON pf.id = o.parametro_financeiro_id AND pf.empresa_id = p.empresa_id
+      WHERE p.empresa_id = ? AND p.id = ?
     `;
-    const proj = await db.get(query, [id]);
+    const proj = await db.get(query, [empresaId, id]);
     if (!proj) {
       return res.status(404).json({ error: 'Projeto não encontrado.' });
     }
@@ -3272,14 +4133,15 @@ app.get('/api/projetos/:id', authenticateToken, async (req, res) => {
 });
 
 app.post('/api/projetos', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { orcamento_numero, nome, descricao, DuracaoMontagem, ProjetoURL } = req.body;
   if (!orcamento_numero || !nome) {
     return res.status(400).json({ error: 'O número do orçamento e o nome do projeto são obrigatórios.' });
   }
 
   try {
-    // Check if budget exists
-    const budget = await db.get('SELECT * FROM orcamentos WHERE numero = ?', [orcamento_numero]);
+    // Check if budget exists in the authenticated company
+    const budget = await db.get('SELECT * FROM orcamentos WHERE empresa_id = ? AND numero = ?', [empresaId, orcamento_numero]);
     if (!budget) {
       return res.status(404).json({ error: 'Orçamento não encontrado.' });
     }
@@ -3288,8 +4150,8 @@ app.post('/api/projetos', authenticateToken, async (req, res) => {
     const qtdPecasVal = req.body.ProjetoQtdPecas !== undefined ? (parseInt(req.body.ProjetoQtdPecas, 10) || 0) : 0;
 
     const result = await db.run(
-      'INSERT INTO projetos (orcamento_numero, nome, descricao, DuracaoMontagem, ProjetoURL, ProjetoQtdPecas) VALUES (?, ?, ?, ?, ?, ?)',
-      [parseInt(orcamento_numero), nome, descricao || null, durMontagemVal, ProjetoURL || null, qtdPecasVal]
+      'INSERT INTO projetos (empresa_id, orcamento_numero, nome, descricao, DuracaoMontagem, ProjetoURL, ProjetoQtdPecas) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [empresaId, parseInt(orcamento_numero, 10), nome, descricao || null, durMontagemVal, ProjetoURL || null, qtdPecasVal]
     );
 
     const newProject = await db.get(`
@@ -3298,10 +4160,10 @@ app.post('/api/projetos', authenticateToken, async (req, res) => {
         pf.nome AS parametro_nome,
         pf.situacao AS parametro_situacao
       FROM projetos p
-      LEFT JOIN orcamentos o ON o.numero = p.orcamento_numero
-      LEFT JOIN Parametro_Financeiro pf ON pf.id = o.parametro_financeiro_id
-      WHERE p.id = ?
-    `, [result.lastID]);
+      LEFT JOIN orcamentos o ON o.numero = p.orcamento_numero AND o.empresa_id = p.empresa_id
+      LEFT JOIN Parametro_Financeiro pf ON pf.id = o.parametro_financeiro_id AND pf.empresa_id = p.empresa_id
+      WHERE p.empresa_id = ? AND p.id = ?
+    `, [empresaId, result.lastID]);
 
     res.status(201).json(newProject);
   } catch (error) {
@@ -3311,6 +4173,7 @@ app.post('/api/projetos', authenticateToken, async (req, res) => {
 });
 
 app.put('/api/projetos/:id', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { id } = req.params;
   const { nome, descricao, DuracaoMontagem, ProjetoURL, ProjetoQtdPecas } = req.body;
   if (!nome) {
@@ -3318,7 +4181,7 @@ app.put('/api/projetos/:id', authenticateToken, async (req, res) => {
   }
 
   try {
-    const project = await db.get('SELECT * FROM projetos WHERE id = ?', [id]);
+    const project = await db.get('SELECT * FROM projetos WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     if (!project) {
       return res.status(404).json({ error: 'Projeto não encontrado.' });
     }
@@ -3328,22 +4191,22 @@ app.put('/api/projetos/:id', authenticateToken, async (req, res) => {
     const qtdPecasVal = ProjetoQtdPecas !== undefined ? (parseInt(ProjetoQtdPecas, 10) || 0) : (project.ProjetoQtdPecas || 0);
 
     await db.run(
-      'UPDATE projetos SET nome = ?, descricao = ?, DuracaoMontagem = ?, ProjetoURL = ?, ProjetoQtdPecas = ? WHERE id = ?',
-      [nome, descricao || null, durMontagemVal, projetoUrlVal, qtdPecasVal, id]
+      'UPDATE projetos SET nome = ?, descricao = ?, DuracaoMontagem = ?, ProjetoURL = ?, ProjetoQtdPecas = ? WHERE empresa_id = ? AND id = ?',
+      [nome, descricao || null, durMontagemVal, projetoUrlVal, qtdPecasVal, empresaId, id]
     );
 
     // Se FAB.MON.CLI existir em ProjetoItem para este projeto, sincroniza a quantidade
-    const monCliItem = await db.get("SELECT * FROM ProjetoItem WHERE ProjetoID = ? AND MaterialReferencia = 'FAB.MON.CLI'", [id]);
+    const monCliItem = await db.get("SELECT * FROM ProjetoItem WHERE empresa_id = ? AND ProjetoID = ? AND MaterialReferencia = 'FAB.MON.CLI'", [empresaId, id]);
     if (monCliItem) {
       const vlrUnit = monCliItem.ProjetoItemVlrUnit || 0.0;
       const newTotal = vlrUnit * durMontagemVal;
       const tempo = parseInt(monCliItem.ProjetoItemTempo, 10) || 0;
       const duracao = Math.round(tempo * durMontagemVal);
       await db.run(
-        'UPDATE ProjetoItem SET ProjetoItemQtd = ?, ProjetoItemTotal = ?, ProjetoItemDuracao = ? WHERE ProjetoID = ? AND MaterialReferencia = ?',
-        [durMontagemVal, newTotal, duracao, id, 'FAB.MON.CLI']
+        'UPDATE ProjetoItem SET ProjetoItemQtd = ?, ProjetoItemTotal = ?, ProjetoItemDuracao = ? WHERE empresa_id = ? AND ProjetoID = ? AND MaterialReferencia = ?',
+        [durMontagemVal, newTotal, duracao, empresaId, id, 'FAB.MON.CLI']
       );
-      await recalculateProjectCosts(id);
+      await recalculateProjectCosts(id, empresaId);
     }
 
     const updatedProject = await db.get(`
@@ -3352,10 +4215,10 @@ app.put('/api/projetos/:id', authenticateToken, async (req, res) => {
         pf.nome AS parametro_nome,
         pf.situacao AS parametro_situacao
       FROM projetos p
-      LEFT JOIN orcamentos o ON o.numero = p.orcamento_numero
-      LEFT JOIN Parametro_Financeiro pf ON pf.id = o.parametro_financeiro_id
-      WHERE p.id = ?
-    `, [id]);
+      LEFT JOIN orcamentos o ON o.numero = p.orcamento_numero AND o.empresa_id = p.empresa_id
+      LEFT JOIN Parametro_Financeiro pf ON pf.id = o.parametro_financeiro_id AND pf.empresa_id = p.empresa_id
+      WHERE p.empresa_id = ? AND p.id = ?
+    `, [empresaId, id]);
 
     res.json(updatedProject);
   } catch (error) {
@@ -3365,19 +4228,20 @@ app.put('/api/projetos/:id', authenticateToken, async (req, res) => {
 });
 
 app.delete('/api/projetos/:id', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { id } = req.params;
   try {
-    const project = await db.get('SELECT * FROM projetos WHERE id = ?', [id]);
+    const project = await db.get('SELECT * FROM projetos WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     if (!project) {
       return res.status(404).json({ error: 'Projeto não encontrado.' });
     }
 
     // 1. Excluir arquivos físicos de anexos
-    const anexos = await db.all('SELECT * FROM projeto_anexos WHERE projeto_id = ?', [id]);
+    const anexos = await db.all('SELECT * FROM projeto_anexos WHERE empresa_id = ? AND projeto_id = ?', [empresaId, id]);
     for (const a of anexos) {
       try {
         if (a.caminho) {
-          const fullPath = path.resolve(a.caminho);
+          const fullPath = getUploadPhysicalPath(a.caminho) || path.resolve(a.caminho);
           if (fs.existsSync(fullPath)) {
             fs.unlinkSync(fullPath);
           }
@@ -3386,10 +4250,10 @@ app.delete('/api/projetos/:id', authenticateToken, async (req, res) => {
         console.error('Erro ao excluir arquivo físico de anexo:', e);
       }
     }
-    await db.run('DELETE FROM projeto_anexos WHERE projeto_id = ?', [id]);
+    await db.run('DELETE FROM projeto_anexos WHERE empresa_id = ? AND projeto_id = ?', [empresaId, id]);
 
     // 2. Excluir arquivos físicos de arquivos_importados
-    const arquivos = await db.all('SELECT * FROM arquivos_importados WHERE projeto_id = ?', [id]);
+    const arquivos = await db.all('SELECT * FROM arquivos_importados WHERE empresa_id = ? AND projeto_id = ?', [empresaId, id]);
     for (const f of arquivos) {
       try {
         if (f.caminho_arquivo && fs.existsSync(f.caminho_arquivo)) {
@@ -3399,17 +4263,17 @@ app.delete('/api/projetos/:id', authenticateToken, async (req, res) => {
         console.error('Erro ao excluir arquivo físico de layout importado:', e);
       }
     }
-    await db.run('DELETE FROM arquivos_importados WHERE projeto_id = ?', [id]);
+    await db.run('DELETE FROM arquivos_importados WHERE empresa_id = ? AND projeto_id = ?', [empresaId, id]);
 
     // 3. Excluir dados subordinados das tabelas filhas
-    await db.run('DELETE FROM ProjetoItem WHERE ProjetoID = ?', [id]);
-    await db.run('DELETE FROM Projeto_Materiais WHERE projeto_id = ?', [id]);
-    await db.run('DELETE FROM Projeto_Pecas WHERE projeto_id = ?', [id]);
-    await db.run('DELETE FROM Projeto_Modulo WHERE projeto_id = ?', [id]);
-    await db.run('DELETE FROM Projeto_Chapa WHERE projeto_id = ?', [id]);
+    await db.run('DELETE FROM ProjetoItem WHERE empresa_id = ? AND ProjetoID = ?', [empresaId, id]);
+    await db.run('DELETE FROM Projeto_Materiais WHERE empresa_id = ? AND projeto_id = ?', [empresaId, id]);
+    await db.run('DELETE FROM Projeto_Pecas WHERE empresa_id = ? AND projeto_id = ?', [empresaId, id]);
+    await db.run('DELETE FROM Projeto_Modulo WHERE empresa_id = ? AND projeto_id = ?', [empresaId, id]);
+    await db.run('DELETE FROM Projeto_Chapa WHERE empresa_id = ? AND projeto_id = ?', [empresaId, id]);
 
     // 4. Excluir o projeto principal
-    await db.run('DELETE FROM projetos WHERE id = ?', [id]);
+    await db.run('DELETE FROM projetos WHERE empresa_id = ? AND id = ?', [empresaId, id]);
 
     res.json({ message: 'Projeto e todos os seus dados subordinados foram removidos com sucesso.' });
   } catch (error) {
@@ -3420,6 +4284,7 @@ app.delete('/api/projetos/:id', authenticateToken, async (req, res) => {
 
 // PUT /api/projetos/:id/precificacao
 app.put('/api/projetos/:id/precificacao', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { id } = req.params;
   const { 
     perc_imposto, 
@@ -3431,7 +4296,7 @@ app.put('/api/projetos/:id/precificacao', authenticateToken, async (req, res) =>
   } = req.body;
 
   try {
-    const project = await db.get('SELECT * FROM projetos WHERE id = ?', [id]);
+    const project = await db.get('SELECT * FROM projetos WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     if (!project) {
       return res.status(404).json({ error: 'Projeto não encontrado.' });
     }
@@ -3445,7 +4310,7 @@ app.put('/api/projetos/:id/precificacao', authenticateToken, async (req, res) =>
         perc_markup_lucro = ?, 
         preco_venda_sugerido = ?, 
         preco_venda_final = ?
-      WHERE id = ?
+      WHERE empresa_id = ? AND id = ?
     `, [
       perc_imposto !== undefined && perc_imposto !== null ? parseFloat(perc_imposto) : null,
       perc_comissao !== undefined && perc_comissao !== null ? parseFloat(perc_comissao) : null,
@@ -3453,6 +4318,7 @@ app.put('/api/projetos/:id/precificacao', authenticateToken, async (req, res) =>
       perc_markup_lucro !== undefined && perc_markup_lucro !== null ? parseFloat(perc_markup_lucro) : null,
       preco_venda_sugerido !== undefined && preco_venda_sugerido !== null ? parseFloat(preco_venda_sugerido) : 0,
       preco_venda_final !== undefined && preco_venda_final !== null ? parseFloat(preco_venda_final) : 0,
+      empresaId,
       id
     ]);
 
@@ -3462,10 +4328,10 @@ app.put('/api/projetos/:id/precificacao', authenticateToken, async (req, res) =>
         pf.nome AS parametro_nome,
         pf.situacao AS parametro_situacao
       FROM projetos p
-      LEFT JOIN orcamentos o ON o.numero = p.orcamento_numero
-      LEFT JOIN Parametro_Financeiro pf ON pf.id = o.parametro_financeiro_id
-      WHERE p.id = ?
-    `, [id]);
+      LEFT JOIN orcamentos o ON o.numero = p.orcamento_numero AND o.empresa_id = p.empresa_id
+      LEFT JOIN Parametro_Financeiro pf ON pf.id = o.parametro_financeiro_id AND pf.empresa_id = p.empresa_id
+      WHERE p.empresa_id = ? AND p.id = ?
+    `, [empresaId, id]);
 
     res.json(updatedProject);
   } catch (error) {
@@ -3474,15 +4340,20 @@ app.put('/api/projetos/:id/precificacao', authenticateToken, async (req, res) =>
   }
 });
 
-// Função para gerar descrição detalhada do projeto:
-// - MDFs: Todos os MDFs utilizados no projeto entram na lista (não requerem ExibirNaProposta='Sim')
-// - Demais grupos (Ferragens, Componentes, Vidros, etc.): Entram apenas se ExibirNaProposta = 'Sim'
-async function buildProjectDescriptionFromDB(projectId) {
+// Função para gerar descrição detalhada do projeto
+async function buildProjectDescriptionFromDB(projectId, empresaId = null) {
   try {
-    const proj = await db.get('SELECT * FROM projetos WHERE id = ?', [projectId]);
+    let resolvedEmpresaId = empresaId;
+    if (!resolvedEmpresaId) {
+      const pRow = await db.get('SELECT empresa_id FROM projetos WHERE id = ?', [projectId]);
+      if (!pRow) return '';
+      resolvedEmpresaId = pRow.empresa_id;
+    }
+
+    const proj = await db.get('SELECT * FROM projetos WHERE empresa_id = ? AND id = ?', [resolvedEmpresaId, projectId]);
     if (!proj) return '';
 
-    const chapas = await db.all('SELECT * FROM Projeto_Chapa WHERE projeto_id = ?', [projectId]);
+    const chapas = await db.all('SELECT * FROM Projeto_Chapa WHERE empresa_id = ? AND projeto_id = ?', [resolvedEmpresaId, projectId]);
 
     let items = await db.all(`
       SELECT 
@@ -3494,8 +4365,8 @@ async function buildProjectDescriptionFromDB(projectId) {
         m.MaterialTipo,
         COALESCE(m.ExibirNaProposta, 'Nao') as ExibirNaProposta
       FROM ProjetoItem pi 
-      LEFT JOIN Material m ON pi.MaterialReferencia = m.MaterialReferencia 
-      WHERE pi.ProjetoID = ? 
+      LEFT JOIN Material m ON pi.MaterialReferencia = m.MaterialReferencia AND pi.empresa_id = m.empresa_id
+      WHERE pi.empresa_id = ? AND pi.ProjetoID = ? 
         AND pi.ProjetoItemQtd > 0
         AND (
           COALESCE(m.ProdutoGrupo, 8) = 1 
@@ -3505,7 +4376,7 @@ async function buildProjectDescriptionFromDB(projectId) {
           OR COALESCE(m.ExibirNaProposta, 'Nao') = 'Sim'
         )
       ORDER BY pi.ProjetoItemID ASC
-    `, [projectId]);
+    `, [resolvedEmpresaId, projectId]);
 
     if (items.length === 0) {
       items = await db.all(`
@@ -3517,8 +4388,8 @@ async function buildProjectDescriptionFromDB(projectId) {
           m.MaterialTipo,
           COALESCE(m.ExibirNaProposta, 'Nao') as ExibirNaProposta
         FROM Projeto_Materiais pm
-        LEFT JOIN Material m ON pm.referencia = m.MaterialReferencia
-        WHERE pm.projeto_id = ?
+        LEFT JOIN Material m ON pm.referencia = m.MaterialReferencia AND pm.empresa_id = m.empresa_id
+        WHERE pm.empresa_id = ? AND pm.projeto_id = ?
           AND pm.qtd > 0
           AND (
             COALESCE(m.ProdutoGrupo, 8) = 1 
@@ -3528,25 +4399,19 @@ async function buildProjectDescriptionFromDB(projectId) {
             OR COALESCE(m.ExibirNaProposta, 'Nao') = 'Sim'
           )
         ORDER BY pm.id ASC
-      `, [projectId]);
+      `, [resolvedEmpresaId, projectId]);
     }
 
     const cleanMdfName = (str) => {
       if (!str) return '';
       let s = str.replace(/\\/g, ' ');
-      // Remove prefixos como "Chapa MDF", "MDF", "MDP", "Chapa MDP", etc.
       s = s.replace(/^(chapa\s+)?(mdf|mdp)\s*[-:]?\s*/i, '');
-      // Remove número sequencial após prefixo, ex: "5-Freijó..." -> "Freijó..."
       s = s.replace(/^\d+\s*-\s*/, '');
-      // Remove espessuras como "Espessura 18mm", "- 18mm", "18mm", "18 mm"
       s = s.replace(/espessura\s*\d+\s*mm/gi, '');
       s = s.replace(/\s*-\s*\d+\s*mm\b/gi, '');
       s = s.replace(/\b\d+\s*mm\b/gi, '');
-      // Remove sentidos de fibra
       s = s.replace(/\b(horizontal|vertical)\b/gi, '');
-      // Corrigir typos comuns
       s = s.replace(/natrual/gi, 'Natural');
-      // Remove pontuações/hifens soltos nas pontas
       s = s.replace(/^[-–—:,.\s]+|[-–—:,.\s]+$/g, '');
       s = s.replace(/\s+/g, ' ').trim();
       return s;
@@ -3562,14 +4427,12 @@ async function buildProjectDescriptionFromDB(projectId) {
       return s;
     };
 
-    // 1. MDFs (Todos os MDFs utilizados no projeto, sem exigir ExibirNaProposta = 'Sim')
     const mdfItems = items.filter(i => 
       (i.ProdutoGrupo === 1 || /^(mdf|mdp|chapa\s+mdf)/i.test(i.MaterialDescricao || '')) && 
       i.MaterialTipo !== 'Serviço'
     );
     let mdfNames = mdfItems.map(i => cleanMdfName(i.MaterialDescricao)).filter(Boolean);
 
-    // Se houver chapas em Projeto_Chapa, inclui também seus acabamentos
     if (chapas.length > 0) {
       chapas.forEach(c => {
         const name = cleanMdfName(c.acabamento || c.DescChapa || c.chapa);
@@ -3577,7 +4440,6 @@ async function buildProjectDescriptionFromDB(projectId) {
       });
     }
     
-    // Deduplica MDFs garantindo nome único
     const uniqueMdfs = [];
     const seenMdfLower = new Set();
     for (const name of mdfNames) {
@@ -3589,7 +4451,6 @@ async function buildProjectDescriptionFromDB(projectId) {
       }
     }
 
-    // 2. Ferragens e Componentes (Apenas os que possuem ExibirNaProposta = 'Sim')
     const ferragensItems = items.filter(i => 
       (i.ProdutoGrupo === 4 || i.ProdutoGrupo === 5 || /corredi|dobradi|puxador|trilho|pisto|articul|fechadura|amortec/i.test(i.MaterialDescricao || '')) && 
       i.ProdutoGrupo !== 1 && 
@@ -3609,7 +4470,6 @@ async function buildProjectDescriptionFromDB(projectId) {
       }
     }
 
-    // 3. Vidros (Apenas com ExibirNaProposta = 'Sim')
     const vidrosItems = items.filter(i => 
       i.ProdutoGrupo === 6 && 
       i.MaterialTipo !== 'Serviço' &&
@@ -3627,7 +4487,6 @@ async function buildProjectDescriptionFromDB(projectId) {
       }
     }
 
-    // 4. Outros itens com ExibirNaProposta = 'Sim'
     const outrosItems = items.filter(i => 
       !mdfItems.includes(i) && 
       !ferragensItems.includes(i) && 
@@ -3670,9 +4529,12 @@ async function buildProjectDescriptionFromDB(projectId) {
 
 // GET /api/projetos/:id/descricao-sugerida
 app.get('/api/projetos/:id/descricao-sugerida', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { id } = req.params;
   try {
-    const descricao = await buildProjectDescriptionFromDB(id);
+    const owned = await db.get('SELECT id FROM projetos WHERE empresa_id = ? AND id = ?', [empresaId, id]);
+    if (!owned) return res.status(404).json({ error: 'Projeto não encontrado.' });
+    const descricao = await buildProjectDescriptionFromDB(id, empresaId);
     res.json({ descricao });
   } catch (error) {
     console.error('GET DESCRICAO SUGERIDA ERROR:', error);
@@ -3682,13 +4544,16 @@ app.get('/api/projetos/:id/descricao-sugerida', authenticateToken, async (req, r
 
 // POST /api/projetos/:id/gerar-descricao
 app.post('/api/projetos/:id/gerar-descricao', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { id } = req.params;
   try {
-    const descricao = await buildProjectDescriptionFromDB(id);
+    const owned = await db.get('SELECT id FROM projetos WHERE empresa_id = ? AND id = ?', [empresaId, id]);
+    if (!owned) return res.status(404).json({ error: 'Projeto não encontrado.' });
+    const descricao = await buildProjectDescriptionFromDB(id, empresaId);
     if (descricao) {
-      await db.run('UPDATE projetos SET descricao = ? WHERE id = ?', [descricao, id]);
+      await db.run('UPDATE projetos SET descricao = ? WHERE empresa_id = ? AND id = ?', [descricao, empresaId, id]);
     }
-    const updatedProj = await db.get('SELECT * FROM projetos WHERE id = ?', [id]);
+    const updatedProj = await db.get('SELECT * FROM projetos WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     res.json(updatedProj);
   } catch (error) {
     console.error('POST GERAR DESCRICAO ERROR:', error);
@@ -3697,12 +4562,11 @@ app.post('/api/projetos/:id/gerar-descricao', authenticateToken, async (req, res
 });
 
 // Helper para associar sequência da tabela de servicos aos itens de projeto
-async function enrichProjectItemsWithServicoSequencia(items) {
+async function enrichProjectItemsWithServicoSequencia(items, empresaId = 1) {
   if (!items || !Array.isArray(items) || items.length === 0) return items;
   try {
-    const servicosList = await db.all('SELECT id, nome, unidade, tempo, sequencia FROM servicos ORDER BY sequencia ASC, id ASC');
+    const servicosList = await db.all('SELECT id, nome, unidade, tempo, sequencia FROM servicos WHERE empresa_id = ? ORDER BY sequencia ASC, id ASC', [empresaId]);
     
-    // Helper para normalizar strings para comparação
     const normalize = (str) => (str || '').toLowerCase()
       .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
       .replace(/[^a-z0-9]/g, ' ')
@@ -3722,13 +4586,11 @@ async function enrichProjectItemsWithServicoSequencia(items) {
       const itemDescNorm = normalize(item.MaterialDescricao);
       const itemRefNorm = normalize(item.MaterialReferencia);
 
-      // Tenta encontrar serviço correspondente na tabela servicos
       let matchedServico = servicosList.find(s => {
         const sNomeNorm = normalize(s.nome);
         if (sNomeNorm === itemDescNorm) return true;
         if (itemDescNorm.includes(sNomeNorm) || sNomeNorm.includes(itemDescNorm)) return true;
         
-        // Mapeamentos conhecidos por prefixos/referências de fabricação
         if ((itemRefNorm.includes('cor') || itemRefNorm.includes('sep') || itemDescNorm.includes('corte') || itemDescNorm.includes('separacao')) && (sNomeNorm.includes('separacao') || sNomeNorm.includes('corte'))) return true;
         if ((itemRefNorm.includes('usi') || itemDescNorm.includes('usinagem')) && sNomeNorm.includes('usinagem')) return true;
         if ((itemRefNorm.includes('fit') || itemDescNorm.includes('fitagem')) && sNomeNorm.includes('fitagem')) return true;
@@ -3759,10 +4621,14 @@ async function enrichProjectItemsWithServicoSequencia(items) {
 
 // GET /api/projetos/:id/itens
 app.get('/api/projetos/:id/itens', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { id } = req.params;
   try {
+    const owned = await db.get('SELECT id FROM projetos WHERE empresa_id = ? AND id = ?', [empresaId, id]);
+    if (!owned) return res.status(404).json({ error: 'Projeto não encontrado.' });
+
     // Garante que a tabela ProjetoItem está populada a partir de Projeto_Materiais se necessário
-    await ensureProjetoItemsPopulated(id);
+    await ensureProjetoItemsPopulated(id, empresaId);
 
     const list = await db.all(`
       SELECT 
@@ -3782,12 +4648,12 @@ app.get('/api/projetos/:id/itens', authenticateToken, async (req, res) => {
         pi.ProjetoItemTempo,
         pi.ProjetoItemDuracao
       FROM ProjetoItem pi
-      LEFT JOIN Material m ON pi.MaterialReferencia = m.MaterialReferencia
-      WHERE pi.ProjetoID = ?
+      LEFT JOIN Material m ON pi.MaterialReferencia = m.MaterialReferencia AND pi.empresa_id = m.empresa_id
+      WHERE pi.empresa_id = ? AND pi.ProjetoID = ?
       ORDER BY pi.ProjetoItemID ASC
-    `, [id]);
+    `, [empresaId, id]);
 
-    const enrichedList = await enrichProjectItemsWithServicoSequencia(list);
+    const enrichedList = await enrichProjectItemsWithServicoSequencia(list, empresaId);
     res.json(enrichedList);
   } catch (error) {
     console.error('GET PROJECT ITEMS ERROR:', error);
@@ -3797,6 +4663,7 @@ app.get('/api/projetos/:id/itens', authenticateToken, async (req, res) => {
 
 // POST /api/projetos/:id/itens
 app.post('/api/projetos/:id/itens', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { id } = req.params;
   const { MaterialReferencia, ProjetoItemQtd } = req.body;
   if (!MaterialReferencia || ProjetoItemQtd === undefined) {
@@ -3807,14 +4674,17 @@ app.post('/api/projetos/:id/itens', authenticateToken, async (req, res) => {
     const projCheck = await db.get(`
       SELECT p.*, o.status as orcamento_status 
       FROM projetos p 
-      JOIN orcamentos o ON p.orcamento_numero = o.numero 
-      WHERE p.id = ?
-    `, [id]);
-    if (projCheck && projCheck.orcamento_status === 'Aprovado') {
+      LEFT JOIN orcamentos o ON p.orcamento_numero = o.numero AND p.empresa_id = o.empresa_id
+      WHERE p.empresa_id = ? AND p.id = ?
+    `, [empresaId, id]);
+    if (!projCheck) {
+      return res.status(404).json({ error: 'Projeto não encontrado.' });
+    }
+    if (projCheck.orcamento_status === 'Aprovado') {
       return res.status(400).json({ error: 'Orçamentos Aprovados não podem ter novos itens adicionados.' });
     }
 
-    const mat = await db.get('SELECT * FROM Material WHERE MaterialReferencia = ?', [MaterialReferencia]);
+    const mat = await db.get('SELECT * FROM Material WHERE empresa_id = ? AND MaterialReferencia = ?', [empresaId, MaterialReferencia]);
     if (!mat) {
       return res.status(404).json({ error: 'Material não cadastrado.' });
     }
@@ -3828,8 +4698,8 @@ app.post('/api/projetos/:id/itens', authenticateToken, async (req, res) => {
 
     // Se o serviço inserido for 'FAB.EMB.UND', obtém a soma de 'FAB.MON.CXA' + 'FAB.ESP.PCA'
     if (MaterialReferencia === 'FAB.EMB.UND') {
-      const monItem = await db.get('SELECT ProjetoItemQtd FROM ProjetoItem WHERE ProjetoID = ? AND MaterialReferencia = ?', [id, 'FAB.MON.CXA']);
-      const espItem = await db.get('SELECT ProjetoItemQtd FROM ProjetoItem WHERE ProjetoID = ? AND MaterialReferencia = ?', [id, 'FAB.ESP.PCA']);
+      const monItem = await db.get('SELECT ProjetoItemQtd FROM ProjetoItem WHERE empresa_id = ? AND ProjetoID = ? AND MaterialReferencia = ?', [empresaId, id, 'FAB.MON.CXA']);
+      const espItem = await db.get('SELECT ProjetoItemQtd FROM ProjetoItem WHERE empresa_id = ? AND ProjetoID = ? AND MaterialReferencia = ?', [empresaId, id, 'FAB.ESP.PCA']);
       const sumQtd = (monItem ? (parseFloat(monItem.ProjetoItemQtd) || 0) : 0) + (espItem ? (parseFloat(espItem.ProjetoItemQtd) || 0) : 0);
       if (sumQtd > 0 || qtd === 0) {
         qtd = sumQtd;
@@ -3840,23 +4710,23 @@ app.post('/api/projetos/:id/itens', authenticateToken, async (req, res) => {
     const tempo = parseInt(mat.MaterialTempo, 10) || 0;
     const duracao = Math.round(tempo * qtd);
 
-    const seqRow = await db.get('SELECT MAX(ProjetoItemID) as maxSeq FROM ProjetoItem WHERE ProjetoID = ?', [id]);
+    const seqRow = await db.get('SELECT MAX(ProjetoItemID) as maxSeq FROM ProjetoItem WHERE empresa_id = ? AND ProjetoID = ?', [empresaId, id]);
     const nextSeq = seqRow && seqRow.maxSeq ? seqRow.maxSeq + 1 : 1;
 
     await db.run(
-      `INSERT INTO ProjetoItem (ProjetoID, ProjetoItemID, MaterialReferencia, ProjetoItemVlrUnit, ProjetoItemUnidade, ProjetoItemQtd, ProjetoItemTotal, ProjetoItemTempo, ProjetoItemDuracao)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, nextSeq, MaterialReferencia, vlrUnit, unidade, qtd, total, tempo, duracao]
+      `INSERT INTO ProjetoItem (empresa_id, ProjetoID, ProjetoItemID, MaterialReferencia, ProjetoItemVlrUnit, ProjetoItemUnidade, ProjetoItemQtd, ProjetoItemTotal, ProjetoItemTempo, ProjetoItemDuracao)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [empresaId, id, nextSeq, MaterialReferencia, vlrUnit, unidade, qtd, total, tempo, duracao]
     );
 
     // Recalculate project consolidated costs
-    await recalculateProjectCosts(id);
+    await recalculateProjectCosts(id, empresaId);
 
-    const proj = await db.get('SELECT CustoTotal, DuracaoFabricacao FROM projetos WHERE id = ?', [id]);
+    const proj = await db.get('SELECT CustoTotal, DuracaoFabricacao FROM projetos WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     const newTotal = proj ? (proj.CustoTotal || 0.0) : 0.0;
 
     res.status(201).json({
-      ProjetoID: parseInt(id),
+      ProjetoID: parseInt(id, 10),
       ProjetoItemID: nextSeq,
       MaterialReferencia,
       MaterialDescricao: mat.MaterialDescricao,
@@ -3876,6 +4746,7 @@ app.post('/api/projetos/:id/itens', authenticateToken, async (req, res) => {
 
 // PUT /api/projetos/:id/itens/:itemId
 app.put('/api/projetos/:id/itens/:itemId', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { id, itemId } = req.params;
   const { ProjetoItemQtd } = req.body;
   if (ProjetoItemQtd === undefined) {
@@ -3886,14 +4757,17 @@ app.put('/api/projetos/:id/itens/:itemId', authenticateToken, async (req, res) =
     const projCheck = await db.get(`
       SELECT p.*, o.status as orcamento_status 
       FROM projetos p 
-      JOIN orcamentos o ON p.orcamento_numero = o.numero 
-      WHERE p.id = ?
-    `, [id]);
-    if (projCheck && projCheck.orcamento_status === 'Aprovado') {
+      LEFT JOIN orcamentos o ON p.orcamento_numero = o.numero AND p.empresa_id = o.empresa_id
+      WHERE p.empresa_id = ? AND p.id = ?
+    `, [empresaId, id]);
+    if (!projCheck) {
+      return res.status(404).json({ error: 'Projeto não encontrado.' });
+    }
+    if (projCheck.orcamento_status === 'Aprovado') {
       return res.status(400).json({ error: 'Orçamentos Aprovados não podem ter seus itens alterados.' });
     }
 
-    const item = await db.get('SELECT * FROM ProjetoItem WHERE ProjetoID = ? AND ProjetoItemID = ?', [id, itemId]);
+    const item = await db.get('SELECT * FROM ProjetoItem WHERE empresa_id = ? AND ProjetoID = ? AND ProjetoItemID = ?', [empresaId, id, itemId]);
     if (!item) {
       return res.status(404).json({ error: 'Item não encontrado.' });
     }
@@ -3907,44 +4781,44 @@ app.put('/api/projetos/:id/itens/:itemId', authenticateToken, async (req, res) =
 
     let tempo = item.ProjetoItemTempo;
     if (tempo === null || tempo === undefined) {
-      const mat = await db.get('SELECT MaterialTempo FROM Material WHERE MaterialReferencia = ?', [item.MaterialReferencia]);
+      const mat = await db.get('SELECT MaterialTempo FROM Material WHERE empresa_id = ? AND MaterialReferencia = ?', [empresaId, item.MaterialReferencia]);
       tempo = mat ? (parseInt(mat.MaterialTempo, 10) || 0) : 0;
     }
     const duracao = Math.round((parseInt(tempo, 10) || 0) * qtd);
 
     await db.run(
-      'UPDATE ProjetoItem SET ProjetoItemQtd = ?, ProjetoItemTotal = ?, ProjetoItemTempo = ?, ProjetoItemDuracao = ? WHERE ProjetoID = ? AND ProjetoItemID = ?',
-      [qtd, total, tempo, duracao, id, itemId]
+      'UPDATE ProjetoItem SET ProjetoItemQtd = ?, ProjetoItemTotal = ?, ProjetoItemTempo = ?, ProjetoItemDuracao = ? WHERE empresa_id = ? AND ProjetoID = ? AND ProjetoItemID = ?',
+      [qtd, total, tempo, duracao, empresaId, id, itemId]
     );
 
     // Se a quantidade de FAB.MON.CXA ou FAB.ESP.PCA for alterada, recalcula automaticamente FAB.EMB.UND na tabela ProjetoItem
     if (item.MaterialReferencia === 'FAB.MON.CXA' || item.MaterialReferencia === 'FAB.ESP.PCA') {
-      const embItem = await db.get('SELECT * FROM ProjetoItem WHERE ProjetoID = ? AND MaterialReferencia = ?', [id, 'FAB.EMB.UND']);
+      const embItem = await db.get('SELECT * FROM ProjetoItem WHERE empresa_id = ? AND ProjetoID = ? AND MaterialReferencia = ?', [empresaId, id, 'FAB.EMB.UND']);
       if (embItem) {
-        const monItem = await db.get('SELECT ProjetoItemQtd FROM ProjetoItem WHERE ProjetoID = ? AND MaterialReferencia = ?', [id, 'FAB.MON.CXA']);
-        const espItem = await db.get('SELECT ProjetoItemQtd FROM ProjetoItem WHERE ProjetoID = ? AND MaterialReferencia = ?', [id, 'FAB.ESP.PCA']);
+        const monItem = await db.get('SELECT ProjetoItemQtd FROM ProjetoItem WHERE empresa_id = ? AND ProjetoID = ? AND MaterialReferencia = ?', [empresaId, id, 'FAB.MON.CXA']);
+        const espItem = await db.get('SELECT ProjetoItemQtd FROM ProjetoItem WHERE empresa_id = ? AND ProjetoID = ? AND MaterialReferencia = ?', [empresaId, id, 'FAB.ESP.PCA']);
         const sumQtd = (monItem ? (parseFloat(monItem.ProjetoItemQtd) || 0) : 0) + (espItem ? (parseFloat(espItem.ProjetoItemQtd) || 0) : 0);
         const embVlrUnit = embItem.ProjetoItemVlrUnit || 0.0;
         const embTotal = embVlrUnit * sumQtd;
         const embTempo = parseInt(embItem.ProjetoItemTempo, 10) || 0;
         const embDuracao = Math.round(embTempo * sumQtd);
         await db.run(
-          'UPDATE ProjetoItem SET ProjetoItemQtd = ?, ProjetoItemTotal = ?, ProjetoItemDuracao = ? WHERE ProjetoID = ? AND MaterialReferencia = ?',
-          [sumQtd, embTotal, embDuracao, id, 'FAB.EMB.UND']
+          'UPDATE ProjetoItem SET ProjetoItemQtd = ?, ProjetoItemTotal = ?, ProjetoItemDuracao = ? WHERE empresa_id = ? AND ProjetoID = ? AND MaterialReferencia = ?',
+          [sumQtd, embTotal, embDuracao, empresaId, id, 'FAB.EMB.UND']
         );
       }
     }
 
     // Recalculate project consolidated costs
-    await recalculateProjectCosts(id);
+    await recalculateProjectCosts(id, empresaId);
 
-    const proj = await db.get('SELECT CustoTotal, DuracaoFabricacao FROM projetos WHERE id = ?', [id]);
+    const proj = await db.get('SELECT CustoTotal, DuracaoFabricacao FROM projetos WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     const newTotal = proj ? (proj.CustoTotal || 0.0) : 0.0;
 
     res.json({
       success: true,
-      ProjetoID: parseInt(id),
-      ProjetoItemID: parseInt(itemId),
+      ProjetoID: parseInt(id, 10),
+      ProjetoItemID: parseInt(itemId, 10),
       ProjetoItemQtd: qtd,
       ProjetoItemTotal: total,
       ProjetoItemTempo: tempo,
@@ -3959,29 +4833,33 @@ app.put('/api/projetos/:id/itens/:itemId', authenticateToken, async (req, res) =
 
 // DELETE /api/projetos/:id/itens/:itemId
 app.delete('/api/projetos/:id/itens/:itemId', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { id, itemId } = req.params;
   try {
     const projCheck = await db.get(`
       SELECT p.*, o.status as orcamento_status 
       FROM projetos p 
-      JOIN orcamentos o ON p.orcamento_numero = o.numero 
-      WHERE p.id = ?
-    `, [id]);
-    if (projCheck && projCheck.orcamento_status === 'Aprovado') {
+      LEFT JOIN orcamentos o ON p.orcamento_numero = o.numero AND p.empresa_id = o.empresa_id
+      WHERE p.empresa_id = ? AND p.id = ?
+    `, [empresaId, id]);
+    if (!projCheck) {
+      return res.status(404).json({ error: 'Projeto não encontrado.' });
+    }
+    if (projCheck.orcamento_status === 'Aprovado') {
       return res.status(400).json({ error: 'Orçamentos Aprovados não podem ter seus itens removidos.' });
     }
 
-    const item = await db.get('SELECT * FROM ProjetoItem WHERE ProjetoID = ? AND ProjetoItemID = ?', [id, itemId]);
+    const item = await db.get('SELECT * FROM ProjetoItem WHERE empresa_id = ? AND ProjetoID = ? AND ProjetoItemID = ?', [empresaId, id, itemId]);
     if (!item) {
       return res.status(404).json({ error: 'Item não encontrado.' });
     }
 
-    await db.run('DELETE FROM ProjetoItem WHERE ProjetoID = ? AND ProjetoItemID = ?', [id, itemId]);
+    await db.run('DELETE FROM ProjetoItem WHERE empresa_id = ? AND ProjetoID = ? AND ProjetoItemID = ?', [empresaId, id, itemId]);
 
     // Recalculate project consolidated costs
-    await recalculateProjectCosts(id);
+    await recalculateProjectCosts(id, empresaId);
     
-    const sumRow = await db.get('SELECT SUM(ProjetoItemTotal) as sumTotal FROM ProjetoItem WHERE ProjetoID = ?', [id]);
+    const sumRow = await db.get('SELECT SUM(ProjetoItemTotal) as sumTotal FROM ProjetoItem WHERE empresa_id = ? AND ProjetoID = ?', [empresaId, id]);
     const newTotal = sumRow && sumRow.sumTotal ? sumRow.sumTotal : 0.0;
 
     res.json({ success: true, message: 'Item removido com sucesso.', CustoTotal: newTotal });
@@ -3993,6 +4871,7 @@ app.delete('/api/projetos/:id/itens/:itemId', authenticateToken, async (req, res
 
 // POST /api/projetos/:id/substituir-materiais - Substituição em lote de materiais em itens do projeto
 app.post('/api/projetos/:id/substituir-materiais', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { id } = req.params;
   const { itemIds, novoMaterialReferencia, novaQuantidade } = req.body;
 
@@ -4008,9 +4887,9 @@ app.post('/api/projetos/:id/substituir-materiais', authenticateToken, async (req
     const projCheck = await db.get(`
       SELECT p.*, o.status as orcamento_status 
       FROM projetos p 
-      JOIN orcamentos o ON p.orcamento_numero = o.numero 
-      WHERE p.id = ?
-    `, [id]);
+      LEFT JOIN orcamentos o ON p.orcamento_numero = o.numero AND p.empresa_id = o.empresa_id
+      WHERE p.empresa_id = ? AND p.id = ?
+    `, [empresaId, id]);
     
     if (!projCheck) {
       return res.status(404).json({ error: 'Projeto não encontrado.' });
@@ -4020,7 +4899,7 @@ app.post('/api/projetos/:id/substituir-materiais', authenticateToken, async (req
       return res.status(400).json({ error: 'Orçamentos Aprovados não podem ter seus materiais alterados.' });
     }
 
-    const mat = await db.get('SELECT * FROM Material WHERE MaterialReferencia = ?', [novoMaterialReferencia]);
+    const mat = await db.get('SELECT * FROM Material WHERE empresa_id = ? AND MaterialReferencia = ?', [empresaId, novoMaterialReferencia]);
     if (!mat) {
       return res.status(404).json({ error: 'Material de substituição não encontrado no catálogo.' });
     }
@@ -4035,7 +4914,7 @@ app.post('/api/projetos/:id/substituir-materiais', authenticateToken, async (req
     } else {
       // Fallback: soma da quantidade dos itens selecionados
       const placeholders = itemIds.map(() => '?').join(',');
-      const sumRow = await db.get(`SELECT SUM(ProjetoItemQtd) as totalQtd FROM ProjetoItem WHERE ProjetoID = ? AND ProjetoItemID IN (${placeholders})`, [id, ...itemIds]);
+      const sumRow = await db.get(`SELECT SUM(ProjetoItemQtd) as totalQtd FROM ProjetoItem WHERE empresa_id = ? AND ProjetoID = ? AND ProjetoItemID IN (${placeholders})`, [empresaId, id, ...itemIds]);
       qtdToInsert = sumRow && sumRow.totalQtd ? parseFloat(sumRow.totalQtd) : 1;
     }
 
@@ -4043,27 +4922,27 @@ app.post('/api/projetos/:id/substituir-materiais', authenticateToken, async (req
     const duracao = Math.round(tempo * qtdToInsert);
 
     // 1. Obter próximo ProjetoItemID
-    const seqRow = await db.get('SELECT MAX(ProjetoItemID) as maxSeq FROM ProjetoItem WHERE ProjetoID = ?', [id]);
+    const seqRow = await db.get('SELECT MAX(ProjetoItemID) as maxSeq FROM ProjetoItem WHERE empresa_id = ? AND ProjetoID = ?', [empresaId, id]);
     const nextSeq = seqRow && seqRow.maxSeq ? seqRow.maxSeq + 1 : 1;
 
     // 2. Incluir o novo material consolidado na lista de ProjetoItem
     await db.run(
-      `INSERT INTO ProjetoItem (ProjetoID, ProjetoItemID, MaterialReferencia, ProjetoItemVlrUnit, ProjetoItemUnidade, ProjetoItemQtd, ProjetoItemTotal, ProjetoItemTempo, ProjetoItemDuracao)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, nextSeq, novoMaterialReferencia, vlrUnit, unidade, qtdToInsert, total, tempo, duracao]
+      `INSERT INTO ProjetoItem (empresa_id, ProjetoID, ProjetoItemID, MaterialReferencia, ProjetoItemVlrUnit, ProjetoItemUnidade, ProjetoItemQtd, ProjetoItemTotal, ProjetoItemTempo, ProjetoItemDuracao)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [empresaId, id, nextSeq, novoMaterialReferencia, vlrUnit, unidade, qtdToInsert, total, tempo, duracao]
     );
 
     // 3. Excluir os itens substituídos da lista de materiais inseridos
     const delPlaceholders = itemIds.map(() => '?').join(',');
     await db.run(
-      `DELETE FROM ProjetoItem WHERE ProjetoID = ? AND ProjetoItemID IN (${delPlaceholders})`,
-      [id, ...itemIds]
+      `DELETE FROM ProjetoItem WHERE empresa_id = ? AND ProjetoID = ? AND ProjetoItemID IN (${delPlaceholders})`,
+      [empresaId, id, ...itemIds]
     );
 
     // 4. Se o serviço for FAB.MON.CXA ou FAB.ESP.PCA, ajusta FAB.EMB.UND
-    const monItem = await db.get('SELECT ProjetoItemQtd FROM ProjetoItem WHERE ProjetoID = ? AND MaterialReferencia = ?', [id, 'FAB.MON.CXA']);
-    const espItem = await db.get('SELECT ProjetoItemQtd FROM ProjetoItem WHERE ProjetoID = ? AND MaterialReferencia = ?', [id, 'FAB.ESP.PCA']);
-    const embItem = await db.get('SELECT * FROM ProjetoItem WHERE ProjetoID = ? AND MaterialReferencia = ?', [id, 'FAB.EMB.UND']);
+    const monItem = await db.get('SELECT ProjetoItemQtd FROM ProjetoItem WHERE empresa_id = ? AND ProjetoID = ? AND MaterialReferencia = ?', [empresaId, id, 'FAB.MON.CXA']);
+    const espItem = await db.get('SELECT ProjetoItemQtd FROM ProjetoItem WHERE empresa_id = ? AND ProjetoID = ? AND MaterialReferencia = ?', [empresaId, id, 'FAB.ESP.PCA']);
+    const embItem = await db.get('SELECT * FROM ProjetoItem WHERE empresa_id = ? AND ProjetoID = ? AND MaterialReferencia = ?', [empresaId, id, 'FAB.EMB.UND']);
     if (embItem) {
       const sumQtd = (monItem ? (parseFloat(monItem.ProjetoItemQtd) || 0) : 0) + (espItem ? (parseFloat(espItem.ProjetoItemQtd) || 0) : 0);
       const embVlrUnit = embItem.ProjetoItemVlrUnit || 0.0;
@@ -4071,13 +4950,13 @@ app.post('/api/projetos/:id/substituir-materiais', authenticateToken, async (req
       const embTempo = parseInt(embItem.ProjetoItemTempo, 10) || 0;
       const embDuracao = Math.round(embTempo * sumQtd);
       await db.run(
-        'UPDATE ProjetoItem SET ProjetoItemQtd = ?, ProjetoItemTotal = ?, ProjetoItemDuracao = ? WHERE ProjetoID = ? AND MaterialReferencia = ?',
-        [sumQtd, embTotal, embDuracao, id, 'FAB.EMB.UND']
+        'UPDATE ProjetoItem SET ProjetoItemQtd = ?, ProjetoItemTotal = ?, ProjetoItemDuracao = ? WHERE empresa_id = ? AND ProjetoID = ? AND MaterialReferencia = ?',
+        [sumQtd, embTotal, embDuracao, empresaId, id, 'FAB.EMB.UND']
       );
     }
 
     // 5. Recalcular custos consolidados do projeto
-    await recalculateProjectCosts(id);
+    await recalculateProjectCosts(id, empresaId);
 
     // 6. Buscar lista atualizada de itens e dados do projeto
     const itens = await db.all(`
@@ -4098,12 +4977,12 @@ app.post('/api/projetos/:id/substituir-materiais', authenticateToken, async (req
         pi.ProjetoItemTempo,
         pi.ProjetoItemDuracao
       FROM ProjetoItem pi
-      LEFT JOIN Material m ON pi.MaterialReferencia = m.MaterialReferencia
-      WHERE pi.ProjetoID = ?
+      LEFT JOIN Material m ON pi.MaterialReferencia = m.MaterialReferencia AND pi.empresa_id = m.empresa_id
+      WHERE pi.empresa_id = ? AND pi.ProjetoID = ?
       ORDER BY pi.ProjetoItemID ASC
-    `, [id]);
+    `, [empresaId, id]);
 
-    const proj = await db.get('SELECT * FROM projetos WHERE id = ?', [id]);
+    const proj = await db.get('SELECT * FROM projetos WHERE empresa_id = ? AND id = ?', [empresaId, id]);
 
     res.json({
       success: true,
@@ -4119,14 +4998,15 @@ app.post('/api/projetos/:id/substituir-materiais', authenticateToken, async (req
 
 // POST /api/projetos/:id/atualizar-precos-materiais
 app.post('/api/projetos/:id/atualizar-precos-materiais', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { id } = req.params;
   try {
     const proj = await db.get(`
       SELECT p.*, o.status as orcamento_status 
       FROM projetos p 
-      JOIN orcamentos o ON p.orcamento_numero = o.numero 
-      WHERE p.id = ?
-    `, [id]);
+      LEFT JOIN orcamentos o ON p.orcamento_numero = o.numero AND p.empresa_id = o.empresa_id
+      WHERE p.empresa_id = ? AND p.id = ?
+    `, [empresaId, id]);
 
     if (!proj) {
       return res.status(404).json({ error: 'Projeto não encontrado.' });
@@ -4136,62 +5016,18 @@ app.post('/api/projetos/:id/atualizar-precos-materiais', authenticateToken, asyn
       return res.status(400).json({ error: 'Orçamentos Aprovados não podem ter os preços de seus materiais alterados.' });
     }
 
-    // Update ProjetoItem with latest MaterialValorUnitario
+    // Update ProjetoItem with latest MaterialValorUnitario from the same company
     await db.run(`
-      UPDATE ProjetoItem
+      UPDATE ProjetoItem pi
+      JOIN Material m ON pi.MaterialReferencia = m.MaterialReferencia AND pi.empresa_id = m.empresa_id
       SET 
-        ProjetoItemVlrUnit = COALESCE((
-          SELECT m.MaterialValorUnitario 
-          FROM Material m 
-          WHERE m.MaterialReferencia = ProjetoItem.MaterialReferencia
-        ), ProjetoItemVlrUnit),
-        ProjetoItemTotal = ProjetoItemQtd * COALESCE((
-          SELECT m.MaterialValorUnitario 
-          FROM Material m 
-          WHERE m.MaterialReferencia = ProjetoItem.MaterialReferencia
-        ), ProjetoItemVlrUnit)
-      WHERE ProjetoID = ?
-    `, [id]);
+        pi.ProjetoItemVlrUnit = COALESCE(m.MaterialValorUnitario, pi.ProjetoItemVlrUnit),
+        pi.ProjetoItemTotal = pi.ProjetoItemQtd * COALESCE(m.MaterialValorUnitario, pi.ProjetoItemVlrUnit)
+      WHERE pi.empresa_id = ? AND pi.ProjetoID = ?
+    `, [empresaId, id]);
 
     // Recalculate project consolidated costs
-    await recalculateProjectCosts(id);
-
-    // Get updated project costs
-    const updatedProj = await db.get('SELECT * FROM projetos WHERE id = ?', [id]);
-    const custoTotal = updatedProj ? (updatedProj.CustoTotal || 0.0) : 0.0;
-
-    // Recalculate suggested & final sale price
-    const budget = await db.get('SELECT parametro_financeiro_id FROM orcamentos WHERE numero = ?', [updatedProj.orcamento_numero]);
-    const paramId = budget ? (budget.parametro_financeiro_id || 1) : 1;
-    const paramConfig = await db.get('SELECT * FROM configuracoes_financeiras WHERE parametro_id = ?', [paramId]);
-
-    const percImposto = updatedProj.perc_imposto !== null && updatedProj.perc_imposto !== undefined 
-      ? parseFloat(updatedProj.perc_imposto) 
-      : (paramConfig ? parseFloat(paramConfig.perc_imposto) || 6.0 : 6.0);
-
-    const percComissao = updatedProj.perc_comissao !== null && updatedProj.perc_comissao !== undefined 
-      ? parseFloat(updatedProj.perc_comissao) 
-      : (paramConfig ? parseFloat(paramConfig.perc_comissao) || 5.0 : 5.0);
-
-    const percFinanceiro = updatedProj.perc_custo_financeiro !== null && updatedProj.perc_custo_financeiro !== undefined 
-      ? parseFloat(updatedProj.perc_custo_financeiro) 
-      : (paramConfig ? parseFloat(paramConfig.perc_custo_financeiro) || 4.0 : 4.0);
-
-    const percLucro = updatedProj.perc_markup_lucro !== null && updatedProj.perc_markup_lucro !== undefined 
-      ? parseFloat(updatedProj.perc_markup_lucro) 
-      : (paramConfig ? parseFloat(paramConfig.perc_markup_lucro) || 20.0 : 20.0);
-
-    const totalPerc = percImposto + percComissao + percFinanceiro + percLucro;
-    const divisor = 1 - (totalPerc / 100);
-    const precoSugerido = (divisor > 0 && custoTotal > 0) ? (custoTotal / divisor) : (custoTotal * (1 + (totalPerc / 100)));
-
-    await db.run(`
-      UPDATE projetos 
-      SET 
-        preco_venda_sugerido = ?, 
-        preco_venda_final = ?
-      WHERE id = ?
-    `, [precoSugerido, precoSugerido, id]);
+    await recalculateProjectCosts(id, empresaId);
 
     // Fetch updated items
     const updatedItems = await db.all(`
@@ -4212,10 +5048,10 @@ app.post('/api/projetos/:id/atualizar-precos-materiais', authenticateToken, asyn
         pi.ProjetoItemTempo,
         pi.ProjetoItemDuracao
       FROM ProjetoItem pi
-      LEFT JOIN Material m ON pi.MaterialReferencia = m.MaterialReferencia
-      WHERE pi.ProjetoID = ?
+      LEFT JOIN Material m ON pi.MaterialReferencia = m.MaterialReferencia AND pi.empresa_id = m.empresa_id
+      WHERE pi.empresa_id = ? AND pi.ProjetoID = ?
       ORDER BY pi.ProjetoItemID ASC
-    `, [id]);
+    `, [empresaId, id]);
 
     const finalProject = await db.get(`
       SELECT 
@@ -4223,10 +5059,10 @@ app.post('/api/projetos/:id/atualizar-precos-materiais', authenticateToken, asyn
         pf.nome AS parametro_nome,
         pf.situacao AS parametro_situacao
       FROM projetos p
-      LEFT JOIN orcamentos o ON o.numero = p.orcamento_numero
-      LEFT JOIN Parametro_Financeiro pf ON pf.id = o.parametro_financeiro_id
-      WHERE p.id = ?
-    `, [id]);
+      LEFT JOIN orcamentos o ON o.numero = p.orcamento_numero AND o.empresa_id = p.empresa_id
+      LEFT JOIN Parametro_Financeiro pf ON pf.id = o.parametro_financeiro_id AND pf.empresa_id = p.empresa_id
+      WHERE p.empresa_id = ? AND p.id = ?
+    `, [empresaId, id]);
 
     res.json({
       success: true,
@@ -4242,19 +5078,20 @@ app.post('/api/projetos/:id/atualizar-precos-materiais', authenticateToken, asyn
 
 // POST /api/projetos/:id/gerar-orcamento (GerarOrcamentoProjeto)
 app.post('/api/projetos/:id/gerar-orcamento', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { id } = req.params;
   try {
-    const project = await db.get('SELECT * FROM projetos WHERE id = ?', [id]);
+    const project = await db.get('SELECT * FROM projetos WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     if (!project) {
       return res.status(404).json({ error: 'Projeto não encontrado.' });
     }
 
-    const materials = await db.all('SELECT * FROM Projeto_Materiais WHERE projeto_id = ?', [id]);
+    const materials = await db.all('SELECT * FROM Projeto_Materiais WHERE empresa_id = ? AND projeto_id = ?', [empresaId, id]);
 
     await db.run('BEGIN TRANSACTION');
 
     // 1 - Limpa itens antigos para este projeto na tabela ProjetoItem
-    await db.run('DELETE FROM ProjetoItem WHERE ProjetoID = ?', [id]);
+    await db.run('DELETE FROM ProjetoItem WHERE empresa_id = ? AND ProjetoID = ?', [empresaId, id]);
 
     let currentSeq = 1;
     let custoTotal = 0;
@@ -4267,13 +5104,10 @@ app.post('/api/projetos/:id/gerar-orcamento', authenticateToken, async (req, res
     const qtdEmbUnd = qtdMonCxa + qtdEspPca;
 
     for (const m of materials) {
-      // Ignora a referência FAB.QTD.PCA caso exista em registros legados
       if (m.referencia === 'FAB.QTD.PCA') continue;
 
-      // Recupera o material da tabela global Material usando a referência
-      let globalMat = await db.get('SELECT * FROM Material WHERE MaterialReferencia = ?', [m.referencia]);
+      let globalMat = await db.get('SELECT * FROM Material WHERE empresa_id = ? AND MaterialReferencia = ?', [empresaId, m.referencia]);
       
-      // Se a referência não existir em Material, insere com segurança para não violar Foreign Key
       if (!globalMat) {
         let normUn = (m.un || '').toUpperCase().trim();
         if (normUn === 'UN') normUn = 'UNI';
@@ -4283,9 +5117,9 @@ app.post('/api/projetos/:id/gerar-orcamento', authenticateToken, async (req, res
         }
         const matTipo = (m.tipo || (m.referencia && m.referencia.startsWith('FAB.') ? 'Serviço' : 'Produto'));
         await db.run(
-          `INSERT INTO Material (MaterialReferencia, MaterialDescricao, MaterialUnidade, MaterialValorUnitario, GrupoSigla, ProdutoGrupo, MaterialTipo, MaterialTempo)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          [m.referencia, m.descricao || m.referencia, normUn, 0.0, null, 8, matTipo, 0]
+          `INSERT INTO Material (empresa_id, MaterialReferencia, MaterialDescricao, MaterialUnidade, MaterialValorUnitario, GrupoSigla, ProdutoGrupo, MaterialTipo, MaterialTempo)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [empresaId, m.referencia, m.descricao || m.referencia, normUn, 0.0, null, 8, matTipo, 0]
         );
         globalMat = {
           MaterialReferencia: m.referencia,
@@ -4310,22 +5144,22 @@ app.post('/api/projetos/:id/gerar-orcamento', authenticateToken, async (req, res
       const duracao = Math.round(tempo * qtd);
 
       await db.run(
-        `INSERT INTO ProjetoItem (ProjetoID, ProjetoItemID, MaterialReferencia, ProjetoItemVlrUnit, ProjetoItemUnidade, ProjetoItemQtd, ProjetoItemTotal, ProjetoItemTempo, ProjetoItemDuracao)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [id, currentSeq, m.referencia, vlrUnit, unidade, qtd, total, tempo, duracao]
+        `INSERT INTO ProjetoItem (empresa_id, ProjetoID, ProjetoItemID, MaterialReferencia, ProjetoItemVlrUnit, ProjetoItemUnidade, ProjetoItemQtd, ProjetoItemTotal, ProjetoItemTempo, ProjetoItemDuracao)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [empresaId, id, currentSeq, m.referencia, vlrUnit, unidade, qtd, total, tempo, duracao]
       );
       custoTotal += total;
       currentSeq++;
     }
 
     // Recalculate project consolidated costs and total duration
-    await recalculateProjectCosts(id);
+    await recalculateProjectCosts(id, empresaId);
 
     // Auto-generate project description if empty
     if (!project.descricao || project.descricao.trim() === '') {
-      const autoDesc = await buildProjectDescriptionFromDB(id);
+      const autoDesc = await buildProjectDescriptionFromDB(id, empresaId);
       if (autoDesc) {
-        await db.run('UPDATE projetos SET descricao = ? WHERE id = ?', [autoDesc, id]);
+        await db.run('UPDATE projetos SET descricao = ? WHERE empresa_id = ? AND id = ?', [autoDesc, empresaId, id]);
       }
     }
 
@@ -4345,11 +5179,13 @@ app.post('/api/projetos/:id/gerar-orcamento', authenticateToken, async (req, res
 
 // 14. Parametros Financeiros e Configuracoes Financeiras Routes
 app.get('/api/parametros-financeiros', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { situacao } = req.query;
   try {
     let query = `
       SELECT 
         pf.id, 
+        pf.empresa_id,
         pf.nome, 
         pf.situacao, 
         pf.created_at,
@@ -4361,11 +5197,12 @@ app.get('/api/parametros-financeiros', authenticateToken, async (req, res) => {
         cf.metodo_calculo,
         cf.updated_at
       FROM Parametro_Financeiro pf
-      LEFT JOIN configuracoes_financeiras cf ON cf.parametro_id = pf.id
+      LEFT JOIN configuracoes_financeiras cf ON cf.parametro_id = pf.id AND cf.empresa_id = pf.empresa_id
+      WHERE pf.empresa_id = ?
     `;
-    const params = [];
+    const params = [empresaId];
     if (situacao) {
-      query += ` WHERE pf.situacao = ?`;
+      query += ` AND pf.situacao = ?`;
       params.push(situacao);
     }
     query += ` ORDER BY pf.id ASC`;
@@ -4378,11 +5215,13 @@ app.get('/api/parametros-financeiros', authenticateToken, async (req, res) => {
 });
 
 app.get('/api/parametros-financeiros/:id', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { id } = req.params;
   try {
     const item = await db.get(`
       SELECT 
         pf.id, 
+        pf.empresa_id,
         pf.nome, 
         pf.situacao, 
         pf.created_at,
@@ -4394,9 +5233,9 @@ app.get('/api/parametros-financeiros/:id', authenticateToken, async (req, res) =
         cf.metodo_calculo,
         cf.updated_at
       FROM Parametro_Financeiro pf
-      LEFT JOIN configuracoes_financeiras cf ON cf.parametro_id = pf.id
-      WHERE pf.id = ?
-    `, [id]);
+      LEFT JOIN configuracoes_financeiras cf ON cf.parametro_id = pf.id AND cf.empresa_id = pf.empresa_id
+      WHERE pf.empresa_id = ? AND pf.id = ?
+    `, [empresaId, id]);
     if (!item) {
       return res.status(404).json({ error: 'Parâmetro financeiro não encontrado.' });
     }
@@ -4408,6 +5247,7 @@ app.get('/api/parametros-financeiros/:id', authenticateToken, async (req, res) =
 });
 
 app.post('/api/parametros-financeiros', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { 
     nome, 
     situacao, 
@@ -4425,15 +5265,16 @@ app.post('/api/parametros-financeiros', authenticateToken, async (req, res) => {
 
   try {
     const result = await db.run(
-      'INSERT INTO Parametro_Financeiro (nome, situacao) VALUES (?, ?)',
-      [nome.trim(), situacao || 'Ativado']
+      'INSERT INTO Parametro_Financeiro (empresa_id, nome, situacao) VALUES (?, ?, ?)',
+      [empresaId, nome.trim(), situacao || 'Ativado']
     );
     const parametroId = result.lastID;
 
     await db.run(`
-      INSERT INTO configuracoes_financeiras (parametro_id, perc_imposto, perc_comissao, perc_custo_financeiro, perc_markup_lucro, perc_margem_minima, metodo_calculo)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO configuracoes_financeiras (empresa_id, parametro_id, perc_imposto, perc_comissao, perc_custo_financeiro, perc_markup_lucro, perc_margem_minima, metodo_calculo)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `, [
+      empresaId,
       parametroId,
       parseFloat(perc_imposto) || 0,
       parseFloat(perc_comissao) || 0,
@@ -4446,6 +5287,7 @@ app.post('/api/parametros-financeiros', authenticateToken, async (req, res) => {
     const created = await db.get(`
       SELECT 
         pf.id, 
+        pf.empresa_id,
         pf.nome, 
         pf.situacao, 
         pf.created_at,
@@ -4457,9 +5299,9 @@ app.post('/api/parametros-financeiros', authenticateToken, async (req, res) => {
         cf.metodo_calculo,
         cf.updated_at
       FROM Parametro_Financeiro pf
-      LEFT JOIN configuracoes_financeiras cf ON cf.parametro_id = pf.id
-      WHERE pf.id = ?
-    `, [parametroId]);
+      LEFT JOIN configuracoes_financeiras cf ON cf.parametro_id = pf.id AND cf.empresa_id = pf.empresa_id
+      WHERE pf.empresa_id = ? AND pf.id = ?
+    `, [empresaId, parametroId]);
 
     res.status(201).json(created);
   } catch (error) {
@@ -4469,6 +5311,7 @@ app.post('/api/parametros-financeiros', authenticateToken, async (req, res) => {
 });
 
 app.put('/api/parametros-financeiros/:id', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { id } = req.params;
   const { 
     nome, 
@@ -4486,17 +5329,17 @@ app.put('/api/parametros-financeiros/:id', authenticateToken, async (req, res) =
   }
 
   try {
-    const existing = await db.get('SELECT * FROM Parametro_Financeiro WHERE id = ?', [id]);
+    const existing = await db.get('SELECT * FROM Parametro_Financeiro WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     if (!existing) {
       return res.status(404).json({ error: 'Parâmetro financeiro não encontrado.' });
     }
 
     await db.run(
-      'UPDATE Parametro_Financeiro SET nome = ?, situacao = ? WHERE id = ?',
-      [nome.trim(), situacao || 'Ativado', id]
+      'UPDATE Parametro_Financeiro SET nome = ?, situacao = ? WHERE empresa_id = ? AND id = ?',
+      [nome.trim(), situacao || 'Ativado', empresaId, id]
     );
 
-    const conf = await db.get('SELECT * FROM configuracoes_financeiras WHERE parametro_id = ?', [id]);
+    const conf = await db.get('SELECT * FROM configuracoes_financeiras WHERE empresa_id = ? AND parametro_id = ?', [empresaId, id]);
     if (conf) {
       await db.run(`
         UPDATE configuracoes_financeiras 
@@ -4508,7 +5351,7 @@ app.put('/api/parametros-financeiros/:id', authenticateToken, async (req, res) =
           perc_margem_minima = ?, 
           metodo_calculo = ?, 
           updated_at = CURRENT_TIMESTAMP
-        WHERE parametro_id = ?
+        WHERE empresa_id = ? AND parametro_id = ?
       `, [
         parseFloat(perc_imposto) || 0,
         parseFloat(perc_comissao) || 0,
@@ -4516,13 +5359,15 @@ app.put('/api/parametros-financeiros/:id', authenticateToken, async (req, res) =
         parseFloat(perc_markup_lucro) || 0,
         parseFloat(perc_margem_minima) || 0,
         metodo_calculo || 'divisor',
+        empresaId,
         id
       ]);
     } else {
       await db.run(`
-        INSERT INTO configuracoes_financeiras (parametro_id, perc_imposto, perc_comissao, perc_custo_financeiro, perc_markup_lucro, perc_margem_minima, metodo_calculo)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO configuracoes_financeiras (empresa_id, parametro_id, perc_imposto, perc_comissao, perc_custo_financeiro, perc_markup_lucro, perc_margem_minima, metodo_calculo)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `, [
+        empresaId,
         id,
         parseFloat(perc_imposto) || 0,
         parseFloat(perc_comissao) || 0,
@@ -4536,6 +5381,7 @@ app.put('/api/parametros-financeiros/:id', authenticateToken, async (req, res) =
     const updated = await db.get(`
       SELECT 
         pf.id, 
+        pf.empresa_id,
         pf.nome, 
         pf.situacao, 
         pf.created_at,
@@ -4547,9 +5393,9 @@ app.put('/api/parametros-financeiros/:id', authenticateToken, async (req, res) =
         cf.metodo_calculo,
         cf.updated_at
       FROM Parametro_Financeiro pf
-      LEFT JOIN configuracoes_financeiras cf ON cf.parametro_id = pf.id
-      WHERE pf.id = ?
-    `, [id]);
+      LEFT JOIN configuracoes_financeiras cf ON cf.parametro_id = pf.id AND cf.empresa_id = pf.empresa_id
+      WHERE pf.empresa_id = ? AND pf.id = ?
+    `, [empresaId, id]);
 
     res.json(updated);
   } catch (error) {
@@ -4559,19 +5405,21 @@ app.put('/api/parametros-financeiros/:id', authenticateToken, async (req, res) =
 });
 
 app.delete('/api/parametros-financeiros/:id', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { id } = req.params;
   try {
-    const existing = await db.get('SELECT * FROM Parametro_Financeiro WHERE id = ?', [id]);
+    const existing = await db.get('SELECT * FROM Parametro_Financeiro WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     if (!existing) {
       return res.status(404).json({ error: 'Parâmetro financeiro não encontrado.' });
     }
 
-    const inUse = await db.get('SELECT COUNT(*) as count FROM orcamentos WHERE parametro_financeiro_id = ?', [id]);
+    const inUse = await db.get('SELECT COUNT(*) as count FROM orcamentos WHERE empresa_id = ? AND parametro_financeiro_id = ?', [empresaId, id]);
     if (inUse && inUse.count > 0) {
       return res.status(400).json({ error: `Este parâmetro está vinculado a ${inUse.count} orçamento(s) e não pode ser excluído. Em vez disso, altere a situação para 'Desativado'.` });
     }
 
-    await db.run('DELETE FROM Parametro_Financeiro WHERE id = ?', [id]);
+    await db.run('DELETE FROM configuracoes_financeiras WHERE empresa_id = ? AND parametro_id = ?', [empresaId, id]);
+    await db.run('DELETE FROM Parametro_Financeiro WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     res.json({ message: 'Parâmetro financeiro removido com sucesso.' });
   } catch (error) {
     console.error('DELETE PARAMETRO FINANCEIRO ERROR:', error);
@@ -4580,10 +5428,12 @@ app.delete('/api/parametros-financeiros/:id', authenticateToken, async (req, res
 });
 
 app.get('/api/configuracoes/financeiro', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   try {
     let config = await db.get(`
       SELECT 
         pf.id, 
+        pf.empresa_id,
         pf.nome, 
         pf.situacao, 
         cf.perc_imposto, 
@@ -4593,15 +5443,16 @@ app.get('/api/configuracoes/financeiro', authenticateToken, async (req, res) => 
         cf.perc_margem_minima, 
         cf.metodo_calculo
       FROM Parametro_Financeiro pf
-      LEFT JOIN configuracoes_financeiras cf ON cf.parametro_id = pf.id
-      WHERE pf.situacao = 'Ativado'
+      LEFT JOIN configuracoes_financeiras cf ON cf.parametro_id = pf.id AND cf.empresa_id = pf.empresa_id
+      WHERE pf.empresa_id = ? AND pf.situacao = 'Ativado'
       ORDER BY pf.id ASC
       LIMIT 1
-    `);
+    `, [empresaId]);
     if (!config) {
       config = await db.get(`
         SELECT 
           pf.id, 
+          pf.empresa_id,
           pf.nome, 
           pf.situacao, 
           cf.perc_imposto, 
@@ -4611,12 +5462,15 @@ app.get('/api/configuracoes/financeiro', authenticateToken, async (req, res) => 
           cf.perc_margem_minima, 
           cf.metodo_calculo
         FROM Parametro_Financeiro pf
-        LEFT JOIN configuracoes_financeiras cf ON cf.parametro_id = pf.id
-        WHERE pf.id = 1
-      `);
+        LEFT JOIN configuracoes_financeiras cf ON cf.parametro_id = pf.id AND cf.empresa_id = pf.empresa_id
+        WHERE pf.empresa_id = ?
+        ORDER BY pf.id ASC
+        LIMIT 1
+      `, [empresaId]);
     }
     res.json(config || {
       id: 1,
+      empresa_id: empresaId,
       nome: 'Padrão Fábrica',
       situacao: 'Ativado',
       perc_imposto: 6.0,
@@ -4638,9 +5492,10 @@ app.get('/api/configuracoes/financeiro', authenticateToken, async (req, res) => 
 
 // GET /api/formas-pagamento
 app.get('/api/formas-pagamento', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   try {
-    const formas = await db.all('SELECT * FROM formas_pagamento ORDER BY ordem ASC, id ASC');
-    const condicoes = await db.all('SELECT * FROM condicoes_pagamento ORDER BY ordem ASC, id ASC');
+    const formas = await db.all('SELECT * FROM formas_pagamento WHERE empresa_id = ? ORDER BY ordem ASC, id ASC', [empresaId]);
+    const condicoes = await db.all('SELECT * FROM condicoes_pagamento WHERE empresa_id = ? ORDER BY ordem ASC, id ASC', [empresaId]);
 
     const result = formas.map(f => ({
       ...f,
@@ -4656,13 +5511,14 @@ app.get('/api/formas-pagamento', authenticateToken, async (req, res) => {
 
 // GET /api/formas-pagamento/:id
 app.get('/api/formas-pagamento/:id', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { id } = req.params;
   try {
-    const forma = await db.get('SELECT * FROM formas_pagamento WHERE id = ?', [id]);
+    const forma = await db.get('SELECT * FROM formas_pagamento WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     if (!forma) {
       return res.status(404).json({ error: 'Forma de pagamento não encontrada.' });
     }
-    const condicoes = await db.all('SELECT * FROM condicoes_pagamento WHERE forma_pagamento_id = ? ORDER BY ordem ASC, id ASC', [id]);
+    const condicoes = await db.all('SELECT * FROM condicoes_pagamento WHERE empresa_id = ? AND forma_pagamento_id = ? ORDER BY ordem ASC, id ASC', [empresaId, id]);
     res.json({ ...forma, condicoes });
   } catch (error) {
     console.error('GET FORMA PAGAMENTO ERROR:', error);
@@ -4672,6 +5528,7 @@ app.get('/api/formas-pagamento/:id', authenticateToken, async (req, res) => {
 
 // POST /api/formas-pagamento
 app.post('/api/formas-pagamento', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { nome, descricao, valor_minimo, valor_maximo, ativo, ordem, condicoes } = req.body;
   if (!nome || !nome.trim()) {
     return res.status(400).json({ error: 'Nome da forma de pagamento é obrigatório.' });
@@ -4684,9 +5541,9 @@ app.post('/api/formas-pagamento', authenticateToken, async (req, res) => {
     const ord = parseInt(ordem, 10) || 1;
 
     const result = await db.run(
-      `INSERT INTO formas_pagamento (nome, descricao, valor_minimo, valor_maximo, ativo, ordem)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [nome.trim(), (descricao || '').trim(), vMin, vMax, isAtivo, ord]
+      `INSERT INTO formas_pagamento (empresa_id, nome, descricao, valor_minimo, valor_maximo, ativo, ordem)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [empresaId, nome.trim(), (descricao || '').trim(), vMin, vMax, isAtivo, ord]
     );
 
     const formaId = result.lastID;
@@ -4696,9 +5553,10 @@ app.post('/api/formas-pagamento', authenticateToken, async (req, res) => {
         const c = condicoes[i];
         if (c.descricao && c.descricao.trim()) {
           await db.run(
-            `INSERT INTO condicoes_pagamento (forma_pagamento_id, perc_entrada, num_parcelas, perc_desconto, meio_pagamento, descricao, ordem)
-             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO condicoes_pagamento (empresa_id, forma_pagamento_id, perc_entrada, num_parcelas, perc_desconto, meio_pagamento, descricao, ordem)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
             [
+              empresaId,
               formaId,
               parseFloat(c.perc_entrada) || 0,
               parseInt(c.num_parcelas, 10) || 0,
@@ -4712,8 +5570,8 @@ app.post('/api/formas-pagamento', authenticateToken, async (req, res) => {
       }
     }
 
-    const createdForma = await db.get('SELECT * FROM formas_pagamento WHERE id = ?', [formaId]);
-    const createdCondicoes = await db.all('SELECT * FROM condicoes_pagamento WHERE forma_pagamento_id = ? ORDER BY ordem ASC, id ASC', [formaId]);
+    const createdForma = await db.get('SELECT * FROM formas_pagamento WHERE empresa_id = ? AND id = ?', [empresaId, formaId]);
+    const createdCondicoes = await db.all('SELECT * FROM condicoes_pagamento WHERE empresa_id = ? AND forma_pagamento_id = ? ORDER BY ordem ASC, id ASC', [empresaId, formaId]);
     res.status(201).json({ ...createdForma, condicoes: createdCondicoes });
   } catch (error) {
     console.error('POST FORMA PAGAMENTO ERROR:', error);
@@ -4723,6 +5581,7 @@ app.post('/api/formas-pagamento', authenticateToken, async (req, res) => {
 
 // PUT /api/formas-pagamento/:id
 app.put('/api/formas-pagamento/:id', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { id } = req.params;
   const { nome, descricao, valor_minimo, valor_maximo, ativo, ordem } = req.body;
   if (!nome || !nome.trim()) {
@@ -4730,7 +5589,7 @@ app.put('/api/formas-pagamento/:id', authenticateToken, async (req, res) => {
   }
 
   try {
-    const existing = await db.get('SELECT * FROM formas_pagamento WHERE id = ?', [id]);
+    const existing = await db.get('SELECT * FROM formas_pagamento WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     if (!existing) {
       return res.status(404).json({ error: 'Forma de pagamento não encontrada.' });
     }
@@ -4743,12 +5602,12 @@ app.put('/api/formas-pagamento/:id', authenticateToken, async (req, res) => {
     await db.run(
       `UPDATE formas_pagamento 
        SET nome = ?, descricao = ?, valor_minimo = ?, valor_maximo = ?, ativo = ?, ordem = ?
-       WHERE id = ?`,
-      [nome.trim(), (descricao !== undefined ? descricao : existing.descricao || '').trim(), vMin, vMax, isAtivo, ord, id]
+       WHERE empresa_id = ? AND id = ?`,
+      [nome.trim(), (descricao !== undefined ? descricao : existing.descricao || '').trim(), vMin, vMax, isAtivo, ord, empresaId, id]
     );
 
-    const updated = await db.get('SELECT * FROM formas_pagamento WHERE id = ?', [id]);
-    const condicoes = await db.all('SELECT * FROM condicoes_pagamento WHERE forma_pagamento_id = ? ORDER BY ordem ASC, id ASC', [id]);
+    const updated = await db.get('SELECT * FROM formas_pagamento WHERE empresa_id = ? AND id = ?', [empresaId, id]);
+    const condicoes = await db.all('SELECT * FROM condicoes_pagamento WHERE empresa_id = ? AND forma_pagamento_id = ? ORDER BY ordem ASC, id ASC', [empresaId, id]);
     res.json({ ...updated, condicoes });
   } catch (error) {
     console.error('PUT FORMA PAGAMENTO ERROR:', error);
@@ -4758,15 +5617,16 @@ app.put('/api/formas-pagamento/:id', authenticateToken, async (req, res) => {
 
 // DELETE /api/formas-pagamento/:id
 app.delete('/api/formas-pagamento/:id', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { id } = req.params;
   try {
-    const existing = await db.get('SELECT * FROM formas_pagamento WHERE id = ?', [id]);
+    const existing = await db.get('SELECT * FROM formas_pagamento WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     if (!existing) {
       return res.status(404).json({ error: 'Forma de pagamento não encontrada.' });
     }
 
-    await db.run('DELETE FROM condicoes_pagamento WHERE forma_pagamento_id = ?', [id]);
-    await db.run('DELETE FROM formas_pagamento WHERE id = ?', [id]);
+    await db.run('DELETE FROM condicoes_pagamento WHERE empresa_id = ? AND forma_pagamento_id = ?', [empresaId, id]);
+    await db.run('DELETE FROM formas_pagamento WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     res.json({ message: 'Forma de pagamento excluída com sucesso.' });
   } catch (error) {
     console.error('DELETE FORMA PAGAMENTO ERROR:', error);
@@ -4776,6 +5636,7 @@ app.delete('/api/formas-pagamento/:id', authenticateToken, async (req, res) => {
 
 // POST /api/formas-pagamento/:id/condicoes
 app.post('/api/formas-pagamento/:id/condicoes', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { id } = req.params;
   const { perc_entrada, num_parcelas, perc_desconto, meio_pagamento, descricao, ordem } = req.body;
 
@@ -4784,15 +5645,16 @@ app.post('/api/formas-pagamento/:id/condicoes', authenticateToken, async (req, r
   }
 
   try {
-    const forma = await db.get('SELECT * FROM formas_pagamento WHERE id = ?', [id]);
+    const forma = await db.get('SELECT * FROM formas_pagamento WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     if (!forma) {
       return res.status(404).json({ error: 'Forma de pagamento não encontrada.' });
     }
 
     const result = await db.run(
-      `INSERT INTO condicoes_pagamento (forma_pagamento_id, perc_entrada, num_parcelas, perc_desconto, meio_pagamento, descricao, ordem)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO condicoes_pagamento (empresa_id, forma_pagamento_id, perc_entrada, num_parcelas, perc_desconto, meio_pagamento, descricao, ordem)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [
+        empresaId,
         id,
         parseFloat(perc_entrada) || 0,
         parseInt(num_parcelas, 10) || 0,
@@ -4803,7 +5665,7 @@ app.post('/api/formas-pagamento/:id/condicoes', authenticateToken, async (req, r
       ]
     );
 
-    const createdCondicao = await db.get('SELECT * FROM condicoes_pagamento WHERE id = ?', [result.lastID]);
+    const createdCondicao = await db.get('SELECT * FROM condicoes_pagamento WHERE empresa_id = ? AND id = ?', [empresaId, result.lastID]);
     res.status(201).json(createdCondicao);
   } catch (error) {
     console.error('POST CONDICAO PAGAMENTO ERROR:', error);
@@ -4813,6 +5675,7 @@ app.post('/api/formas-pagamento/:id/condicoes', authenticateToken, async (req, r
 
 // PUT /api/condicoes-pagamento/:id
 app.put('/api/condicoes-pagamento/:id', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { id } = req.params;
   const { perc_entrada, num_parcelas, perc_desconto, meio_pagamento, descricao, ordem } = req.body;
 
@@ -4821,7 +5684,7 @@ app.put('/api/condicoes-pagamento/:id', authenticateToken, async (req, res) => {
   }
 
   try {
-    const existing = await db.get('SELECT * FROM condicoes_pagamento WHERE id = ?', [id]);
+    const existing = await db.get('SELECT * FROM condicoes_pagamento WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     if (!existing) {
       return res.status(404).json({ error: 'Condição de pagamento não encontrada.' });
     }
@@ -4829,7 +5692,7 @@ app.put('/api/condicoes-pagamento/:id', authenticateToken, async (req, res) => {
     await db.run(
       `UPDATE condicoes_pagamento 
        SET perc_entrada = ?, num_parcelas = ?, perc_desconto = ?, meio_pagamento = ?, descricao = ?, ordem = ?
-       WHERE id = ?`,
+       WHERE empresa_id = ? AND id = ?`,
       [
         perc_entrada !== undefined ? (parseFloat(perc_entrada) || 0) : existing.perc_entrada,
         num_parcelas !== undefined ? (parseInt(num_parcelas, 10) || 0) : existing.num_parcelas,
@@ -4837,11 +5700,12 @@ app.put('/api/condicoes-pagamento/:id', authenticateToken, async (req, res) => {
         meio_pagamento !== undefined ? (meio_pagamento || '').trim() : existing.meio_pagamento,
         descricao.trim(),
         ordem !== undefined ? (parseInt(ordem, 10) || 1) : existing.ordem,
+        empresaId,
         id
       ]
     );
 
-    const updated = await db.get('SELECT * FROM condicoes_pagamento WHERE id = ?', [id]);
+    const updated = await db.get('SELECT * FROM condicoes_pagamento WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     res.json(updated);
   } catch (error) {
     console.error('PUT CONDICAO PAGAMENTO ERROR:', error);
@@ -4851,14 +5715,15 @@ app.put('/api/condicoes-pagamento/:id', authenticateToken, async (req, res) => {
 
 // DELETE /api/condicoes-pagamento/:id
 app.delete('/api/condicoes-pagamento/:id', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { id } = req.params;
   try {
-    const existing = await db.get('SELECT * FROM condicoes_pagamento WHERE id = ?', [id]);
+    const existing = await db.get('SELECT * FROM condicoes_pagamento WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     if (!existing) {
       return res.status(404).json({ error: 'Condição de pagamento não encontrada.' });
     }
 
-    await db.run('DELETE FROM condicoes_pagamento WHERE id = ?', [id]);
+    await db.run('DELETE FROM condicoes_pagamento WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     res.json({ message: 'Condição de pagamento excluída com sucesso.' });
   } catch (error) {
     console.error('DELETE CONDICAO PAGAMENTO ERROR:', error);
@@ -4872,16 +5737,20 @@ app.delete('/api/condicoes-pagamento/:id', authenticateToken, async (req, res) =
 
 // GET /api/orcamentos/:numero/propostas - Listar todas as propostas salvas do orçamento
 app.get('/api/orcamentos/:numero/propostas', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { numero } = req.params;
   try {
+    const orc = await db.get('SELECT numero FROM orcamentos WHERE empresa_id = ? AND numero = ?', [empresaId, numero]);
+    if (!orc) return res.status(404).json({ error: 'Orçamento não encontrado.' });
+
     const list = await db.all(
-      `SELECT id, orcamento_numero, versao, codigo, titulo, descricao, valor_total, 
+      `SELECT id, empresa_id, orcamento_numero, versao, codigo, titulo, descricao, valor_total, 
               desconto_percentual, desconto_valor, valor_final, forma_pagamento_selecionada, 
               status, observacoes, criado_por, criado_por_nome, criado_em, updated_at
        FROM propostas 
-       WHERE orcamento_numero = ? 
+       WHERE empresa_id = ? AND orcamento_numero = ? 
        ORDER BY versao DESC, id DESC`,
-      [numero]
+      [empresaId, numero]
     );
     res.json(list || []);
   } catch (error) {
@@ -4892,6 +5761,7 @@ app.get('/api/orcamentos/:numero/propostas', authenticateToken, async (req, res)
 
 // POST /api/orcamentos/:numero/propostas - Gerar nova versão da proposta para o orçamento
 app.post('/api/orcamentos/:numero/propostas', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { numero } = req.params;
   const { titulo, observacoes, status } = req.body || {};
   try {
@@ -4899,16 +5769,16 @@ app.post('/api/orcamentos/:numero/propostas', authenticateToken, async (req, res
       `SELECT o.*, c.nome as cliente_nome, c.telefone as cliente_telefone, c.email as cliente_email,
               c.documento as cliente_documento, c.endereco as cliente_endereco
        FROM orcamentos o 
-       LEFT JOIN clientes c ON o.cliente_id = c.id 
-       WHERE o.numero = ?`,
-      [numero]
+       LEFT JOIN clientes c ON o.cliente_id = c.id AND o.empresa_id = c.empresa_id
+       WHERE o.empresa_id = ? AND o.numero = ?`,
+      [empresaId, numero]
     );
     if (!orc) {
       return res.status(404).json({ error: 'Orçamento não encontrado.' });
     }
 
     // Buscar projetos do orçamento
-    const projetos = await db.all('SELECT * FROM projetos WHERE orcamento_numero = ? ORDER BY id ASC', [numero]);
+    const projetos = await db.all('SELECT * FROM projetos WHERE empresa_id = ? AND orcamento_numero = ? ORDER BY id ASC', [empresaId, numero]);
 
     // Buscar itens e anexos dos projetos
     const itensPorProjeto = {};
@@ -4923,10 +5793,10 @@ app.post('/api/orcamentos/:numero/propostas', authenticateToken, async (req, res
           pi.ProjetoItemVlrUnit, pi.ProjetoItemUnidade, pi.ProjetoItemQtd,
           pi.ProjetoItemTotal, pi.ProjetoItemTempo, pi.ProjetoItemDuracao
         FROM ProjetoItem pi
-        LEFT JOIN Material m ON pi.MaterialReferencia = m.MaterialReferencia
-        WHERE pi.ProjetoID = ?
+        LEFT JOIN Material m ON pi.MaterialReferencia = m.MaterialReferencia AND pi.empresa_id = m.empresa_id
+        WHERE pi.empresa_id = ? AND pi.ProjetoID = ?
         ORDER BY pi.ProjetoItemID ASC
-      `, [p.id]);
+      `, [empresaId, p.id]);
 
       if (!itens || itens.length === 0) {
         itens = await db.all(`
@@ -4943,34 +5813,34 @@ app.post('/api/orcamentos/:numero/propostas', authenticateToken, async (req, res
             COALESCE(m.MaterialTempo, 0) AS ProjetoItemTempo,
             0 AS ProjetoItemDuracao
           FROM Projeto_Materiais pm
-          LEFT JOIN Material m ON pm.referencia = m.MaterialReferencia
-          WHERE pm.projeto_id = ?
+          LEFT JOIN Material m ON pm.referencia = m.MaterialReferencia AND pm.empresa_id = m.empresa_id
+          WHERE pm.empresa_id = ? AND pm.projeto_id = ?
           ORDER BY pm.id ASC
-        `, [p.id]);
+        `, [empresaId, p.id]);
       }
       itensPorProjeto[p.id] = itens || [];
 
-      const anexos = await db.all('SELECT * FROM projeto_anexos WHERE projeto_id = ? ORDER BY id ASC', [p.id]);
+      const anexos = await db.all('SELECT * FROM projeto_anexos WHERE empresa_id = ? AND projeto_id = ? ORDER BY id ASC', [empresaId, p.id]);
       anexosPorProjeto[p.id] = anexos || [];
     }
 
-    // Buscar Formas de Pagamento e Condições
-    const formas = await db.all('SELECT * FROM formas_pagamento WHERE ativo = "Sim" ORDER BY ordem ASC, id ASC');
-    const condicoes = await db.all('SELECT * FROM condicoes_pagamento ORDER BY ordem ASC, id ASC');
+    // Buscar Formas de Pagamento e Condições da empresa
+    const formas = await db.all('SELECT * FROM formas_pagamento WHERE empresa_id = ? AND ativo = "Sim" ORDER BY ordem ASC, id ASC', [empresaId]);
+    const condicoes = await db.all('SELECT * FROM condicoes_pagamento WHERE empresa_id = ? ORDER BY ordem ASC, id ASC', [empresaId]);
     const formasComCondicoes = (formas || []).map(f => ({
       ...f,
       condicoes: (condicoes || []).filter(c => c.forma_pagamento_id === f.id)
     }));
 
     // Buscar parâmetros da empresa
-    const empresaParamsList = await db.all('SELECT chave, conteudo FROM parametros_empresa');
+    const empresaParamsList = await db.all('SELECT chave, conteudo FROM parametros_empresa WHERE empresa_id = ?', [empresaId]);
     const empresaParams = {};
     (empresaParamsList || []).forEach(p => {
       empresaParams[p.chave] = p.conteudo;
     });
 
     // Calcular próxima versão
-    const lastVersaoRow = await db.get('SELECT MAX(versao) as max_versao FROM propostas WHERE orcamento_numero = ?', [numero]);
+    const lastVersaoRow = await db.get('SELECT MAX(versao) as max_versao FROM propostas WHERE empresa_id = ? AND orcamento_numero = ?', [empresaId, numero]);
     const novaVersao = (lastVersaoRow?.max_versao ? parseInt(lastVersaoRow.max_versao, 10) : 0) + 1;
 
     // Calcular valores
@@ -4982,8 +5852,8 @@ app.post('/api/orcamentos/:numero/propostas', authenticateToken, async (req, res
     const codigo = `PROP-${numero}-v${novaVersao}`;
     const tituloFinal = titulo || `Proposta Comercial #${numero} (v${novaVersao})`;
     const statusFinal = status || 'Gerada';
-    const userId = req.user?.id || null;
-    const userNome = req.user?.nome || req.user?.name || req.user?.login || 'Usuário';
+    const userId = req.auth.userId || null;
+    const userNome = req.auth.nome || req.user?.nome || req.user?.name || req.user?.login || 'Usuário';
 
     // Montar snapshot completo
     const snapshot = {
@@ -4993,6 +5863,7 @@ app.post('/api/orcamentos/:numero/propostas', authenticateToken, async (req, res
       geradoPorNome: userNome,
       orcamento: {
         numero: orc.numero,
+        empresa_id: empresaId,
         data_criacao: orc.data_criacao,
         cliente_id: orc.cliente_id,
         cliente_nome: orc.cliente_nome,
@@ -5024,11 +5895,12 @@ app.post('/api/orcamentos/:numero/propostas', authenticateToken, async (req, res
 
     const result = await db.run(
       `INSERT INTO propostas (
-        orcamento_numero, versao, codigo, titulo, descricao, valor_total,
+        empresa_id, orcamento_numero, versao, codigo, titulo, descricao, valor_total,
         desconto_percentual, desconto_valor, valor_final, forma_pagamento_selecionada,
         dados_snapshot, status, observacoes, criado_por, criado_por_nome
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
+        empresaId,
         numero,
         novaVersao,
         codigo,
@@ -5048,16 +5920,16 @@ app.post('/api/orcamentos/:numero/propostas', authenticateToken, async (req, res
     );
 
     const insertedId = result.lastID;
-    const createdProp = await db.get('SELECT * FROM propostas WHERE id = ?', [insertedId]);
+    const createdProp = await db.get('SELECT * FROM propostas WHERE empresa_id = ? AND id = ?', [empresaId, insertedId]);
 
     const todasPropostas = await db.all(
-      `SELECT id, orcamento_numero, versao, codigo, titulo, descricao, valor_total, 
+      `SELECT id, empresa_id, orcamento_numero, versao, codigo, titulo, descricao, valor_total, 
               desconto_percentual, desconto_valor, valor_final, forma_pagamento_selecionada, 
               status, observacoes, criado_por, criado_por_nome, criado_em, updated_at
        FROM propostas 
-       WHERE orcamento_numero = ? 
+       WHERE empresa_id = ? AND orcamento_numero = ? 
        ORDER BY versao DESC, id DESC`,
-      [numero]
+      [empresaId, numero]
     );
 
     res.status(201).json({
@@ -5073,9 +5945,10 @@ app.post('/api/orcamentos/:numero/propostas', authenticateToken, async (req, res
 
 // GET /api/propostas/:id - Detalhes completos da proposta pelo ID (incluindo snapshot)
 app.get('/api/propostas/:id', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { id } = req.params;
   try {
-    const prop = await db.get('SELECT * FROM propostas WHERE id = ?', [id]);
+    const prop = await db.get('SELECT * FROM propostas WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     if (!prop) {
       return res.status(404).json({ error: 'Proposta não encontrada.' });
     }
@@ -5101,10 +5974,11 @@ app.get('/api/propostas/:id', authenticateToken, async (req, res) => {
 
 // PUT /api/propostas/:id - Atualizar status, título ou observações da proposta
 app.put('/api/propostas/:id', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { id } = req.params;
   const { status, observacoes, titulo } = req.body || {};
   try {
-    const prop = await db.get('SELECT * FROM propostas WHERE id = ?', [id]);
+    const prop = await db.get('SELECT * FROM propostas WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     if (!prop) {
       return res.status(404).json({ error: 'Proposta não encontrada.' });
     }
@@ -5114,13 +5988,13 @@ app.put('/api/propostas/:id', authenticateToken, async (req, res) => {
     const newTitulo = titulo !== undefined ? titulo : prop.titulo;
 
     await db.run(
-      'UPDATE propostas SET status = ?, observacoes = ?, titulo = ? WHERE id = ?',
-      [newStatus, newObs, newTitulo, id]
+      'UPDATE propostas SET status = ?, observacoes = ?, titulo = ? WHERE empresa_id = ? AND id = ?',
+      [newStatus, newObs, newTitulo, empresaId, id]
     );
 
     // Se o status foi alterado para Aprovada, sincronizar no orçamento
     if (newStatus === 'Aprovada') {
-      const orc = await db.get('SELECT * FROM orcamentos WHERE numero = ?', [prop.orcamento_numero]);
+      const orc = await db.get('SELECT * FROM orcamentos WHERE empresa_id = ? AND numero = ?', [empresaId, prop.orcamento_numero]);
       const formaToSet = prop.forma_pagamento_selecionada || orc?.forma_pagamento_selecionada;
       await db.run(
         `UPDATE orcamentos 
@@ -5128,12 +6002,12 @@ app.put('/api/propostas/:id', authenticateToken, async (req, res) => {
              situacao = 'Aprovado',
              data_aprovacao = COALESCE(data_aprovacao, CURRENT_TIMESTAMP),
              forma_pagamento_selecionada = COALESCE(?, forma_pagamento_selecionada)
-         WHERE numero = ?`,
-        [formaToSet || null, prop.orcamento_numero]
+         WHERE empresa_id = ? AND numero = ?`,
+        [formaToSet || null, empresaId, prop.orcamento_numero]
       );
     }
 
-    const updated = await db.get('SELECT * FROM propostas WHERE id = ?', [id]);
+    const updated = await db.get('SELECT * FROM propostas WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     res.json(updated);
   } catch (error) {
     console.error('PUT PROPOSTA ERROR:', error);
@@ -5143,14 +6017,15 @@ app.put('/api/propostas/:id', authenticateToken, async (req, res) => {
 
 // DELETE /api/propostas/:id - Excluir versão de proposta
 app.delete('/api/propostas/:id', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { id } = req.params;
   try {
-    const prop = await db.get('SELECT * FROM propostas WHERE id = ?', [id]);
+    const prop = await db.get('SELECT * FROM propostas WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     if (!prop) {
       return res.status(404).json({ error: 'Proposta não encontrada.' });
     }
 
-    await db.run('DELETE FROM propostas WHERE id = ?', [id]);
+    await db.run('DELETE FROM propostas WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     res.json({ message: 'Proposta excluída com sucesso.', id: prop.id, orcamento_numero: prop.orcamento_numero });
   } catch (error) {
     console.error('DELETE PROPOSTA ERROR:', error);
@@ -5162,12 +6037,13 @@ app.delete('/api/propostas/:id', authenticateToken, async (req, res) => {
 // COMPARTILHAMENTO DE PROPOSTA ENDPOINTS
 // ==========================================
 
-// POST /api/orcamentos/:numero/compartilhar - Gerar novo token com validade configurável e registrar histórico (opcionalmente vinculado a uma versão de proposta)
+// POST /api/orcamentos/:numero/compartilhar - Gerar novo token com validade configurável e registrar histórico
 app.post('/api/orcamentos/:numero/compartilhar', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { numero } = req.params;
   const { diasValidade, proposta_id } = req.body || {};
   try {
-    const orc = await db.get('SELECT * FROM orcamentos WHERE numero = ?', [numero]);
+    const orc = await db.get('SELECT * FROM orcamentos WHERE empresa_id = ? AND numero = ?', [empresaId, numero]);
     if (!orc) {
       return res.status(404).json({ error: 'Orçamento não encontrado.' });
     }
@@ -5177,25 +6053,30 @@ app.post('/api/orcamentos/:numero/compartilhar', authenticateToken, async (req, 
     const dias = parseInt(diasValidade, 10) > 0 ? parseInt(diasValidade, 10) : 3;
     const expiraEmDate = new Date(agora.getTime() + dias * 24 * 60 * 60 * 1000);
     const expiraEm = formatDateTimeForMySQL(expiraEmDate);
-    const userId = req.user?.id || null;
-    const userNome = req.user?.nome || req.user?.name || req.user?.login || 'Usuário';
+    const userId = req.auth.userId || null;
+    const userNome = req.auth.nome || req.user?.nome || req.user?.name || req.user?.login || 'Usuário';
 
     let finalPropostaId = proposta_id ? parseInt(proposta_id, 10) : null;
-    if (!finalPropostaId) {
-      const latestProp = await db.get('SELECT id FROM propostas WHERE orcamento_numero = ? ORDER BY versao DESC, id DESC LIMIT 1', [numero]);
+    if (finalPropostaId) {
+      const ownedProp = await db.get('SELECT id FROM propostas WHERE empresa_id = ? AND id = ? AND orcamento_numero = ?', [empresaId, finalPropostaId, numero]);
+      if (!ownedProp) {
+        return res.status(404).json({ error: 'Proposta não encontrada.' });
+      }
+    } else {
+      const latestProp = await db.get('SELECT id FROM propostas WHERE empresa_id = ? AND orcamento_numero = ? ORDER BY versao DESC, id DESC LIMIT 1', [empresaId, numero]);
       if (latestProp?.id) {
         finalPropostaId = latestProp.id;
       }
     }
 
     const result = await db.run(
-      `INSERT INTO proposta_compartilhamentos (orcamento_numero, token, criado_por, criado_por_nome, expira_em, acessos_count, status, proposta_id)
-       VALUES (?, ?, ?, ?, ?, 0, 'Ativo', ?)`,
-      [numero, token, userId, userNome, expiraEm, finalPropostaId]
+      `INSERT INTO proposta_compartilhamentos (empresa_id, orcamento_numero, token, criado_por, criado_por_nome, expira_em, acessos_count, status, proposta_id)
+       VALUES (?, ?, ?, ?, ?, ?, 0, 'Ativo', ?)`,
+      [empresaId, numero, token, userId, userNome, expiraEm, finalPropostaId]
     );
 
     const shareId = result.lastID;
-    const share = await db.get('SELECT * FROM proposta_compartilhamentos WHERE id = ?', [shareId]);
+    const share = await db.get('SELECT * FROM proposta_compartilhamentos WHERE empresa_id = ? AND id = ?', [empresaId, shareId]);
 
     res.status(201).json({
       ...share,
@@ -5212,15 +6093,19 @@ app.post('/api/orcamentos/:numero/compartilhar', authenticateToken, async (req, 
 
 // GET /api/orcamentos/:numero/compartilhamentos - Histórico de compartilhamentos do orçamento
 app.get('/api/orcamentos/:numero/compartilhamentos', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { numero } = req.params;
   try {
+    const orc = await db.get('SELECT numero FROM orcamentos WHERE empresa_id = ? AND numero = ?', [empresaId, numero]);
+    if (!orc) return res.status(404).json({ error: 'Orçamento não encontrado.' });
+
     const list = await db.all(
       `SELECT pc.*, p.versao as proposta_versao, p.codigo as proposta_codigo
        FROM proposta_compartilhamentos pc
-       LEFT JOIN propostas p ON pc.proposta_id = p.id
-       WHERE pc.orcamento_numero = ? 
+       LEFT JOIN propostas p ON pc.proposta_id = p.id AND pc.empresa_id = p.empresa_id
+       WHERE pc.empresa_id = ? AND pc.orcamento_numero = ? 
        ORDER BY pc.criado_em DESC, pc.id DESC`,
-      [numero]
+      [empresaId, numero]
     );
 
     const now = new Date();
@@ -5245,15 +6130,16 @@ app.get('/api/orcamentos/:numero/compartilhamentos', authenticateToken, async (r
 
 // PUT /api/compartilhamentos/:id/revogar - Revogar um link compartilhado
 app.put('/api/compartilhamentos/:id/revogar', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { id } = req.params;
   try {
-    const existing = await db.get('SELECT * FROM proposta_compartilhamentos WHERE id = ?', [id]);
+    const existing = await db.get('SELECT * FROM proposta_compartilhamentos WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     if (!existing) {
       return res.status(404).json({ error: 'Registro de compartilhamento não encontrado.' });
     }
 
-    await db.run("UPDATE proposta_compartilhamentos SET status = 'Revogado' WHERE id = ?", [id]);
-    const updated = await db.get('SELECT * FROM proposta_compartilhamentos WHERE id = ?', [id]);
+    await db.run("UPDATE proposta_compartilhamentos SET status = 'Revogado' WHERE empresa_id = ? AND id = ?", [empresaId, id]);
+    const updated = await db.get('SELECT * FROM proposta_compartilhamentos WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     res.json(updated);
   } catch (error) {
     console.error('REVOGAR COMPARTILHAMENTO ERROR:', error);
@@ -5261,7 +6147,7 @@ app.put('/api/compartilhamentos/:id/revogar', authenticateToken, async (req, res
   }
 });
 
-// GET /api/public/propostas/:token - Acesso público à proposta via Token (válido por 3 dias ou configurado)
+// GET /api/public/propostas/:token - Acesso público à proposta via Token (exceção controlada: resolve empresa_id exclusivamente pelo token no servidor)
 app.get('/api/public/propostas/:token', async (req, res) => {
   const { token } = req.params;
   try {
@@ -5272,6 +6158,8 @@ app.get('/api/public/propostas/:token', async (req, res) => {
         code: 'TOKEN_NOT_FOUND'
       });
     }
+
+    const empresaId = share.empresa_id;
 
     if (share.status === 'Revogado') {
       return res.status(410).json({ 
@@ -5292,21 +6180,21 @@ app.get('/api/public/propostas/:token', async (req, res) => {
       });
     }
 
-    // Registrar e incrementar acesso
+    // Registrar e incrementar acesso restrito à empresa do compartilhamento
     await db.run(
       `UPDATE proposta_compartilhamentos 
        SET acessos_count = acessos_count + 1, ultimo_acesso = CURRENT_TIMESTAMP 
-       WHERE id = ?`,
-      [share.id]
+       WHERE empresa_id = ? AND id = ?`,
+      [empresaId, share.id]
     );
 
-    // Se houver uma versão vinculada ou existente, utilizar o snapshot da versão gravada (fotografia do momento)
+    // Se houver uma versão vinculada ou existente na mesma empresa, utilizar o snapshot da versão gravada
     let propRecord = null;
     if (share.proposta_id) {
-      propRecord = await db.get('SELECT * FROM propostas WHERE id = ?', [share.proposta_id]);
+      propRecord = await db.get('SELECT * FROM propostas WHERE empresa_id = ? AND id = ?', [empresaId, share.proposta_id]);
     }
     if (!propRecord) {
-      propRecord = await db.get('SELECT * FROM propostas WHERE orcamento_numero = ? ORDER BY versao DESC, id DESC LIMIT 1', [share.orcamento_numero]);
+      propRecord = await db.get('SELECT * FROM propostas WHERE empresa_id = ? AND orcamento_numero = ? ORDER BY versao DESC, id DESC LIMIT 1', [empresaId, share.orcamento_numero]);
     }
 
     let parsedSnapshot = null;
@@ -5318,14 +6206,14 @@ app.get('/api/public/propostas/:token', async (req, res) => {
       }
     }
 
-    // Buscar dados em tempo real do orçamento para mesclar status e forma de pagamento atualizados
+    // Buscar dados em tempo real do orçamento da mesma empresa
     const orc = await db.get(
       `SELECT o.*, c.nome as cliente_nome, c.telefone as cliente_telefone, c.email as cliente_email,
               c.documento as cliente_documento, c.endereco as cliente_endereco
        FROM orcamentos o 
-       LEFT JOIN clientes c ON o.cliente_id = c.id 
-       WHERE o.numero = ?`,
-      [share.orcamento_numero]
+       LEFT JOIN clientes c ON o.cliente_id = c.id AND o.empresa_id = c.empresa_id
+       WHERE o.empresa_id = ? AND o.numero = ?`,
+      [empresaId, share.orcamento_numero]
     );
 
     if (!orc) {
@@ -5333,7 +6221,6 @@ app.get('/api/public/propostas/:token', async (req, res) => {
     }
 
     if (parsedSnapshot) {
-      // Usar a fotografia (snapshot) fielmente gravada com os dados de status e forma de pagamento mais atuais
       const formaPagFinal = share.forma_pagamento_selecionada || orc.forma_pagamento_selecionada || parsedSnapshot.orcamento?.forma_pagamento_selecionada;
       const statusFinal = (share.status === 'Aprovado' || orc.status === 'Aprovado' || propRecord?.status === 'Aprovada') ? 'Aprovado' : (orc.status || parsedSnapshot.orcamento?.status || 'Em Aberto');
 
@@ -5380,15 +6267,10 @@ app.get('/api/public/propostas/:token', async (req, res) => {
       });
     }
 
-    // Fallback: caso a proposta não tenha snapshot gravado (legado), orc já está carregado acima
-    if (!orc) {
-      return res.status(404).json({ error: 'Orçamento não encontrado.' });
-    }
+    // Buscar projetos do orçamento na mesma empresa
+    const projetos = await db.all('SELECT * FROM projetos WHERE empresa_id = ? AND orcamento_numero = ? ORDER BY id ASC', [empresaId, share.orcamento_numero]);
 
-    // Buscar projetos do orçamento
-    const projetos = await db.all('SELECT * FROM projetos WHERE orcamento_numero = ? ORDER BY id ASC', [share.orcamento_numero]);
-
-    // Buscar itens e imagens dos projetos
+    // Buscar itens e imagens dos projetos na mesma empresa
     const itensPorProjeto = {};
     for (const p of projetos) {
       let itens = await db.all(`
@@ -5408,10 +6290,10 @@ app.get('/api/public/propostas/:token', async (req, res) => {
           pi.ProjetoItemTempo,
           pi.ProjetoItemDuracao
         FROM ProjetoItem pi
-        LEFT JOIN Material m ON pi.MaterialReferencia = m.MaterialReferencia
-        WHERE pi.ProjetoID = ?
+        LEFT JOIN Material m ON pi.MaterialReferencia = m.MaterialReferencia AND pi.empresa_id = m.empresa_id
+        WHERE pi.empresa_id = ? AND pi.ProjetoID = ?
         ORDER BY pi.ProjetoItemID ASC
-      `, [p.id]);
+      `, [empresaId, p.id]);
 
       if (!itens || itens.length === 0) {
         itens = await db.all(`
@@ -5431,35 +6313,35 @@ app.get('/api/public/propostas/:token', async (req, res) => {
             COALESCE(m.MaterialTempo, 0) AS ProjetoItemTempo,
             0 AS ProjetoItemDuracao
           FROM Projeto_Materiais pm
-          LEFT JOIN Material m ON pm.referencia = m.MaterialReferencia
-          WHERE pm.projeto_id = ?
+          LEFT JOIN Material m ON pm.referencia = m.MaterialReferencia AND pm.empresa_id = m.empresa_id
+          WHERE pm.empresa_id = ? AND pm.projeto_id = ?
           ORDER BY pm.id ASC
-        `, [p.id]);
+        `, [empresaId, p.id]);
       }
 
       itensPorProjeto[p.id] = itens || [];
     }
 
-    // Buscar Formas de Pagamento ativas e suas condições
-    const formas = await db.all('SELECT * FROM formas_pagamento WHERE ativo = "Sim" ORDER BY ordem ASC, id ASC');
-    const condicoes = await db.all('SELECT * FROM condicoes_pagamento ORDER BY ordem ASC, id ASC');
+    // Buscar Formas de Pagamento ativas e suas condições na mesma empresa
+    const formas = await db.all('SELECT * FROM formas_pagamento WHERE empresa_id = ? AND ativo = "Sim" ORDER BY ordem ASC, id ASC', [empresaId]);
+    const condicoes = await db.all('SELECT * FROM condicoes_pagamento WHERE empresa_id = ? ORDER BY ordem ASC, id ASC', [empresaId]);
     const formasComCondicoes = formas.map(f => ({
       ...f,
       condicoes: condicoes.filter(c => c.forma_pagamento_id === f.id)
     }));
 
-    // Buscar anexos dos projetos marcados para exibição na proposta (exibir_na_proposta = 'Sim')
+    // Buscar anexos dos projetos marcados para exibição na proposta na mesma empresa
     const anexosPorProjeto = {};
     for (const p of projetos) {
       const anexos = await db.all(
-        `SELECT * FROM projeto_anexos WHERE projeto_id = ? AND COALESCE(exibir_na_proposta, 'Sim') = 'Sim' ORDER BY id ASC`,
-        [p.id]
+        `SELECT * FROM projeto_anexos WHERE empresa_id = ? AND projeto_id = ? AND COALESCE(exibir_na_proposta, 'Sim') = 'Sim' ORDER BY id ASC`,
+        [empresaId, p.id]
       );
       anexosPorProjeto[p.id] = anexos || [];
     }
 
     // Buscar parâmetros da empresa (logomarca e assinatura) para exibição na proposta pública
-    const empresaParams = await db.all("SELECT chave, conteudo FROM parametros_empresa WHERE chave IN ('EMP_LOGO', 'EMP_ASS', 'LOGO_EMP', 'RAZAO_SOC', 'NOME_FANT', 'CNPJ')");
+    const empresaParams = await db.all("SELECT chave, conteudo FROM parametros_empresa WHERE empresa_id = ? AND chave IN ('EMP_LOGO', 'EMP_ASS', 'LOGO_EMP', 'RAZAO_SOC', 'NOME_FANT', 'CNPJ')", [empresaId]);
     const paramMap = {};
     (empresaParams || []).forEach(p => {
       if (p.chave) paramMap[p.chave.toUpperCase()] = p.conteudo || '';
@@ -5596,12 +6478,14 @@ function gerarFluxoFinanceiroDeCondicao(cond, totalVenda, dataEntrada, meioFallb
 // POST /api/public/propostas/:token/anotacoes - Gravação de anotações/observações e forma de pagamento na proposta digital
 app.post('/api/public/propostas/:token/anotacoes', async (req, res) => {
   const { token } = req.params;
-  const { anotacoes, forma_pagamento_descricao, condicao_id } = req.body || {};
+  const { anotacoes, forma_pagamento_descricao } = req.body || {};
   try {
     const share = await db.get('SELECT * FROM proposta_compartilhamentos WHERE token = ?', [token]);
     if (!share) {
       return res.status(404).json({ error: 'Link de proposta não encontrado.' });
     }
+
+    const empresaId = share.empresa_id;
 
     if (share.status === 'Revogado') {
       return res.status(410).json({ error: 'Este link de proposta foi revogado.' });
@@ -5613,7 +6497,7 @@ app.post('/api/public/propostas/:token/anotacoes', async (req, res) => {
       return res.status(410).json({ error: 'Este link de proposta expirou.' });
     }
 
-    const orc = await db.get('SELECT * FROM orcamentos WHERE numero = ?', [share.orcamento_numero]);
+    const orc = await db.get('SELECT * FROM orcamentos WHERE empresa_id = ? AND numero = ?', [empresaId, share.orcamento_numero]);
     if (!orc) {
       return res.status(404).json({ error: 'Orçamento não encontrado.' });
     }
@@ -5623,42 +6507,42 @@ app.post('/api/public/propostas/:token/anotacoes', async (req, res) => {
       ? forma_pagamento_descricao.trim() 
       : (orc.forma_pagamento_selecionada || null);
 
-    // Atualiza o orçamento com as anotações, forma de pagamento selecionada e status para 'Em Negociação'
+    // Atualiza o orçamento da mesma empresa
     await db.run(
       `UPDATE orcamentos 
        SET anotacoes_cliente = ?, 
            forma_pagamento_selecionada = ?, 
            status = CASE WHEN status = 'Aprovado' THEN status ELSE 'Em Negociação' END,
            situacao = CASE WHEN situacao = 'Aprovado' THEN situacao ELSE 'Em Negociação' END
-       WHERE numero = ?`,
-      [notes, formaDesc, share.orcamento_numero]
+       WHERE empresa_id = ? AND numero = ?`,
+      [notes, formaDesc, empresaId, share.orcamento_numero]
     );
 
-    // Atualiza o registro de compartilhamento
+    // Atualiza o registro de compartilhamento da mesma empresa
     await db.run(
       `UPDATE proposta_compartilhamentos 
        SET anotacoes_cliente = ?, 
            forma_pagamento_selecionada = ? 
-       WHERE id = ?`,
-      [notes, formaDesc, share.id]
+       WHERE empresa_id = ? AND id = ?`,
+      [notes, formaDesc, empresaId, share.id]
     );
 
-    // Sincroniza na versão da proposta
+    // Sincroniza na versão da proposta da mesma empresa
     if (formaDesc) {
       if (share.proposta_id) {
         await db.run(
-          `UPDATE propostas SET forma_pagamento_selecionada = ? WHERE id = ?`,
-          [formaDesc, share.proposta_id]
+          `UPDATE propostas SET forma_pagamento_selecionada = ? WHERE empresa_id = ? AND id = ?`,
+          [formaDesc, empresaId, share.proposta_id]
         );
       } else {
         await db.run(
-          `UPDATE propostas SET forma_pagamento_selecionada = ? WHERE orcamento_numero = ? ORDER BY versao DESC, id DESC LIMIT 1`,
-          [formaDesc, share.orcamento_numero]
+          `UPDATE propostas SET forma_pagamento_selecionada = ? WHERE empresa_id = ? AND orcamento_numero = ? ORDER BY versao DESC, id DESC LIMIT 1`,
+          [formaDesc, empresaId, share.orcamento_numero]
         );
       }
     }
 
-    const updatedOrc = await db.get('SELECT * FROM orcamentos WHERE numero = ?', [share.orcamento_numero]);
+    const updatedOrc = await db.get('SELECT * FROM orcamentos WHERE empresa_id = ? AND numero = ?', [empresaId, share.orcamento_numero]);
 
     res.json({
       success: true,
@@ -5681,6 +6565,8 @@ app.post('/api/public/propostas/:token/aprovar', async (req, res) => {
       return res.status(404).json({ error: 'Link de proposta não encontrado.' });
     }
 
+    const empresaId = share.empresa_id;
+
     if (share.status === 'Revogado') {
       return res.status(410).json({ error: 'Este link de proposta foi revogado.' });
     }
@@ -5691,7 +6577,7 @@ app.post('/api/public/propostas/:token/aprovar', async (req, res) => {
       return res.status(410).json({ error: 'Este link de proposta expirou.' });
     }
 
-    const orc = await db.get('SELECT * FROM orcamentos WHERE numero = ?', [share.orcamento_numero]);
+    const orc = await db.get('SELECT * FROM orcamentos WHERE empresa_id = ? AND numero = ?', [empresaId, share.orcamento_numero]);
     if (!orc) {
       return res.status(404).json({ error: 'Orçamento não encontrado.' });
     }
@@ -5699,17 +6585,18 @@ app.post('/api/public/propostas/:token/aprovar', async (req, res) => {
     const formaDesc = (forma_pagamento_descricao || '').trim() || (share.forma_pagamento_selecionada || '').trim() || (orc.forma_pagamento_selecionada || '').trim() || null;
     const notes = typeof anotacoes === 'string' ? anotacoes.trim() : (orc.anotacoes_cliente || null);
 
-    // Buscar a condição de pagamento correspondente para estruturar o fluxo financeiro exato
+    // Buscar a condição de pagamento correspondente exclusivamente na empresa do orçamento
     let matchedCond = null;
     if (condicao_id) {
-      matchedCond = await db.get('SELECT * FROM condicoes_pagamento WHERE id = ?', [condicao_id]);
+      matchedCond = await db.get('SELECT * FROM condicoes_pagamento WHERE empresa_id = ? AND id = ?', [empresaId, condicao_id]);
     }
     if (!matchedCond && formaDesc) {
       const condicoes = await db.all(`
         SELECT c.*, f.nome as forma_nome 
         FROM condicoes_pagamento c
-        JOIN formas_pagamento f ON c.forma_pagamento_id = f.id
-      `);
+        JOIN formas_pagamento f ON c.forma_pagamento_id = f.id AND c.empresa_id = f.empresa_id
+        WHERE c.empresa_id = ?
+      `, [empresaId]);
       if (condicoes && condicoes.length > 0) {
         matchedCond = condicoes.find(c => {
           const descCompleta = `${c.forma_nome} - ${c.descricao || c.meio_pagamento || ''}`.trim().toLowerCase();
@@ -5721,7 +6608,7 @@ app.post('/api/public/propostas/:token/aprovar', async (req, res) => {
     }
 
     const totalVendaOrc = parseFloat(orc.total_venda) || (
-      (await db.all('SELECT preco_venda_final FROM projetos WHERE orcamento_numero = ?', [orc.numero]))
+      (await db.all('SELECT preco_venda_final FROM projetos WHERE empresa_id = ? AND orcamento_numero = ?', [empresaId, orc.numero]))
         .reduce((sum, p) => sum + (parseFloat(p.preco_venda_final) || 0), 0)
     );
 
@@ -5729,7 +6616,7 @@ app.post('/api/public/propostas/:token/aprovar', async (req, res) => {
     const fluxoGerado = gerarFluxoFinanceiroDeCondicao(matchedCond, totalVendaOrc, dataEntradaOrc, matchedCond?.meio_pagamento || formaDesc);
     const fluxoJson = JSON.stringify(fluxoGerado);
 
-    // 1. Atualiza o status do orçamento para "Aprovado" e persiste a forma de pagamento e fluxo
+    // 1. Atualiza o status do orçamento para "Aprovado" na empresa correspondente
     await db.run(
       `UPDATE orcamentos 
        SET status = 'Aprovado', 
@@ -5738,8 +6625,8 @@ app.post('/api/public/propostas/:token/aprovar', async (req, res) => {
            anotacoes_cliente = ?, 
            data_aprovacao = CURRENT_TIMESTAMP,
            fluxo_financeiro = ?
-       WHERE numero = ?`,
-      [formaDesc, notes, fluxoJson, share.orcamento_numero]
+       WHERE empresa_id = ? AND numero = ?`,
+      [formaDesc, notes, fluxoJson, empresaId, share.orcamento_numero]
     );
 
     // 2. Registra a aprovação no histórico do link compartilhado
@@ -5749,31 +6636,31 @@ app.post('/api/public/propostas/:token/aprovar', async (req, res) => {
            aprovado_em = CURRENT_TIMESTAMP, 
            forma_pagamento_selecionada = ?, 
            anotacoes_cliente = ? 
-       WHERE id = ?`,
-      [formaDesc, notes, share.id]
+       WHERE empresa_id = ? AND id = ?`,
+      [formaDesc, notes, empresaId, share.id]
     );
 
-    // 3. Atualiza o status e a forma de pagamento na tabela de propostas
+    // 3. Atualiza o status e a forma de pagamento na tabela de propostas da empresa
     if (share.proposta_id) {
       await db.run(
         `UPDATE propostas 
          SET status = 'Aprovada', 
              forma_pagamento_selecionada = ? 
-         WHERE id = ?`,
-        [formaDesc, share.proposta_id]
+         WHERE empresa_id = ? AND id = ?`,
+        [formaDesc, empresaId, share.proposta_id]
       );
     } else {
       await db.run(
         `UPDATE propostas 
          SET status = 'Aprovada', 
              forma_pagamento_selecionada = ? 
-         WHERE orcamento_numero = ? 
+         WHERE empresa_id = ? AND orcamento_numero = ? 
          ORDER BY versao DESC, id DESC LIMIT 1`,
-        [formaDesc, share.orcamento_numero]
+        [formaDesc, empresaId, share.orcamento_numero]
       );
     }
 
-    const updatedOrc = await db.get('SELECT * FROM orcamentos WHERE numero = ?', [share.orcamento_numero]);
+    const updatedOrc = await db.get('SELECT * FROM orcamentos WHERE empresa_id = ? AND numero = ?', [empresaId, share.orcamento_numero]);
 
     res.json({
       success: true,
@@ -5794,11 +6681,13 @@ app.post('/api/public/propostas/:token/aprovar', async (req, res) => {
 // Upload de Imagem para Parâmetro (Tipo 7)
 const parametrosStorage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, parametrosUploadDir);
+    const empresaId = req.auth?.empresaId || req.user?.empresa_id || 1;
+    cb(null, getTenantUploadDir(empresaId, 'parametros'));
   },
   filename: (req, file, cb) => {
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
-    cb(null, 'param-' + uniqueSuffix + path.extname(file.originalname));
+    const ext = path.extname(sanitizeSafeFilename(file.originalname || '')).slice(0, 10);
+    cb(null, 'param-' + uniqueSuffix + ext);
   }
 });
 const uploadParametros = multer({ storage: parametrosStorage });
@@ -5808,7 +6697,8 @@ app.post('/api/parametros-empresa/upload-imagem', authenticateToken, uploadParam
     if (!req.file) {
       return res.status(400).json({ error: 'Nenhum arquivo de imagem enviado.' });
     }
-    const relativePath = `uploads/parametros/${req.file.filename}`;
+    const empresaId = req.auth.empresaId;
+    const relativePath = `uploads/empresa_${empresaId}/parametros/${req.file.filename}`;
     res.json({
       success: true,
       url: relativePath,
@@ -5823,8 +6713,9 @@ app.post('/api/parametros-empresa/upload-imagem', authenticateToken, uploadParam
 
 // Listar todos os Parâmetros da Empresa
 app.get('/api/parametros-empresa', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   try {
-    const list = await db.all('SELECT * FROM parametros_empresa ORDER BY chave ASC');
+    const list = await db.all('SELECT * FROM parametros_empresa WHERE empresa_id = ? ORDER BY chave ASC', [empresaId]);
     res.json(list);
   } catch (err) {
     console.error('Erro ao listar parametros_empresa:', err);
@@ -5834,13 +6725,14 @@ app.get('/api/parametros-empresa', authenticateToken, async (req, res) => {
 
 // Buscar um Parâmetro por ID ou Chave
 app.get('/api/parametros-empresa/:id', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { id } = req.params;
   try {
     let param;
     if (isNaN(id)) {
-      param = await db.get('SELECT * FROM parametros_empresa WHERE chave = ?', [id.toUpperCase()]);
+      param = await db.get('SELECT * FROM parametros_empresa WHERE empresa_id = ? AND chave = ?', [empresaId, id.toUpperCase()]);
     } else {
-      param = await db.get('SELECT * FROM parametros_empresa WHERE id = ? OR chave = ?', [id, id.toUpperCase()]);
+      param = await db.get('SELECT * FROM parametros_empresa WHERE empresa_id = ? AND (id = ? OR chave = ?)', [empresaId, id, id.toUpperCase()]);
     }
     if (!param) {
       return res.status(404).json({ error: 'Parâmetro não encontrado.' });
@@ -5854,6 +6746,7 @@ app.get('/api/parametros-empresa/:id', authenticateToken, async (req, res) => {
 
 // Criar Novo Parâmetro
 app.post('/api/parametros-empresa', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { chave, tipo, conteudo, descricao } = req.body;
   try {
     if (!chave || typeof chave !== 'string') {
@@ -5874,18 +6767,18 @@ app.post('/api/parametros-empresa', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: 'O Conteúdo deve ter no máximo 60 caracteres.' });
     }
 
-    // Verificar unicidade da Chave
-    const existing = await db.get('SELECT id FROM parametros_empresa WHERE chave = ?', [chaveFormatada]);
+    // Verificar unicidade da Chave dentro da empresa
+    const existing = await db.get('SELECT id FROM parametros_empresa WHERE empresa_id = ? AND chave = ?', [empresaId, chaveFormatada]);
     if (existing) {
       return res.status(400).json({ error: `Já existe um parâmetro com a chave "${chaveFormatada}".` });
     }
 
     const result = await db.run(
-      `INSERT INTO parametros_empresa (chave, tipo, conteudo, descricao) VALUES (?, ?, ?, ?)`,
-      [chaveFormatada, tipoNum, conteudoStr, descricao ? descricao.trim() : null]
+      `INSERT INTO parametros_empresa (empresa_id, chave, tipo, conteudo, descricao) VALUES (?, ?, ?, ?, ?)`,
+      [empresaId, chaveFormatada, tipoNum, conteudoStr, descricao ? descricao.trim() : null]
     );
 
-    const newParam = await db.get('SELECT * FROM parametros_empresa WHERE id = ?', [result.lastID]);
+    const newParam = await db.get('SELECT * FROM parametros_empresa WHERE empresa_id = ? AND id = ?', [empresaId, result.lastID]);
     res.status(201).json(newParam);
   } catch (err) {
     console.error('Erro ao criar parâmetro:', err);
@@ -5895,10 +6788,11 @@ app.post('/api/parametros-empresa', authenticateToken, async (req, res) => {
 
 // Atualizar Parâmetro Existente
 app.put('/api/parametros-empresa/:id', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { id } = req.params;
   const { chave, tipo, conteudo, descricao } = req.body;
   try {
-    const current = await db.get('SELECT * FROM parametros_empresa WHERE id = ?', [id]);
+    const current = await db.get('SELECT * FROM parametros_empresa WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     if (!current) {
       return res.status(404).json({ error: 'Parâmetro não encontrado.' });
     }
@@ -5910,9 +6804,8 @@ app.put('/api/parametros-empresa/:id', authenticateToken, async (req, res) => {
         return res.status(400).json({ error: 'A Chave deve ter no máximo 10 caracteres.' });
       }
 
-      // Verificar unicidade se mudou a chave
       if (chaveFormatada !== current.chave) {
-        const existing = await db.get('SELECT id FROM parametros_empresa WHERE chave = ? AND id != ?', [chaveFormatada, id]);
+        const existing = await db.get('SELECT id FROM parametros_empresa WHERE empresa_id = ? AND chave = ? AND id != ?', [empresaId, chaveFormatada, id]);
         if (existing) {
           return res.status(400).json({ error: `Já existe outro parâmetro com a chave "${chaveFormatada}".` });
         }
@@ -5940,11 +6833,11 @@ app.put('/api/parametros-empresa/:id', authenticateToken, async (req, res) => {
     await db.run(
       `UPDATE parametros_empresa 
        SET chave = ?, tipo = ?, conteudo = ?, descricao = ?, updated_at = CURRENT_TIMESTAMP 
-       WHERE id = ?`,
-      [chaveFormatada, tipoNum, conteudoStr, descStr, id]
+       WHERE empresa_id = ? AND id = ?`,
+      [chaveFormatada, tipoNum, conteudoStr, descStr, empresaId, id]
     );
 
-    const updated = await db.get('SELECT * FROM parametros_empresa WHERE id = ?', [id]);
+    const updated = await db.get('SELECT * FROM parametros_empresa WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     res.json(updated);
   } catch (err) {
     console.error('Erro ao atualizar parâmetro:', err);
@@ -5954,14 +6847,15 @@ app.put('/api/parametros-empresa/:id', authenticateToken, async (req, res) => {
 
 // Excluir Parâmetro
 app.delete('/api/parametros-empresa/:id', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { id } = req.params;
   try {
-    const current = await db.get('SELECT * FROM parametros_empresa WHERE id = ?', [id]);
+    const current = await db.get('SELECT * FROM parametros_empresa WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     if (!current) {
       return res.status(404).json({ error: 'Parâmetro não encontrado.' });
     }
 
-    await db.run('DELETE FROM parametros_empresa WHERE id = ?', [id]);
+    await db.run('DELETE FROM parametros_empresa WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     res.json({ success: true, message: `Parâmetro "${current.chave}" removido com sucesso.` });
   } catch (err) {
     console.error('Erro ao excluir parâmetro:', err);
@@ -5975,6 +6869,7 @@ app.delete('/api/parametros-empresa/:id', authenticateToken, async (req, res) =>
 
 // Listar lançamentos do Fluxo de Recebimento (com dados do cliente e filtros)
 app.get('/api/fluxo-recebimento', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   try {
     const { status, orcamento_numero, cliente_id, data_inicio, data_fim, busca } = req.query;
     let query = `
@@ -5986,10 +6881,10 @@ app.get('/api/fluxo-recebimento', authenticateToken, async (req, res) => {
         c.telefone AS cliente_telefone,
         c.email AS cliente_email
       FROM FluxoRecebimento fr
-      LEFT JOIN clientes c ON c.id = fr.cliente_id
-      WHERE 1=1
+      LEFT JOIN clientes c ON c.id = fr.cliente_id AND c.empresa_id = fr.empresa_id
+      WHERE fr.empresa_id = ?
     `;
-    const params = [];
+    const params = [empresaId];
 
     if (status && status !== 'TODOS') {
       if (status === 'ATRASADO') {
@@ -6038,11 +6933,18 @@ app.get('/api/fluxo-recebimento', authenticateToken, async (req, res) => {
 
 // Efetivar fluxo de um orçamento
 app.post('/api/orcamentos/:numero/efetivar-fluxo', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { numero } = req.params;
   const { parcelas, observacoes } = req.body;
 
   try {
-    const orcamento = await db.get('SELECT * FROM orcamentos WHERE numero = ?', [numero]);
+    const orcamento = await db.get(
+      `SELECT o.*, c.nome as cliente_nome 
+       FROM orcamentos o 
+       LEFT JOIN clientes c ON o.cliente_id = c.id AND o.empresa_id = c.empresa_id
+       WHERE o.empresa_id = ? AND o.numero = ?`,
+      [empresaId, numero]
+    );
     if (!orcamento) {
       return res.status(404).json({ error: 'Orçamento não encontrado.' });
     }
@@ -6055,9 +6957,8 @@ app.post('/api/orcamentos/:numero/efetivar-fluxo', authenticateToken, async (req
       return res.status(400).json({ error: 'Nenhuma parcela informada para efetivar o fluxo.' });
     }
 
-    // Remover parcelas pendentes anteriores deste orçamento (para permitir re-efetivação se necessário)
-    // Mantemos as já recebidas para não perder histórico contábil
-    await db.run('DELETE FROM FluxoRecebimento WHERE orcamento_numero = ? AND status = "PENDENTE"', [numero]);
+    // Remover parcelas pendentes anteriores deste orçamento na empresa
+    await db.run('DELETE FROM FluxoRecebimento WHERE empresa_id = ? AND orcamento_numero = ? AND status = "PENDENTE"', [empresaId, numero]);
 
     const totalParcelas = parcelas.length;
     let inseridas = 0;
@@ -6075,11 +6976,12 @@ app.post('/api/orcamentos/:numero/efetivar-fluxo', authenticateToken, async (req
 
       await db.run(
         `INSERT INTO FluxoRecebimento (
-          orcamento_numero, cliente_id, cliente_nome, descricao, tipo,
+          empresa_id, orcamento_numero, cliente_id, cliente_nome, descricao, tipo,
           numero_parcela, total_parcelas, percentual, valor, valor_recebido,
           data_vencimento, meio_pagamento, status, recibo_emitido, observacoes
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 'PENDENTE', 0, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 'PENDENTE', 0, ?)`,
         [
+          empresaId,
           numero,
           orcamento.cliente_id || null,
           orcamento.cliente_nome || 'Cliente não identificado',
@@ -6098,46 +7000,46 @@ app.post('/api/orcamentos/:numero/efetivar-fluxo', authenticateToken, async (req
     }
 
     // Marcar orçamento como status = 'Efetivado' e fluxo_efetivado = 1
-    await db.run('UPDATE orcamentos SET status = "Efetivado", fluxo_efetivado = 1 WHERE numero = ?', [numero]);
+    await db.run('UPDATE orcamentos SET status = "Efetivado", fluxo_efetivado = 1 WHERE empresa_id = ? AND numero = ?', [empresaId, numero]);
 
-    // Inserir registros na tabela Ordem_Servico para cada projeto do orçamento
-    const responsavel = (req.user?.email || req.user?.nome || 'Sistema').slice(0, 20);
+    // Inserir registros na tabela Ordem_Servico para cada projeto do orçamento na empresa
+    const responsavel = (req.auth.email || req.auth.nome || 'Sistema').slice(0, 20);
     const dataCriacao = new Date().toISOString().split('T')[0];
 
-    const projs = await db.all('SELECT * FROM projetos WHERE orcamento_numero = ? ORDER BY id ASC', [numero]);
+    const projs = await db.all('SELECT * FROM projetos WHERE empresa_id = ? AND orcamento_numero = ? ORDER BY id ASC', [empresaId, numero]);
 
     if (projs && projs.length > 0) {
       for (let i = 0; i < projs.length; i++) {
         const p = projs[i];
-        const projId = (i + 1); // Sequencial Numeric(3) referente ao orçamento
+        const projId = (i + 1);
         const nomeProj = p.nome || `Projeto ${projId}`;
         const tempoTotal = (parseInt(p.DuracaoFabricacao, 10) || 0) + (parseInt(p.DuracaoMontagem, 10) || 0);
 
         const existingOS = await db.get(
-          'SELECT Numero FROM Ordem_Servico WHERE Numero = ? AND ProjetoID = ?',
-          [numero, projId]
+          'SELECT Numero FROM Ordem_Servico WHERE empresa_id = ? AND Numero = ? AND ProjetoID = ?',
+          [empresaId, numero, projId]
         );
         if (!existingOS) {
           await db.run(
-            'INSERT INTO Ordem_Servico (Numero, ProjetoID, DataCriacao, DataConclusao, Situacao, Responsavel, NomeProjeto, Tempo) VALUES (?, ?, ?, NULL, "Aberta", ?, ?, ?)',
-            [numero, projId, dataCriacao, responsavel, nomeProj, tempoTotal]
+            'INSERT INTO Ordem_Servico (empresa_id, Numero, ProjetoID, DataCriacao, DataConclusao, Situacao, Responsavel, NomeProjeto, Tempo) VALUES (?, ?, ?, ?, NULL, "Aberta", ?, ?, ?)',
+            [empresaId, numero, projId, dataCriacao, responsavel, nomeProj, tempoTotal]
           );
         } else {
           await db.run(
-            'UPDATE Ordem_Servico SET NomeProjeto = ?, Tempo = ? WHERE Numero = ? AND ProjetoID = ?',
-            [nomeProj, tempoTotal, numero, projId]
+            'UPDATE Ordem_Servico SET NomeProjeto = ?, Tempo = ? WHERE empresa_id = ? AND Numero = ? AND ProjetoID = ?',
+            [nomeProj, tempoTotal, empresaId, numero, projId]
           );
         }
       }
     } else {
       const existingOS = await db.get(
-        'SELECT Numero FROM Ordem_Servico WHERE Numero = ? AND ProjetoID = 1',
-        [numero]
+        'SELECT Numero FROM Ordem_Servico WHERE empresa_id = ? AND Numero = ? AND ProjetoID = 1',
+        [empresaId, numero]
       );
       if (!existingOS) {
         await db.run(
-          'INSERT INTO Ordem_Servico (Numero, ProjetoID, DataCriacao, DataConclusao, Situacao, Responsavel, NomeProjeto, Tempo) VALUES (?, 1, ?, NULL, "Aberta", ?, ?, 0)',
-          [numero, dataCriacao, responsavel, orcamento.descricao || 'Projeto Geral']
+          'INSERT INTO Ordem_Servico (empresa_id, Numero, ProjetoID, DataCriacao, DataConclusao, Situacao, Responsavel, NomeProjeto, Tempo) VALUES (?, ?, 1, ?, NULL, "Aberta", ?, ?, 0)',
+          [empresaId, numero, dataCriacao, responsavel, orcamento.descricao || 'Projeto Geral']
         );
       }
     }
@@ -6155,23 +7057,25 @@ app.post('/api/orcamentos/:numero/efetivar-fluxo', authenticateToken, async (req
 
 // Desfazer efetivação do orçamento (exclui o fluxo financeiro e retorna para Em Aberto)
 app.post('/api/orcamentos/:numero/desfazer-efetivacao', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { numero } = req.params;
   try {
-    const orcamento = await db.get('SELECT * FROM orcamentos WHERE numero = ?', [numero]);
+    const orcamento = await db.get('SELECT * FROM orcamentos WHERE empresa_id = ? AND numero = ?', [empresaId, numero]);
     if (!orcamento) {
       return res.status(404).json({ error: 'Orçamento não encontrado.' });
     }
 
-    // Exclui todos os lançamentos do fluxo financeiro deste orçamento
-    await db.run('DELETE FROM FluxoRecebimento WHERE orcamento_numero = ?', [numero]);
+    // Exclui todos os lançamentos do fluxo financeiro deste orçamento na empresa
+    await db.run('DELETE FROM FluxoRecebimento WHERE empresa_id = ? AND orcamento_numero = ?', [empresaId, numero]);
 
-    // Exclui registros da Ordem_Servico deste orçamento
-    await db.run('DELETE FROM Ordem_Servico WHERE Numero = ?', [numero]);
+    // Exclui checklist e registros da Ordem_Servico deste orçamento na empresa
+    await db.run('DELETE FROM ordem_servico_checklist WHERE empresa_id = ? AND numero = ?', [empresaId, numero]);
+    await db.run('DELETE FROM Ordem_Servico WHERE empresa_id = ? AND Numero = ?', [empresaId, numero]);
 
     // Retorna o orçamento para a situação Em Aberto e limpa a flag de fluxo efetivado
     await db.run(
-      'UPDATE orcamentos SET status = "Em Aberto", fluxo_efetivado = 0, data_aprovacao = NULL WHERE numero = ?',
-      [numero]
+      'UPDATE orcamentos SET status = "Em Aberto", fluxo_efetivado = 0, data_aprovacao = NULL WHERE empresa_id = ? AND numero = ?',
+      [empresaId, numero]
     );
 
     res.json({
@@ -6186,11 +7090,12 @@ app.post('/api/orcamentos/:numero/desfazer-efetivacao', authenticateToken, async
 
 // Atualizar dados de um lançamento no Fluxo de Recebimento
 app.put('/api/fluxo-recebimento/:id', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { id } = req.params;
   const { descricao, valor, data_vencimento, meio_pagamento, observacoes, status } = req.body;
 
   try {
-    const registro = await db.get('SELECT * FROM FluxoRecebimento WHERE id = ?', [id]);
+    const registro = await db.get('SELECT * FROM FluxoRecebimento WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     if (!registro) {
       return res.status(404).json({ error: 'Registro de fluxo não encontrado.' });
     }
@@ -6203,11 +7108,11 @@ app.put('/api/fluxo-recebimento/:id', authenticateToken, async (req, res) => {
            meio_pagamento = COALESCE(?, meio_pagamento),
            observacoes = COALESCE(?, observacoes),
            status = COALESCE(?, status)
-       WHERE id = ?`,
-      [descricao, valor, data_vencimento, meio_pagamento, observacoes, status, id]
+       WHERE empresa_id = ? AND id = ?`,
+      [descricao, valor, data_vencimento, meio_pagamento, observacoes, status, empresaId, id]
     );
 
-    const atualizado = await db.get('SELECT * FROM FluxoRecebimento WHERE id = ?', [id]);
+    const atualizado = await db.get('SELECT * FROM FluxoRecebimento WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     res.json(atualizado);
   } catch (err) {
     console.error('Erro ao atualizar fluxo de recebimento:', err);
@@ -6217,11 +7122,12 @@ app.put('/api/fluxo-recebimento/:id', authenticateToken, async (req, res) => {
 
 // Confirmar Baixa / Recebimento de Parcela
 app.post('/api/fluxo-recebimento/:id/baixar', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { id } = req.params;
   const { valor_recebido, data_recebimento, meio_pagamento, observacoes } = req.body;
 
   try {
-    const registro = await db.get('SELECT * FROM FluxoRecebimento WHERE id = ?', [id]);
+    const registro = await db.get('SELECT * FROM FluxoRecebimento WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     if (!registro) {
       return res.status(404).json({ error: 'Registro de fluxo não encontrado.' });
     }
@@ -6237,11 +7143,11 @@ app.post('/api/fluxo-recebimento/:id/baixar', authenticateToken, async (req, res
            data_recebimento = ?,
            meio_pagamento = ?,
            observacoes = COALESCE(?, observacoes)
-       WHERE id = ?`,
-      [vlr, dtRec, meio, observacoes, id]
+       WHERE empresa_id = ? AND id = ?`,
+      [vlr, dtRec, meio, observacoes, empresaId, id]
     );
 
-    const atualizado = await db.get('SELECT * FROM FluxoRecebimento WHERE id = ?', [id]);
+    const atualizado = await db.get('SELECT * FROM FluxoRecebimento WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     res.json({ success: true, message: 'Recebimento baixado com sucesso!', registro: atualizado });
   } catch (err) {
     console.error('Erro ao baixar recebimento:', err);
@@ -6251,10 +7157,11 @@ app.post('/api/fluxo-recebimento/:id/baixar', authenticateToken, async (req, res
 
 // Estornar Baixa de Parcela (voltar para PENDENTE)
 app.post('/api/fluxo-recebimento/:id/estornar', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { id } = req.params;
 
   try {
-    const registro = await db.get('SELECT * FROM FluxoRecebimento WHERE id = ?', [id]);
+    const registro = await db.get('SELECT * FROM FluxoRecebimento WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     if (!registro) {
       return res.status(404).json({ error: 'Registro de fluxo não encontrado.' });
     }
@@ -6264,11 +7171,11 @@ app.post('/api/fluxo-recebimento/:id/estornar', authenticateToken, async (req, r
        SET status = 'PENDENTE',
            valor_recebido = 0,
            data_recebimento = NULL
-       WHERE id = ?`,
-      [id]
+       WHERE empresa_id = ? AND id = ?`,
+      [empresaId, id]
     );
 
-    const atualizado = await db.get('SELECT * FROM FluxoRecebimento WHERE id = ?', [id]);
+    const atualizado = await db.get('SELECT * FROM FluxoRecebimento WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     res.json({ success: true, message: 'Recebimento estornado para pendente!', registro: atualizado });
   } catch (err) {
     console.error('Erro ao estornar recebimento:', err);
@@ -6278,10 +7185,15 @@ app.post('/api/fluxo-recebimento/:id/estornar', authenticateToken, async (req, r
 
 // Marcar Recibo como Emitido
 app.post('/api/fluxo-recebimento/:id/marcar-recibo', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { id } = req.params;
 
   try {
-    await db.run('UPDATE FluxoRecebimento SET recibo_emitido = 1 WHERE id = ?', [id]);
+    const registro = await db.get('SELECT id FROM FluxoRecebimento WHERE empresa_id = ? AND id = ?', [empresaId, id]);
+    if (!registro) {
+      return res.status(404).json({ error: 'Registro de fluxo não encontrado.' });
+    }
+    await db.run('UPDATE FluxoRecebimento SET recibo_emitido = 1 WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     res.json({ success: true, message: 'Recibo marcado como emitido.' });
   } catch (err) {
     console.error('Erro ao marcar recibo:', err);
@@ -6291,15 +7203,16 @@ app.post('/api/fluxo-recebimento/:id/marcar-recibo', authenticateToken, async (r
 
 // Excluir Lançamento do Fluxo de Recebimento
 app.delete('/api/fluxo-recebimento/:id', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
   const { id } = req.params;
 
   try {
-    const registro = await db.get('SELECT * FROM FluxoRecebimento WHERE id = ?', [id]);
+    const registro = await db.get('SELECT * FROM FluxoRecebimento WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     if (!registro) {
       return res.status(404).json({ error: 'Registro não encontrado.' });
     }
 
-    await db.run('DELETE FROM FluxoRecebimento WHERE id = ?', [id]);
+    await db.run('DELETE FROM FluxoRecebimento WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     res.json({ success: true, message: 'Lançamento excluído com sucesso.' });
   } catch (err) {
     console.error('Erro ao excluir fluxo:', err);
@@ -6338,7 +7251,13 @@ if (frontendDistPath) {
   });
 }
 
-// Start Server
-app.listen(PORT, () => {
-  console.log(`Backend server running on port ${PORT}`);
-});
+// Start Server (unless imported by integration test runner)
+let httpServer = null;
+if (process.env.NODE_ENV !== 'test') {
+  httpServer = app.listen(PORT, () => {
+    console.log(`Backend server running on port ${PORT}`);
+  });
+}
+
+export { app, dbReadyPromise, httpServer };
+
