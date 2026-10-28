@@ -4285,13 +4285,6 @@ function Login() {
             </Link>
           </div>
         )}
-              fontWeight: 600
-            }}
-          >
-            <UserPlus size={18} />
-            <span>Nova Conta</span>
-          </Link>
-        </div>
       </div>
     </div>
   );
