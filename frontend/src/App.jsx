@@ -7110,9 +7110,9 @@ function OrdemControle() {
   };
 
   return (
-    <div className="container" style={{ maxWidth: '1400px', margin: '0 auto', padding: '24px 20px' }}>
+    <div className="container" style={{ width: '100%', maxWidth: '100%', margin: '0 auto', padding: '0' }}>
       {/* Header */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '24px', flexWrap: 'wrap', gap: '16px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '18px', flexWrap: 'wrap', gap: '14px' }}>
         <div>
           <h1 style={{ margin: 0, fontSize: '1.7rem', fontWeight: 800, color: '#ffffff', display: 'flex', alignItems: 'center', gap: '10px' }}>
             <div style={{ background: 'rgba(6, 182, 212, 0.15)', border: '1px solid rgba(6, 182, 212, 0.3)', padding: '8px', borderRadius: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -9989,7 +9989,7 @@ function ImportarLayouts({ isModal = false, projetoId = null, projetoNome = '', 
       {error && <div className="alert alert-danger">{error}</div>}
       {success && <div className="alert alert-success">{success}</div>}
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.5fr', gap: '24px', alignItems: 'start' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '20px', alignItems: 'start' }}>
         {/* Upload Card */}
         <div className="glass-card">
           <h3 style={{ marginBottom: '16px', fontWeight: 700 }}>Carregar Novo Layout</h3>
@@ -11345,11 +11345,12 @@ function ModalSubstituirMateriais({
         {/* Body Content: 2-Column Side-by-Side Grid */}
         <div style={{ 
           display: 'grid', 
-          gridTemplateColumns: 'minmax(460px, 1.15fr) minmax(460px, 1fr)', 
+          gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', 
           gap: '16px', 
           flex: 1, 
           minHeight: 0,
-          overflow: 'hidden' 
+          overflowY: 'auto',
+          overflowX: 'hidden'
         }}>
           {/* ================= LEFT COLUMN: Selected Items Grid ================= */}
           <div style={{ 
@@ -13507,7 +13508,7 @@ function ModalConclusaoProposta({ isOpen, onClose, orcamento, projetos = [], par
           {!mostrarResumo ? (
             <>
               {/* Scrollable Container */}
-              <div style={{ overflowY: 'auto', paddingRight: '4px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
+              <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', overflowX: 'hidden', paddingRight: '4px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
                 
                 {/* Linha: Dados do Cliente & Objeto */}
                 <div style={{ 
@@ -13541,7 +13542,7 @@ function ModalConclusaoProposta({ isOpen, onClose, orcamento, projetos = [], par
                 </div>
 
                 {/* BLOCO 1: As 2 Caixas de Informação no Cabeçalho */}
-                <div style={{ display: 'grid', gridTemplateColumns: '1.45fr 1fr', gap: '12px' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: '12px' }}>
                   
                   {/* Caixa 1: Negociação & Valores (Descontos, Valor Aprovado, Datas e Piso) */}
                   <div style={{ 
@@ -14201,10 +14202,10 @@ function ModalConclusaoProposta({ isOpen, onClose, orcamento, projetos = [], par
           /* TELA 2: TELA DE RESUMO DA CONCLUSÃO DA PROPOSTA           */
           /* ========================================================= */
           <>
-            <div style={{ overflowY: 'auto', paddingRight: '4px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
+            <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', overflowX: 'hidden', paddingRight: '4px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
               
               {/* Bloco 1: 3 Cards em Grid com Visão Geral do Fechamento */}
-              <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1.35fr 1fr', gap: '12px' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '12px' }}>
                 
                 {/* Card 1: Cliente & Proposta & Datas */}
                 <div style={{ 
@@ -19752,7 +19753,7 @@ function Orcamentos() {
                 {itensSuccess && <div className="alert alert-success" style={{ flexShrink: 0 }}>{itensSuccess}</div>}
 
                 {/* Side-by-side layout */}
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))', gap: '16px', flexShrink: 0, marginBottom: '10px' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: '16px', flexShrink: 0, marginBottom: '10px' }}>
                   {/* Left Area: Available Materials Catalog */}
                   <div className="glass-card" style={{ display: 'flex', flexDirection: 'column', gap: '10px', padding: '14px', background: 'rgba(255,255,255,0.01)', minWidth: 0 }}>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', minHeight: '68px', justifyContent: 'space-between' }}>
@@ -19810,7 +19811,7 @@ function Orcamentos() {
                         </label>
                       </div>
                     </div>
-                    <div style={{ overflowY: 'auto', flex: 1, height: '410px', maxHeight: '410px', border: '1px solid var(--glass-border)', borderRadius: 'var(--border-radius-md)', background: 'rgba(0,0,0,0.1)' }}>
+                    <div style={{ overflowY: 'auto', flex: 1, height: 'clamp(200px, calc(100vh - 340px), 390px)', maxHeight: 'clamp(200px, calc(100vh - 340px), 390px)', border: '1px solid var(--glass-border)', borderRadius: 'var(--border-radius-md)', background: 'rgba(0,0,0,0.1)' }}>
                       {(() => {
                         const inseridosCodigos = new Set(itensToConfer.map(i => i.MaterialReferencia));
                         const filteredList = globalProdutos.filter(prod => {
@@ -20091,7 +20092,7 @@ function Orcamentos() {
                         <span>Existe material sem valor total</span>
                       </div>
                     )}
-                    <div style={{ overflowY: 'auto', overflowX: 'hidden', flex: 1, height: '410px', maxHeight: '410px', border: '1px solid var(--glass-border)', borderRadius: 'var(--border-radius-md)', background: 'rgba(0,0,0,0.1)' }}>
+                    <div style={{ overflowY: 'auto', overflowX: 'hidden', flex: 1, height: 'clamp(200px, calc(100vh - 340px), 390px)', maxHeight: 'clamp(200px, calc(100vh - 340px), 390px)', border: '1px solid var(--glass-border)', borderRadius: 'var(--border-radius-md)', background: 'rgba(0,0,0,0.1)' }}>
                       {(() => {
                         const displayedItens = itensToConfer.filter(i => !filterInseridosOnlyServicos || i.MaterialTipo === 'Serviço');
                         if (displayedItens.length === 0) {
@@ -23121,7 +23122,7 @@ function Projetos() {
                 {itensSuccess && <div className="alert alert-success" style={{ flexShrink: 0 }}>{itensSuccess}</div>}
 
                 {/* Side-by-side layout */}
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))', gap: '16px', flexShrink: 0, marginBottom: '10px' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: '16px', flexShrink: 0, marginBottom: '10px' }}>
                   {/* Left Area: Available Materials Catalog */}
                   <div className="glass-card" style={{ display: 'flex', flexDirection: 'column', gap: '10px', padding: '14px', background: 'rgba(255,255,255,0.01)', minWidth: 0 }}>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', minHeight: '68px', justifyContent: 'space-between' }}>
@@ -23179,7 +23180,7 @@ function Projetos() {
                         </label>
                       </div>
                     </div>
-                    <div style={{ overflowY: 'auto', flex: 1, height: '410px', maxHeight: '410px', border: '1px solid var(--glass-border)', borderRadius: 'var(--border-radius-md)', background: 'rgba(0,0,0,0.1)' }}>
+                    <div style={{ overflowY: 'auto', flex: 1, height: 'clamp(200px, calc(100vh - 340px), 390px)', maxHeight: 'clamp(200px, calc(100vh - 340px), 390px)', border: '1px solid var(--glass-border)', borderRadius: 'var(--border-radius-md)', background: 'rgba(0,0,0,0.1)' }}>
                       {(() => {
                         const inseridosCodigos = new Set(itensToConfer.map(i => i.MaterialReferencia));
                         const filteredList = globalProdutos.filter(prod => {
@@ -23432,7 +23433,7 @@ function Projetos() {
                         <span>Existe material sem valor total</span>
                       </div>
                     )}
-                    <div style={{ overflowY: 'auto', overflowX: 'hidden', flex: 1, height: '410px', maxHeight: '410px', border: '1px solid var(--glass-border)', borderRadius: 'var(--border-radius-md)', background: 'rgba(0,0,0,0.1)' }}>
+                    <div style={{ overflowY: 'auto', overflowX: 'hidden', flex: 1, height: 'clamp(200px, calc(100vh - 340px), 390px)', maxHeight: 'clamp(200px, calc(100vh - 340px), 390px)', border: '1px solid var(--glass-border)', borderRadius: 'var(--border-radius-md)', background: 'rgba(0,0,0,0.1)' }}>
                       {(() => {
                         const displayedItens = itensToConfer.filter(i => !filterInseridosOnlyServicos || i.MaterialTipo === 'Serviço');
                         if (displayedItens.length === 0) {
@@ -28297,9 +28298,9 @@ function FluxoRecebimento() {
   };
 
   return (
-    <div className="container" style={{ maxWidth: '1400px', margin: '0 auto', padding: '24px 20px' }}>
+    <div className="container" style={{ width: '100%', maxWidth: '100%', margin: '0 auto', padding: '0' }}>
       {/* Page Header */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '24px', flexWrap: 'wrap', gap: '16px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '18px', flexWrap: 'wrap', gap: '14px' }}>
         <div>
           <h1 style={{ margin: 0, fontSize: '1.7rem', fontWeight: 800, color: '#ffffff', display: 'flex', alignItems: 'center', gap: '10px' }}>
             <div style={{ background: '#ecfdf5', padding: '8px', borderRadius: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
