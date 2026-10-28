@@ -169,6 +169,7 @@ export async function ensureCompanyProfilesAndPermissions(pool, empresaId) {
   const [funcoes] = await pool.query(`SELECT id, codigo FROM funcoes`);
   const defaultProfiles = [
     { nome: 'Administrador', descricao: 'Acesso completo aos recursos da empresa', sistema: 1, all: true },
+    { nome: 'Master', descricao: 'Usuário master com acesso administrativo completo da empresa', sistema: 1, all: true },
     { nome: 'Comercial', descricao: 'Acesso a clientes, contratos, orçamentos e propostas', sistema: 1, prefixes: ['DASHBOARD_', 'CLIENTES_', 'CONTRATOS_', 'ORCAMENTOS_', 'PROJETOS_LEITURA', 'PRODUTOS_LEITURA'] },
     { nome: 'Engenharia / Projetos', descricao: 'Acesso a projetos, materiais e serviços', sistema: 1, prefixes: ['DASHBOARD_', 'PROJETOS_', 'PRODUTOS_', 'SERVICOS_', 'ORCAMENTOS_LEITURA'] },
     { nome: 'Produção', descricao: 'Acesso a ordens de serviço, apontamentos e revisão técnica', sistema: 1, prefixes: ['DASHBOARD_', 'PRODUCAO_', 'PROJETOS_LEITURA'] },
@@ -176,6 +177,7 @@ export async function ensureCompanyProfilesAndPermissions(pool, empresaId) {
   ];
 
   let adminPerfilId = null;
+  let masterPerfilId = null;
 
   for (const p of defaultProfiles) {
     const [existing] = await pool.query(
@@ -195,6 +197,9 @@ export async function ensureCompanyProfilesAndPermissions(pool, empresaId) {
     if (p.nome === 'Administrador') {
       adminPerfilId = perfilId;
     }
+    if (p.nome === 'Master') {
+      masterPerfilId = perfilId;
+    }
 
     for (const f of funcoes) {
       const allowed = p.all || (p.prefixes && p.prefixes.some(pref => f.codigo.startsWith(pref)));
@@ -207,7 +212,7 @@ export async function ensureCompanyProfilesAndPermissions(pool, empresaId) {
     }
   }
 
-  return adminPerfilId;
+  return { adminPerfilId, masterPerfilId: masterPerfilId || adminPerfilId };
 }
 
 /**
@@ -470,7 +475,8 @@ export async function runMultiTenantMigrations(pool, options = {}) {
     defaultEmpresaId = existingEmpresas[0].id;
   }
 
-  const adminPerfilId = await ensureCompanyProfilesAndPermissions(pool, defaultEmpresaId);
+  const profResult = await ensureCompanyProfilesAndPermissions(pool, defaultEmpresaId);
+  const adminPerfilId = typeof profResult === 'object' ? profResult.adminPerfilId : profResult;
 
   // 8. Adiciona colunas de governança e empresa_id (inicialmente NULLABLE para backfill controlado)
   const tenantTablesToMigrate = [
@@ -893,4 +899,83 @@ export async function runMultiTenantMigrations(pool, options = {}) {
   );
 
   return { version: MIGRATION_VERSION, defaultEmpresaId, precheck };
+}
+
+/**
+ * Executa a migração versionada para suporte ao fluxo público de Nova Conta (V2026_10_28_NOVA_CONTA_V1).
+ * Adiciona suporte a tipo_pessoa, cpf_cnpj, data_cadastro, data_vigencia em empresas,
+ * e login (globalmente único), situacao, data_cadastro, data_vigencia em usuarios,
+ * além de garantir o perfil Master em todas as empresas.
+ */
+export async function runNovaContaMigration(pool) {
+  const MIGRATION_VERSION = 'V2026_10_28_NOVA_CONTA_V1';
+
+  const [mig] = await pool.query(
+    `SELECT version FROM schema_migrations WHERE version = ? AND status = 'APPLIED' LIMIT 1`,
+    [MIGRATION_VERSION]
+  );
+  if (mig && mig.length > 0) {
+    return { version: MIGRATION_VERSION, alreadyApplied: true };
+  }
+
+  // 1. Colunas em empresas
+  if (!(await columnExists(pool, 'empresas', 'tipo_pessoa'))) {
+    await pool.query(`ALTER TABLE \`empresas\` ADD COLUMN \`tipo_pessoa\` VARCHAR(20) NOT NULL DEFAULT 'Jurídica' AFTER \`nome_fantasia\``);
+  }
+  if (!(await columnExists(pool, 'empresas', 'cpf_cnpj'))) {
+    await pool.query(`ALTER TABLE \`empresas\` ADD COLUMN \`cpf_cnpj\` VARCHAR(30) DEFAULT NULL AFTER \`cnpj\``);
+  }
+  if (!(await columnExists(pool, 'empresas', 'data_cadastro'))) {
+    await pool.query(`ALTER TABLE \`empresas\` ADD COLUMN \`data_cadastro\` DATETIME DEFAULT CURRENT_TIMESTAMP AFTER \`ativo\``);
+  }
+  if (!(await columnExists(pool, 'empresas', 'data_vigencia'))) {
+    await pool.query(`ALTER TABLE \`empresas\` ADD COLUMN \`data_vigencia\` DATETIME DEFAULT NULL AFTER \`data_cadastro\``);
+  }
+
+  // Backfill em empresas
+  await pool.query(`UPDATE \`empresas\` SET \`tipo_pessoa\` = 'Jurídica' WHERE \`tipo_pessoa\` IS NULL`);
+  await pool.query(`UPDATE \`empresas\` SET \`cpf_cnpj\` = \`cnpj\` WHERE \`cpf_cnpj\` IS NULL AND \`cnpj\` IS NOT NULL`);
+  await pool.query(`UPDATE \`empresas\` SET \`data_cadastro\` = \`created_at\` WHERE \`data_cadastro\` IS NULL`);
+  await pool.query(`UPDATE \`empresas\` SET \`data_vigencia\` = DATE_ADD(NOW(), INTERVAL 365 DAY) WHERE \`data_vigencia\` IS NULL`);
+
+  // 2. Colunas em usuarios
+  if (!(await columnExists(pool, 'usuarios', 'login'))) {
+    await pool.query(`ALTER TABLE \`usuarios\` ADD COLUMN \`login\` VARCHAR(100) DEFAULT NULL AFTER \`nome\``);
+  }
+  if (!(await columnExists(pool, 'usuarios', 'situacao'))) {
+    await pool.query(`ALTER TABLE \`usuarios\` ADD COLUMN \`situacao\` VARCHAR(20) NOT NULL DEFAULT 'Ativado' AFTER \`role\``);
+  }
+  if (!(await columnExists(pool, 'usuarios', 'data_cadastro'))) {
+    await pool.query(`ALTER TABLE \`usuarios\` ADD COLUMN \`data_cadastro\` DATETIME DEFAULT CURRENT_TIMESTAMP AFTER \`ativo\``);
+  }
+  if (!(await columnExists(pool, 'usuarios', 'data_vigencia'))) {
+    await pool.query(`ALTER TABLE \`usuarios\` ADD COLUMN \`data_vigencia\` DATETIME DEFAULT NULL AFTER \`data_cadastro\``);
+  }
+
+  // Backfill em usuarios
+  await pool.query(`UPDATE \`usuarios\` SET \`login\` = \`email\` WHERE \`login\` IS NULL`);
+  await pool.query(`UPDATE \`usuarios\` SET \`situacao\` = 'Ativado' WHERE \`situacao\` IS NULL`);
+  await pool.query(`UPDATE \`usuarios\` SET \`data_cadastro\` = \`created_at\` WHERE \`data_cadastro\` IS NULL`);
+  await pool.query(`UPDATE \`usuarios\` SET \`data_vigencia\` = DATE_ADD(NOW(), INTERVAL 365 DAY) WHERE \`data_vigencia\` IS NULL`);
+
+  // Unicidade global de usuarios.login
+  if (!(await indexExists(pool, 'usuarios', 'uk_usuarios_login'))) {
+    await pool.query(`CREATE UNIQUE INDEX \`uk_usuarios_login\` ON \`usuarios\` (\`login\`)`);
+  }
+
+  // 3. Garantir perfil 'Master' em todas as empresas existentes
+  const [empresas] = await pool.query(`SELECT id FROM empresas`);
+  for (const emp of empresas) {
+    await ensureCompanyProfilesAndPermissions(pool, emp.id);
+  }
+
+  // 4. Registra migração concluída
+  await pool.query(
+    `INSERT INTO schema_migrations (version, description, status, report)
+     VALUES (?, ?, 'APPLIED', ?)
+     ON DUPLICATE KEY UPDATE status = 'APPLIED', report = VALUES(report), applied_at = CURRENT_TIMESTAMP`,
+    [MIGRATION_VERSION, 'Fluxo Público Nova Conta: tipo_pessoa, cpf_cnpj, login unico, situacao, datas e perfil Master', JSON.stringify({ timestamp: new Date().toISOString() })]
+  );
+
+  return { version: MIGRATION_VERSION, applied: true };
 }

@@ -3,7 +3,7 @@ import bcrypt from 'bcryptjs';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { runMultiTenantMigrations, ensureCompanyProfilesAndPermissions } from './migrations.js';
+import { runMultiTenantMigrations, runNovaContaMigration, ensureCompanyProfilesAndPermissions } from './migrations.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -749,6 +749,9 @@ export async function initDb(options = {}) {
   // 5. Executa a migração versionada multiempresa (empresas, funcoes, perfis, perfil_funcoes, auditoria, FKs compostas e índices)
   const migrationInfo = await runMultiTenantMigrations(pool, options);
   const defaultEmpresaId = migrationInfo.defaultEmpresaId || 1;
+
+  // 5.1 Executa a migração versionada para suporte a Nova Conta (tipo_pessoa, cpf_cnpj, login, situacao, datas, vigência e perfil Master)
+  await runNovaContaMigration(pool);
 
   // 6. Seeds padrão para a empresa inicial caso o banco esteja vazio
   await seedCompanyDefaults(db, defaultEmpresaId);

@@ -227,7 +227,7 @@ export function createAuthMiddleware(getDb, jwtSecret) {
 
       // Confirma no servidor que usuário e empresa existem, estão vinculados e ativos
       const userRecord = await db.get(
-        `SELECT u.id, u.empresa_id, u.perfil_id, u.nome, u.email, u.role, u.ativo AS usuario_ativo,
+        `SELECT u.id, u.empresa_id, u.perfil_id, u.nome, u.email, u.login, u.situacao, u.role, u.ativo AS usuario_ativo,
                 e.razao_social AS empresa_razao_social, e.nome_fantasia AS empresa_nome_fantasia,
                 e.status AS empresa_status, e.ativo AS empresa_ativo,
                 p.nome AS perfil_nome, p.ativo AS perfil_ativo
@@ -268,7 +268,8 @@ export function createAuthMiddleware(getDb, jwtSecret) {
         return res.status(401).json({ error: 'Token legado sem contexto de empresa. Faça login novamente.' });
       }
 
-      if (Number(userRecord.usuario_ativo) !== 1) {
+      const isUserAtivo = Number(userRecord.usuario_ativo) === 1 && String(userRecord.situacao || 'Ativado').toLowerCase() === 'ativado';
+      if (!isUserAtivo) {
         await logAuditoria(db, req, {
           empresaId: userRecord.empresa_id,
           usuarioId: userRecord.id,
@@ -293,7 +294,9 @@ export function createAuthMiddleware(getDb, jwtSecret) {
 
       // Carrega permissões do perfil vinculado na mesma empresa
       let permissoes = [];
-      const isAdmin = String(userRecord.role || '').toLowerCase() === 'admin' || String(userRecord.perfil_nome || '').toLowerCase() === 'administrador';
+      const isAdmin = String(userRecord.role || '').toLowerCase() === 'admin'
+        || String(userRecord.perfil_nome || '').toLowerCase() === 'administrador'
+        || String(userRecord.perfil_nome || '').toLowerCase() === 'master';
       if (isAdmin) {
         const allFuncs = await db.all(`SELECT codigo FROM funcoes`);
         permissoes = allFuncs.map(f => f.codigo);
@@ -335,6 +338,7 @@ export function createAuthMiddleware(getDb, jwtSecret) {
         perfilNome: userRecord.perfil_nome || null,
         permissoes: Object.freeze([...permissoes]),
         nome: userRecord.nome,
+        login: userRecord.login || userRecord.email,
         email: userRecord.email
       });
 

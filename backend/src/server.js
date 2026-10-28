@@ -20,6 +20,7 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { initDb, seedCompanyDefaults } from './db.js';
+import { ensureCompanyProfilesAndPermissions } from './migrations.js';
 import {
   requestIdMiddleware,
   createAuthMiddleware,
@@ -467,15 +468,400 @@ function formatDateTimeForMySQL(date) {
 
 // ---------------- API Routes ----------------
 
-// 1. Authentication, RBAC & User Management Routes
-app.post('/api/auth/login', async (req, res) => {
-  const email = req.body?.email;
-  const senha = req.body?.senha || req.body?.password;
-  if (!email || !senha) {
-    return res.status(400).json({ error: 'Email e senha são obrigatórios.' });
+// Funções utilitárias de validação para cadastro público e autenticação
+export function validateCPF(cpf) {
+  if (!cpf) return false;
+  const clean = String(cpf).replace(/\D/g, '');
+  if (clean.length !== 11) return false;
+  if (/^(\d)\1{10}$/.test(clean)) return false;
+  
+  let sum = 0;
+  for (let i = 0; i < 9; i++) {
+    sum += parseInt(clean.charAt(i), 10) * (10 - i);
+  }
+  let rev = 11 - (sum % 11);
+  if (rev === 10 || rev === 11) rev = 0;
+  if (rev !== parseInt(clean.charAt(9), 10)) return false;
+
+  sum = 0;
+  for (let i = 0; i < 10; i++) {
+    sum += parseInt(clean.charAt(i), 10) * (11 - i);
+  }
+  rev = 11 - (sum % 11);
+  if (rev === 10 || rev === 11) rev = 0;
+  if (rev !== parseInt(clean.charAt(10), 10)) return false;
+
+  return true;
+}
+
+export function validateCNPJ(cnpj) {
+  if (!cnpj) return false;
+  const clean = String(cnpj).replace(/[^0-9A-Za-z]/g, '').toUpperCase();
+  if (clean.length !== 14) return false;
+
+  if (/^\d{14}$/.test(clean)) {
+    if (/^(\d)\1{13}$/.test(clean)) return false;
+
+    const weights1 = [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2];
+    let sum1 = 0;
+    for (let i = 0; i < 12; i++) {
+      sum1 += parseInt(clean.charAt(i), 10) * weights1[i];
+    }
+    let rest1 = sum1 % 11;
+    let digit1 = rest1 < 2 ? 0 : 11 - rest1;
+    if (parseInt(clean.charAt(12), 10) !== digit1) return false;
+
+    const weights2 = [6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2];
+    let sum2 = 0;
+    for (let i = 0; i < 13; i++) {
+      sum2 += parseInt(clean.charAt(i), 10) * weights2[i];
+    }
+    let rest2 = sum2 % 11;
+    let digit2 = rest2 < 2 ? 0 : 11 - rest2;
+    if (parseInt(clean.charAt(13), 10) !== digit2) return false;
+
+    return true;
+  }
+
+  // Alfanumérico da Receita Federal
+  const val = (c) => c.charCodeAt(0) - 48;
+  const weights1 = [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2];
+  let sum1 = 0;
+  for (let i = 0; i < 12; i++) {
+    sum1 += val(clean.charAt(i)) * weights1[i];
+  }
+  let rest1 = sum1 % 11;
+  let digit1 = rest1 < 2 ? 0 : 11 - rest1;
+  if (parseInt(clean.charAt(12), 10) !== digit1) return false;
+
+  const weights2 = [6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2];
+  let sum2 = 0;
+  for (let i = 0; i < 12; i++) {
+    sum2 += val(clean.charAt(i)) * weights2[i];
+  }
+  sum2 += digit1 * weights2[12];
+  let rest2 = sum2 % 11;
+  let digit2 = rest2 < 2 ? 0 : 11 - rest2;
+  if (parseInt(clean.charAt(13), 10) !== digit2) return false;
+
+  return true;
+}
+
+export function validatePhone(phone) {
+  if (!phone) return false;
+  const clean = String(phone).replace(/\D/g, '');
+  if (clean.length < 10 || clean.length > 11) return false;
+  const ddd = parseInt(clean.slice(0, 2), 10);
+  if (isNaN(ddd) || ddd < 11 || ddd > 99) return false;
+  const validDdds = [
+    11,12,13,14,15,16,17,18,19,
+    21,22,24,27,28,
+    31,32,33,34,35,37,38,
+    41,42,43,44,45,46,47,48,49,
+    51,53,54,55,
+    61,62,63,64,65,66,67,68,69,
+    71,73,74,75,77,79,
+    81,82,83,84,85,86,87,88,89,
+    91,92,93,94,95,96,97,98,99
+  ];
+  if (!validDdds.includes(ddd)) return false;
+  if (clean.length === 11 && clean.charAt(2) !== '9') return false;
+  return true;
+}
+
+export function validateEmail(email) {
+  if (!email || typeof email !== 'string') return false;
+  const re = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+  return re.test(email.trim());
+}
+
+export function validateLogin(login) {
+  if (!login || typeof login !== 'string') return false;
+  const trimmed = login.trim();
+  if (trimmed.length < 3 || trimmed.length > 60) return false;
+  return /^[a-zA-Z0-9._@+-]{3,60}$/.test(trimmed);
+}
+
+export function validatePassword(senha) {
+  if (!senha || typeof senha !== 'string') return false;
+  return senha.length >= 6;
+}
+
+// Rate limiter em memória para criação pública de contas (máx 15 requisições por janela de 15min por IP)
+const registrationRateLimiter = new Map();
+function checkRegistrationRateLimit(ip) {
+  const now = Date.now();
+  const windowMs = 15 * 60 * 1000;
+  const maxAttempts = 15;
+  const record = registrationRateLimiter.get(ip) || { count: 0, resetAt: now + windowMs };
+  if (now > record.resetAt) {
+    record.count = 0;
+    record.resetAt = now + windowMs;
+  }
+  record.count++;
+  registrationRateLimiter.set(ip, record);
+  return record.count <= maxAttempts;
+}
+
+// Endpoints públicos de Nova Conta (Self-Registration)
+app.post('/api/public/nova-conta/validar-etapa1', async (req, res) => {
+  const { tipo_pessoa, nome, cpf_cnpj, telefone, email } = req.body || {};
+  const errors = {};
+
+  const cleanTipo = String(tipo_pessoa || '').trim();
+  if (!cleanTipo || (cleanTipo !== 'Física' && cleanTipo !== 'Jurídica')) {
+    errors.tipo_pessoa = 'Selecione o tipo de pessoa (Física ou Jurídica).';
+  }
+
+  const cleanNome = String(nome || '').trim();
+  if (!cleanNome || cleanNome.length < 2) {
+    errors.nome = 'O nome é obrigatório (mínimo de 2 caracteres).';
+  }
+
+  const cleanDoc = String(cpf_cnpj || '').trim();
+  if (!cleanDoc) {
+    errors.cpf_cnpj = cleanTipo === 'Física' ? 'O CPF é obrigatório.' : 'O CNPJ é obrigatório.';
+  } else if (cleanTipo === 'Física' && !validateCPF(cleanDoc)) {
+    errors.cpf_cnpj = 'CPF inválido. Verifique os dígitos informados.';
+  } else if (cleanTipo === 'Jurídica' && !validateCNPJ(cleanDoc)) {
+    errors.cpf_cnpj = 'CNPJ inválido. Verifique os dígitos informados.';
+  }
+
+  const cleanTel = String(telefone || '').trim();
+  if (!cleanTel) {
+    errors.telefone = 'O telefone com DDD é obrigatório.';
+  } else if (!validatePhone(cleanTel)) {
+    errors.telefone = 'DDD ou telefone inválido (ex: (11) 98765-4321).';
+  }
+
+  const cleanEmail = String(email || '').trim().toLowerCase();
+  if (!cleanEmail) {
+    errors.email = 'O e-mail é obrigatório.';
+  } else if (!validateEmail(cleanEmail)) {
+    errors.email = 'Formato de e-mail inválido.';
+  }
+
+  if (Object.keys(errors).length > 0) {
+    return res.status(400).json({
+      error: 'Por favor, corrija os campos destacados.',
+      errors
+    });
   }
 
   try {
+    const existingEmp = await db.get(
+      'SELECT id FROM empresas WHERE cnpj = ? OR cpf_cnpj = ? LIMIT 1',
+      [cleanDoc, cleanDoc]
+    );
+    if (existingEmp) {
+      return res.status(400).json({
+        error: 'Este documento (CPF/CNPJ) já está cadastrado em outra conta.',
+        errors: { cpf_cnpj: 'Documento já cadastrado no sistema.' }
+      });
+    }
+  } catch (dbErr) {
+    console.warn('[NovaConta] Aviso ao checar duplicidade de documento:', dbErr.message);
+  }
+
+  return res.status(200).json({ valid: true });
+});
+
+app.post('/api/public/nova-conta', async (req, res) => {
+  const clientIp = req.ip || req.socket?.remoteAddress || 'unknown';
+  if (!checkRegistrationRateLimit(clientIp)) {
+    return res.status(429).json({
+      error: 'Muitas tentativas de cadastro a partir deste endereço IP. Por favor, aguarde alguns minutos.'
+    });
+  }
+
+  const {
+    tipo_pessoa,
+    nome,
+    cpf_cnpj,
+    telefone,
+    email,
+    login,
+    master_nome,
+    senha
+  } = req.body || {};
+
+  const errors = {};
+
+  // Validação da Etapa 1
+  const cleanTipo = String(tipo_pessoa || '').trim();
+  if (!cleanTipo || (cleanTipo !== 'Física' && cleanTipo !== 'Jurídica')) {
+    errors.tipo_pessoa = 'Selecione o tipo de pessoa (Física ou Jurídica).';
+  }
+
+  const cleanNome = String(nome || '').trim();
+  if (!cleanNome || cleanNome.length < 2) {
+    errors.nome = 'O nome da conta é obrigatório.';
+  }
+
+  const cleanDoc = String(cpf_cnpj || '').trim();
+  if (!cleanDoc) {
+    errors.cpf_cnpj = cleanTipo === 'Física' ? 'O CPF é obrigatório.' : 'O CNPJ é obrigatório.';
+  } else if (cleanTipo === 'Física' && !validateCPF(cleanDoc)) {
+    errors.cpf_cnpj = 'CPF inválido.';
+  } else if (cleanTipo === 'Jurídica' && !validateCNPJ(cleanDoc)) {
+    errors.cpf_cnpj = 'CNPJ inválido.';
+  }
+
+  const cleanTel = String(telefone || '').trim();
+  if (!cleanTel) {
+    errors.telefone = 'O telefone com DDD é obrigatório.';
+  } else if (!validatePhone(cleanTel)) {
+    errors.telefone = 'DDD ou telefone inválido.';
+  }
+
+  const cleanEmail = String(email || '').trim().toLowerCase();
+  if (!cleanEmail) {
+    errors.email = 'O e-mail é obrigatório.';
+  } else if (!validateEmail(cleanEmail)) {
+    errors.email = 'Formato de e-mail inválido.';
+  }
+
+  // Validação da Etapa 2
+  const cleanLogin = String(login || '').trim().toLowerCase();
+  if (!cleanLogin) {
+    errors.login = 'O login é obrigatório.';
+  } else if (!validateLogin(cleanLogin)) {
+    errors.login = 'Login inválido (mínimo de 3 caracteres alfanuméricos, ponto, traço ou e-mail).';
+  }
+
+  const cleanMasterNome = String(master_nome || '').trim();
+  if (!cleanMasterNome || cleanMasterNome.length < 2) {
+    errors.master_nome = 'O nome do usuário master é obrigatório.';
+  }
+
+  const rawSenha = String(senha || '');
+  if (!rawSenha) {
+    errors.senha = 'A senha é obrigatória.';
+  } else if (!validatePassword(rawSenha)) {
+    errors.senha = 'A senha deve conter no mínimo 6 caracteres.';
+  }
+
+  if (Object.keys(errors).length > 0) {
+    return res.status(400).json({
+      error: 'Por favor, corrija os campos destacados.',
+      errors
+    });
+  }
+
+  try {
+    // 1. Valida unicidade global do login e documento
+    const existingUser = await db.get(
+      'SELECT id FROM usuarios WHERE LOWER(login) = ? OR LOWER(email) = ? LIMIT 1',
+      [cleanLogin, cleanLogin]
+    );
+    if (existingUser) {
+      return res.status(400).json({
+        error: 'Este login já está em uso por outro usuário. Escolha outro identificador.',
+        errors: { login: 'Este login já está em uso.' }
+      });
+    }
+
+    const existingEmp = await db.get(
+      'SELECT id FROM empresas WHERE cnpj = ? OR cpf_cnpj = ? LIMIT 1',
+      [cleanDoc, cleanDoc]
+    );
+    if (existingEmp) {
+      return res.status(400).json({
+        error: 'Este documento (CPF/CNPJ) já está cadastrado em outra conta.',
+        errors: { cpf_cnpj: 'Documento já cadastrado.' }
+      });
+    }
+
+    // 2. Transação atômica para criação da empresa + usuário master + perfis + defaults
+    const now = new Date();
+    const vigencia = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+    const nowStr = formatDateTimeForMySQL(now);
+    const vigenciaStr = formatDateTimeForMySQL(vigencia);
+
+    const hashedSenha = await bcrypt.hash(rawSenha, 10);
+
+    const conn = await db.pool.getConnection();
+    let novaEmpresaId = null;
+
+    try {
+      await conn.beginTransaction();
+
+      // Inserção da empresa
+      const [empRes] = await conn.query(
+        `INSERT INTO empresas (razao_social, nome_fantasia, cnpj, cpf_cnpj, tipo_pessoa, email, telefone, status, ativo, data_cadastro, data_vigencia)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'Ativo', 1, ?, ?)`,
+        [cleanNome, cleanNome, cleanDoc, cleanDoc, cleanTipo, cleanEmail, cleanTel, nowStr, vigenciaStr]
+      );
+      novaEmpresaId = empRes.insertId;
+
+      // Seed dos perfis e catálogo de funções da nova empresa usando a mesma conexão da transação
+      await ensureCompanyProfilesAndPermissions(conn, novaEmpresaId);
+
+      // Localiza perfil Master da empresa
+      const [masterProf] = await conn.query(
+        `SELECT id FROM perfis WHERE empresa_id = ? AND nome = 'Master' LIMIT 1`,
+        [novaEmpresaId]
+      );
+      const perfilId = masterProf[0]?.id || null;
+
+      // Inserção do usuário master vinculado estritamente à nova empresa
+      await conn.query(
+        `INSERT INTO usuarios (empresa_id, perfil_id, nome, login, email, senha, role, ativo, situacao, data_cadastro, data_vigencia)
+         VALUES (?, ?, ?, ?, ?, ?, 'admin', 1, 'Ativado', ?, ?)`,
+        [novaEmpresaId, perfilId, cleanMasterNome, cleanLogin, cleanEmail, hashedSenha, nowStr, vigenciaStr]
+      );
+
+      await conn.commit();
+
+      // Seed dos cadastros padrão (parâmetro financeiro, serviços, FAB.*, formas de pagamento)
+      await seedCompanyDefaults(db, novaEmpresaId, {
+        razao_social: cleanNome,
+        nome_fantasia: cleanNome,
+        cnpj: cleanDoc
+      });
+    } catch (txErr) {
+      await conn.rollback();
+      throw txErr;
+    } finally {
+      conn.release();
+    }
+
+    await logAuditoria(db, req, {
+      empresaId: novaEmpresaId,
+      acao: 'NOVA_CONTA_CRIADA',
+      recurso: 'EMPRESAS',
+      recursoId: novaEmpresaId,
+      detalhes: { login: cleanLogin, tipo_pessoa: cleanTipo }
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: 'Conta criada com sucesso. Entre com seu login e senha.'
+    });
+  } catch (err) {
+    console.error('[NovaConta] Erro ao criar nova conta:', err);
+    if (err.code === 'ER_DUP_ENTRY') {
+      return res.status(400).json({
+        error: 'Já existe um cadastro com os dados informados (login ou documento).',
+        errors: { login: 'Dado duplicado detectado.' }
+      });
+    }
+    return res.status(500).json({
+      error: 'Erro interno ao processar cadastro da conta. Tente novamente em instantes.'
+    });
+  }
+});
+
+// 1. Authentication, RBAC & User Management Routes
+app.post('/api/auth/login', async (req, res) => {
+  const loginInput = req.body?.login || req.body?.email;
+  const senha = req.body?.senha || req.body?.password;
+  if (!loginInput || !senha) {
+    return res.status(400).json({ error: 'Login e senha são obrigatórios.' });
+  }
+
+  try {
+    const cleanLogin = String(loginInput).trim().toLowerCase();
     const user = await db.get(
       `SELECT u.*, e.razao_social AS empresa_razao_social, e.nome_fantasia AS empresa_nome_fantasia,
               e.status AS empresa_status, e.ativo AS empresa_ativo,
@@ -483,13 +869,13 @@ app.post('/api/auth/login', async (req, res) => {
        FROM usuarios u
        INNER JOIN empresas e ON e.id = u.empresa_id
        LEFT JOIN perfis p ON p.empresa_id = u.empresa_id AND p.id = u.perfil_id
-       WHERE u.email = ?
+       WHERE LOWER(u.login) = ? OR LOWER(u.email) = ?
        LIMIT 1`,
-      [String(email).trim()]
+      [cleanLogin, cleanLogin]
     );
     if (!user) {
-      await logAuditoria(db, req, { acao: 'LOGIN_FALHA', recurso: 'AUTH', detalhes: { email } });
-      return res.status(401).json({ error: 'Email ou senha incorretos.' });
+      await logAuditoria(db, req, { acao: 'LOGIN_FALHA', recurso: 'AUTH', detalhes: { login: cleanLogin } });
+      return res.status(401).json({ error: 'Login ou senha incorretos.' });
     }
 
     const validPassword = await bcrypt.compare(senha, user.senha);
@@ -501,10 +887,11 @@ app.post('/api/auth/login', async (req, res) => {
         recurso: 'AUTH',
         recursoId: user.id
       });
-      return res.status(401).json({ error: 'Email ou senha incorretos.' });
+      return res.status(401).json({ error: 'Login ou senha incorretos.' });
     }
 
-    if (Number(user.ativo) !== 1) {
+    const isUserAtivo = Number(user.ativo) === 1 && String(user.situacao || 'Ativado').toLowerCase() === 'ativado';
+    if (!isUserAtivo) {
       await logAuditoria(db, req, {
         empresaId: user.empresa_id,
         usuarioId: user.id,
@@ -527,7 +914,10 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(403).json({ error: 'Empresa inativa ou suspensa.' });
     }
 
-    const isAdmin = String(user.role || '').toLowerCase() === 'admin' || String(user.perfil_nome || '').toLowerCase() === 'administrador';
+    const isAdmin = String(user.role || '').toLowerCase() === 'admin' 
+      || String(user.perfil_nome || '').toLowerCase() === 'administrador'
+      || String(user.perfil_nome || '').toLowerCase() === 'master';
+
     let permissoes = [];
     if (isAdmin) {
       const allFuncs = await db.all('SELECT codigo FROM funcoes');
@@ -547,6 +937,7 @@ app.post('/api/auth/login', async (req, res) => {
       id: Number(user.id),
       empresa_id: Number(user.empresa_id),
       nome: user.nome,
+      login: user.login || user.email,
       email: user.email,
       role: isAdmin ? 'admin' : user.role,
       perfil_id: user.perfil_id ? Number(user.perfil_id) : null
@@ -569,6 +960,7 @@ app.post('/api/auth/login', async (req, res) => {
         empresa_id: Number(user.empresa_id),
         empresa_nome: user.empresa_nome_fantasia || user.empresa_razao_social,
         nome: user.nome,
+        login: user.login || user.email,
         email: user.email,
         role: isAdmin ? 'admin' : user.role,
         perfil_id: user.perfil_id ? Number(user.perfil_id) : null,

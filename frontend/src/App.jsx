@@ -54,6 +54,7 @@ import {
   Clock,
   Link2,
   Eye,
+  EyeOff,
   Ban,
   Paperclip,
   FileSpreadsheet,
@@ -3605,8 +3606,8 @@ export function AuthProvider({ children }) {
     checkAuth();
   }, []);
 
-  const login = async (email, senha) => {
-    const res = await api.post('/auth/login', { email, senha });
+  const login = async (loginOrEmail, senha) => {
+    const res = await api.post('/auth/login', { login: loginOrEmail, email: loginOrEmail, senha });
     localStorage.setItem('erp_token', res.data.token);
     setUser(res.data.user);
     return res.data.user;
@@ -3896,10 +3897,167 @@ function Layout() {
 
 // ---------------- PAGES ----------------
 
+// Funções utilitárias de máscara e validação para cadastro público (Nova Conta)
+export const maskCpfCnpj = (val, tipo) => {
+  if (!val) return '';
+  if (tipo === 'Física') {
+    const digits = String(val).replace(/\D/g, '').slice(0, 11);
+    return digits
+      .replace(/^(\d{3})(\d)/, '$1.$2')
+      .replace(/^(\d{3})\.(\d{3})(\d)/, '$1.$2.$3')
+      .replace(/^(\d{3})\.(\d{3})\.(\d{3})(\d)/, '$1.$2.$3-$4');
+  } else {
+    const clean = String(val).replace(/[^0-9A-Za-z]/g, '').toUpperCase().slice(0, 14);
+    if (/^\d+$/.test(clean)) {
+      return clean
+        .replace(/^(\d{2})(\d)/, '$1.$2')
+        .replace(/^(\d{2})\.(\d{3})(\d)/, '$1.$2.$3')
+        .replace(/^(\d{2})\.(\d{3})\.(\d{3})(\d)/, '$1.$2.$3/$4')
+        .replace(/^(\d{2})\.(\d{3})\.(\d{3})\/(\d{4})(\d)/, '$1.$2.$3/$4-$5');
+    }
+    return clean
+      .replace(/^([0-9A-Z]{2})([0-9A-Z])/, '$1.$2')
+      .replace(/^([0-9A-Z]{2})\.([0-9A-Z]{3})([0-9A-Z])/, '$1.$2.$3')
+      .replace(/^([0-9A-Z]{2})\.([0-9A-Z]{3})\.([0-9A-Z]{3})([0-9A-Z])/, '$1.$2.$3/$4')
+      .replace(/^([0-9A-Z]{2})\.([0-9A-Z]{3})\.([0-9A-Z]{3})\/([0-9A-Z]{4})([0-9A-Z])/, '$1.$2.$3/$4-$5');
+  }
+};
+
+export const maskPhone = (val) => {
+  if (!val) return '';
+  const digits = String(val).replace(/\D/g, '').slice(0, 11);
+  if (digits.length <= 10) {
+    return digits
+      .replace(/^(\d{2})(\d)/, '($1) $2')
+      .replace(/^(\(\d{2}\)\s\d{4})(\d)/, '$1-$2');
+  }
+  return digits
+    .replace(/^(\d{2})(\d)/, '($1) $2')
+    .replace(/^(\(\d{2}\)\s\d{5})(\d)/, '$1-$2');
+};
+
+export function validateCPF(cpf) {
+  if (!cpf) return false;
+  const clean = String(cpf).replace(/\D/g, '');
+  if (clean.length !== 11) return false;
+  if (/^(\d)\1{10}$/.test(clean)) return false;
+  
+  let sum = 0;
+  for (let i = 0; i < 9; i++) {
+    sum += parseInt(clean.charAt(i), 10) * (10 - i);
+  }
+  let rev = 11 - (sum % 11);
+  if (rev === 10 || rev === 11) rev = 0;
+  if (rev !== parseInt(clean.charAt(9), 10)) return false;
+
+  sum = 0;
+  for (let i = 0; i < 10; i++) {
+    sum += parseInt(clean.charAt(i), 10) * (11 - i);
+  }
+  rev = 11 - (sum % 11);
+  if (rev === 10 || rev === 11) rev = 0;
+  if (rev !== parseInt(clean.charAt(10), 10)) return false;
+
+  return true;
+}
+
+export function validateCNPJ(cnpj) {
+  if (!cnpj) return false;
+  const clean = String(cnpj).replace(/[^0-9A-Za-z]/g, '').toUpperCase();
+  if (clean.length !== 14) return false;
+
+  if (/^\d{14}$/.test(clean)) {
+    if (/^(\d)\1{13}$/.test(clean)) return false;
+
+    const weights1 = [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2];
+    let sum1 = 0;
+    for (let i = 0; i < 12; i++) {
+      sum1 += parseInt(clean.charAt(i), 10) * weights1[i];
+    }
+    let rest1 = sum1 % 11;
+    let digit1 = rest1 < 2 ? 0 : 11 - rest1;
+    if (parseInt(clean.charAt(12), 10) !== digit1) return false;
+
+    const weights2 = [6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2];
+    let sum2 = 0;
+    for (let i = 0; i < 13; i++) {
+      sum2 += parseInt(clean.charAt(i), 10) * weights2[i];
+    }
+    let rest2 = sum2 % 11;
+    let digit2 = rest2 < 2 ? 0 : 11 - rest2;
+    if (parseInt(clean.charAt(13), 10) !== digit2) return false;
+
+    return true;
+  }
+
+  const val = (c) => c.charCodeAt(0) - 48;
+  const weights1 = [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2];
+  let sum1 = 0;
+  for (let i = 0; i < 12; i++) {
+    sum1 += val(clean.charAt(i)) * weights1[i];
+  }
+  let rest1 = sum1 % 11;
+  let digit1 = rest1 < 2 ? 0 : 11 - rest1;
+  if (parseInt(clean.charAt(12), 10) !== digit1) return false;
+
+  const weights2 = [6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2];
+  let sum2 = 0;
+  for (let i = 0; i < 12; i++) {
+    sum2 += val(clean.charAt(i)) * weights2[i];
+  }
+  sum2 += digit1 * weights2[12];
+  let rest2 = sum2 % 11;
+  let digit2 = rest2 < 2 ? 0 : 11 - rest2;
+  if (parseInt(clean.charAt(13), 10) !== digit2) return false;
+
+  return true;
+}
+
+export function validatePhone(phone) {
+  if (!phone) return false;
+  const clean = String(phone).replace(/\D/g, '');
+  if (clean.length < 10 || clean.length > 11) return false;
+  const ddd = parseInt(clean.slice(0, 2), 10);
+  if (isNaN(ddd) || ddd < 11 || ddd > 99) return false;
+  const validDdds = [
+    11,12,13,14,15,16,17,18,19,
+    21,22,24,27,28,
+    31,32,33,34,35,37,38,
+    41,42,43,44,45,46,47,48,49,
+    51,53,54,55,
+    61,62,63,64,65,66,67,68,69,
+    71,73,74,75,77,79,
+    81,82,83,84,85,86,87,88,89,
+    91,92,93,94,95,96,97,98,99
+  ];
+  if (!validDdds.includes(ddd)) return false;
+  if (clean.length === 11 && clean.charAt(2) !== '9') return false;
+  return true;
+}
+
+export function validateEmail(email) {
+  if (!email || typeof email !== 'string') return false;
+  const re = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+  return re.test(email.trim());
+}
+
+export function validateLogin(login) {
+  if (!login || typeof login !== 'string') return false;
+  const trimmed = login.trim();
+  if (trimmed.length < 3 || trimmed.length > 60) return false;
+  return /^[a-zA-Z0-9._@+-]{3,60}$/.test(trimmed);
+}
+
+export function validatePassword(senha) {
+  if (!senha || typeof senha !== 'string') return false;
+  return senha.length >= 6;
+}
+
 // 1. Login Page
 function Login() {
-  const [email, setEmail] = useState('admin@erp.com');
+  const [loginIdentifier, setLoginIdentifier] = useState('admin@erp.com');
   const [senha, setSenha] = useState('admin123');
+  const [showSenha, setShowSenha] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const { login } = useAuth();
@@ -3907,13 +4065,14 @@ function Login() {
   const location = useLocation();
 
   const from = location.state?.from?.pathname || '/';
+  const successMessage = location.state?.successMessage || '';
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
     setLoading(true);
     try {
-      await login(email, senha);
+      await login(loginIdentifier, senha);
       navigate(from, { replace: true });
     } catch (err) {
       const errorMsg = err.response?.data?.error || (err.message === 'Network Error' ? 'Não foi possível conectar ao servidor backend (porta 3001).' : 'Falha ao autenticar. Tente novamente.');
@@ -3932,35 +4091,618 @@ function Login() {
           <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>Chão de Fábrica - Sistema Integrado</p>
         </div>
 
+        {successMessage && (
+          <div className="alert alert-success" style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '16px' }}>
+            <CheckCircle2 size={20} style={{ color: 'var(--success, #10b981)', flexShrink: 0 }} />
+            <span style={{ fontSize: '0.9rem', fontWeight: 600 }}>{successMessage}</span>
+          </div>
+        )}
+
         {error && <div className="alert alert-danger">{error}</div>}
 
         <form onSubmit={handleSubmit}>
           <div className="form-group">
-            <label className="form-label">Email</label>
+            <label className="form-label" htmlFor="login-identifier">Login ou E-mail</label>
             <input 
-              type="email" 
+              id="login-identifier"
+              type="text" 
               className="form-control" 
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              value={loginIdentifier}
+              onChange={(e) => setLoginIdentifier(e.target.value)}
+              placeholder="Digite seu login ou e-mail"
+              autoComplete="username"
               required 
             />
           </div>
 
           <div className="form-group">
-            <label className="form-label">Senha</label>
-            <input 
-              type="password" 
-              className="form-control" 
-              value={senha}
-              onChange={(e) => setSenha(e.target.value)}
-              required 
-            />
+            <label className="form-label" htmlFor="login-senha">Senha</label>
+            <div style={{ position: 'relative' }}>
+              <input 
+                id="login-senha"
+                type={showSenha ? 'text' : 'password'} 
+                className="form-control" 
+                value={senha}
+                onChange={(e) => setSenha(e.target.value)}
+                placeholder="Digite sua senha"
+                autoComplete="current-password"
+                required 
+                style={{ paddingRight: '42px' }}
+              />
+              <button
+                type="button"
+                onClick={() => setShowSenha(!showSenha)}
+                aria-label={showSenha ? 'Ocultar senha' : 'Exibir senha'}
+                style={{
+                  position: 'absolute',
+                  right: '10px',
+                  top: '50%',
+                  transform: 'translateY(-50%)',
+                  background: 'none',
+                  border: 'none',
+                  color: 'var(--text-muted)',
+                  cursor: 'pointer',
+                  padding: '4px',
+                  display: 'flex',
+                  alignItems: 'center'
+                }}
+              >
+                {showSenha ? <EyeOff size={18} /> : <Eye size={18} />}
+              </button>
+            </div>
           </div>
 
           <button type="submit" className="btn btn-primary" style={{ width: '100%', marginTop: '8px' }} disabled={loading}>
             {loading ? 'Autenticando...' : 'Acessar Painel'}
           </button>
         </form>
+
+        <div style={{ marginTop: '24px', paddingTop: '16px', borderTop: '1px solid var(--border, rgba(255,255,255,0.1))', textAlign: 'center' }}>
+          <p style={{ color: 'var(--text-muted)', fontSize: '0.875rem', marginBottom: '10px' }}>
+            Ainda não possui uma conta?
+          </p>
+          <Link
+            to="/nova-conta"
+            className="btn btn-secondary"
+            style={{
+              width: '100%',
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: '8px',
+              textDecoration: 'none',
+              fontWeight: 600
+            }}
+          >
+            <UserPlus size={18} />
+            <span>Nova Conta</span>
+          </Link>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// 1.1 Nova Conta (Fluxo Público de Self-Registration)
+function NovaConta() {
+  const [step, setStep] = useState(1);
+  const navigate = useNavigate();
+
+  // Etapa 1: Dados básicos da conta
+  const [tipoPessoa, setTipoPessoa] = useState('Jurídica');
+  const [nome, setNome] = useState('');
+  const [cpfCnpj, setCpfCnpj] = useState('');
+  const [telefone, setTelefone] = useState('');
+  const [email, setEmail] = useState('');
+
+  // Etapa 2: Usuário master
+  const [login, setLogin] = useState('');
+  const [masterNome, setMasterNome] = useState('');
+  const [senha, setSenha] = useState('');
+  const [showSenha, setShowSenha] = useState(false);
+
+  // Estados de controle e feedback
+  const [fieldErrors, setFieldErrors] = useState({});
+  const [globalError, setGlobalError] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  // Alterna tipo de pessoa e ajusta documento
+  const handleTipoPessoaChange = (novoTipo) => {
+    setTipoPessoa(novoTipo);
+    setCpfCnpj('');
+    setFieldErrors(prev => ({ ...prev, tipo_pessoa: undefined, cpf_cnpj: undefined }));
+  };
+
+  const handleDocumentoChange = (e) => {
+    const raw = e.target.value;
+    const masked = maskCpfCnpj(raw, tipoPessoa);
+    setCpfCnpj(masked);
+    if (fieldErrors.cpf_cnpj) {
+      setFieldErrors(prev => ({ ...prev, cpf_cnpj: undefined }));
+    }
+  };
+
+  const handleTelefoneChange = (e) => {
+    const raw = e.target.value;
+    const masked = maskPhone(raw);
+    setTelefone(masked);
+    if (fieldErrors.telefone) {
+      setFieldErrors(prev => ({ ...prev, telefone: undefined }));
+    }
+  };
+
+  // Validação da Etapa 1 no cliente
+  const validateStep1Client = () => {
+    const errs = {};
+    const cleanNome = nome.trim();
+    if (!cleanNome || cleanNome.length < 2) {
+      errs.nome = 'O nome é obrigatório (mínimo de 2 caracteres).';
+    }
+
+    const cleanDoc = cpfCnpj.trim();
+    if (!cleanDoc) {
+      errs.cpf_cnpj = tipoPessoa === 'Física' ? 'O CPF é obrigatório.' : 'O CNPJ é obrigatório.';
+    } else if (tipoPessoa === 'Física' && !validateCPF(cleanDoc)) {
+      errs.cpf_cnpj = 'CPF inválido. Verifique os dígitos digitados.';
+    } else if (tipoPessoa === 'Jurídica' && !validateCNPJ(cleanDoc)) {
+      errs.cpf_cnpj = 'CNPJ inválido. Verifique os dígitos digitados.';
+    }
+
+    const cleanTel = telefone.trim();
+    if (!cleanTel) {
+      errs.telefone = 'O telefone com DDD é obrigatório.';
+    } else if (!validatePhone(cleanTel)) {
+      errs.telefone = 'DDD ou telefone inválido (ex: (11) 98765-4321).';
+    }
+
+    const cleanEmail = email.trim().toLowerCase();
+    if (!cleanEmail) {
+      errs.email = 'O e-mail é obrigatório.';
+    } else if (!validateEmail(cleanEmail)) {
+      errs.email = 'Formato de e-mail inválido.';
+    }
+
+    return errs;
+  };
+
+  // Avançar da Etapa 1 para a Etapa 2
+  const handleAvancarEtapa1 = async (e) => {
+    e.preventDefault();
+    setGlobalError('');
+    const clientErrs = validateStep1Client();
+    if (Object.keys(clientErrs).length > 0) {
+      setFieldErrors(clientErrs);
+      return;
+    }
+
+    setLoading(true);
+    try {
+      // Valida também no backend antes de prosseguir
+      await api.post('/public/nova-conta/validar-etapa1', {
+        tipo_pessoa: tipoPessoa,
+        nome: nome.trim(),
+        cpf_cnpj: cpfCnpj.trim(),
+        telefone: telefone.trim(),
+        email: email.trim().toLowerCase()
+      });
+
+      setFieldErrors({});
+      // Sugere nome do master caso ainda não preenchido
+      if (!masterNome.trim()) {
+        setMasterNome(nome.trim());
+      }
+      setStep(2);
+    } catch (err) {
+      if (err.response?.data?.errors) {
+        setFieldErrors(err.response.data.errors);
+      }
+      setGlobalError(err.response?.data?.error || 'Verifique os dados da conta e tente novamente.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Voltar da Etapa 2 para a Etapa 1 preservando dados
+  const handleVoltarEtapa1 = () => {
+    setGlobalError('');
+    setFieldErrors({});
+    setStep(1);
+  };
+
+  // Concluir cadastro completo
+  const handleConcluirCadastro = async (e) => {
+    e.preventDefault();
+    setGlobalError('');
+    const errs = {};
+
+    const cleanLogin = login.trim().toLowerCase();
+    if (!cleanLogin) {
+      errs.login = 'O login é obrigatório.';
+    } else if (!validateLogin(cleanLogin)) {
+      errs.login = 'Login inválido (mínimo de 3 caracteres alfanuméricos, ponto, traço ou e-mail).';
+    }
+
+    const cleanMasterNome = masterNome.trim();
+    if (!cleanMasterNome || cleanMasterNome.length < 2) {
+      errs.master_nome = 'O nome do usuário master é obrigatório.';
+    }
+
+    if (!senha) {
+      errs.senha = 'A senha é obrigatória.';
+    } else if (!validatePassword(senha)) {
+      errs.senha = 'A senha deve conter no mínimo 6 caracteres.';
+    }
+
+    if (Object.keys(errs).length > 0) {
+      setFieldErrors(errs);
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const payload = {
+        tipo_pessoa: tipoPessoa,
+        nome: nome.trim(),
+        cpf_cnpj: cpfCnpj.trim(),
+        telefone: telefone.trim(),
+        email: email.trim().toLowerCase(),
+        login: cleanLogin,
+        master_nome: cleanMasterNome,
+        senha
+      };
+
+      const res = await api.post('/public/nova-conta', payload);
+
+      // Limpa dados sensíveis da memória
+      setSenha('');
+      setLogin('');
+      setFieldErrors({});
+
+      // Redireciona para o login exibindo confirmação de sucesso sem efetuar login automático
+      navigate('/login', {
+        replace: true,
+        state: {
+          successMessage: res.data?.message || 'Conta criada com sucesso. Entre com seu login e senha.'
+        }
+      });
+    } catch (err) {
+      const resErrors = err.response?.data?.errors || {};
+      setFieldErrors(resErrors);
+      setGlobalError(err.response?.data?.error || 'Erro ao criar conta. Verifique os dados e tente novamente.');
+
+      // Se o erro foi em campos da etapa 1, retorna para permitir correção
+      if (resErrors.tipo_pessoa || resErrors.nome || resErrors.cpf_cnpj || resErrors.telefone || resErrors.email) {
+        setStep(1);
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="auth-page">
+      <div className="glass-card auth-card" style={{ maxWidth: '540px' }}>
+        <div className="auth-header">
+          <div className="stat-icon" style={{ margin: '0 auto 16px auto', width: '60px', height: '60px', fontSize: '2rem' }}>🏭</div>
+          <h2 className="auth-title">Criar Nova Conta</h2>
+          <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>Chão de Fábrica - Sistema Integrado</p>
+
+          {/* Indicador visual de etapas */}
+          <div style={{ display: 'flex', gap: '8px', marginTop: '16px', justifyContent: 'center' }}>
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              padding: '6px 14px',
+              borderRadius: '20px',
+              fontSize: '0.825rem',
+              fontWeight: 600,
+              background: step === 1 ? 'var(--primary, #3b82f6)' : 'rgba(255, 255, 255, 0.08)',
+              color: step === 1 ? '#fff' : 'var(--text-muted)'
+            }}>
+              <span>1</span>
+              <span>Dados da conta</span>
+            </div>
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              padding: '6px 14px',
+              borderRadius: '20px',
+              fontSize: '0.825rem',
+              fontWeight: 600,
+              background: step === 2 ? 'var(--primary, #3b82f6)' : 'rgba(255, 255, 255, 0.08)',
+              color: step === 2 ? '#fff' : 'var(--text-muted)'
+            }}>
+              <span>2</span>
+              <span>Usuário master</span>
+            </div>
+          </div>
+        </div>
+
+        {globalError && (
+          <div className="alert alert-danger" style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px' }}>
+            <AlertCircle size={18} style={{ flexShrink: 0 }} />
+            <span>{globalError}</span>
+          </div>
+        )}
+
+        {step === 1 ? (
+          /* ============================================================ */
+          /* ETAPA 1: DADOS BÁSICOS DA CONTA                             */
+          /* ============================================================ */
+          <form onSubmit={handleAvancarEtapa1}>
+            {/* Tipo de Pessoa */}
+            <div className="form-group">
+              <label className="form-label" style={{ marginBottom: '8px' }}>
+                Tipo de pessoa <span style={{ color: 'var(--danger, #ef4444)' }}>*</span>
+              </label>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+                <button
+                  type="button"
+                  onClick={() => handleTipoPessoaChange('Jurídica')}
+                  className={`btn ${tipoPessoa === 'Jurídica' ? 'btn-primary' : 'btn-outline'}`}
+                  style={{ fontWeight: 600, display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '6px' }}
+                >
+                  Pessoa Jurídica
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleTipoPessoaChange('Física')}
+                  className={`btn ${tipoPessoa === 'Física' ? 'btn-primary' : 'btn-outline'}`}
+                  style={{ fontWeight: 600, display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '6px' }}
+                >
+                  Pessoa Física
+                </button>
+              </div>
+              {fieldErrors.tipo_pessoa && (
+                <small style={{ color: 'var(--danger, #ef4444)', marginTop: '4px', display: 'block' }}>
+                  {fieldErrors.tipo_pessoa}
+                </small>
+              )}
+            </div>
+
+            {/* Nome da Conta / Titular */}
+            <div className="form-group">
+              <label className="form-label" htmlFor="conta-nome">
+                {tipoPessoa === 'Jurídica' ? 'Razão Social ou Nome Fantasia' : 'Nome Completo do Titular'} <span style={{ color: 'var(--danger, #ef4444)' }}>*</span>
+              </label>
+              <input
+                id="conta-nome"
+                type="text"
+                className={`form-control ${fieldErrors.nome ? 'is-invalid' : ''}`}
+                value={nome}
+                onChange={(e) => {
+                  setNome(e.target.value);
+                  if (fieldErrors.nome) setFieldErrors(prev => ({ ...prev, nome: undefined }));
+                }}
+                placeholder={tipoPessoa === 'Jurídica' ? 'Ex: Marcenaria Modelo Ltda' : 'Ex: João da Silva'}
+                required
+              />
+              {fieldErrors.nome && (
+                <small style={{ color: 'var(--danger, #ef4444)', marginTop: '4px', display: 'block' }}>
+                  {fieldErrors.nome}
+                </small>
+              )}
+            </div>
+
+            {/* CPF ou CNPJ */}
+            <div className="form-group">
+              <label className="form-label" htmlFor="conta-documento">
+                {tipoPessoa === 'Jurídica' ? 'CNPJ' : 'CPF'} <span style={{ color: 'var(--danger, #ef4444)' }}>*</span>
+              </label>
+              <input
+                id="conta-documento"
+                type="text"
+                className={`form-control ${fieldErrors.cpf_cnpj ? 'is-invalid' : ''}`}
+                value={cpfCnpj}
+                onChange={handleDocumentoChange}
+                placeholder={tipoPessoa === 'Jurídica' ? '00.000.000/0000-00' : '000.000.000-00'}
+                required
+              />
+              {fieldErrors.cpf_cnpj && (
+                <small style={{ color: 'var(--danger, #ef4444)', marginTop: '4px', display: 'block' }}>
+                  {fieldErrors.cpf_cnpj}
+                </small>
+              )}
+            </div>
+
+            {/* DDD / Telefone */}
+            <div className="form-group">
+              <label className="form-label" htmlFor="conta-telefone">
+                DDD / Telefone <span style={{ color: 'var(--danger, #ef4444)' }}>*</span>
+              </label>
+              <input
+                id="conta-telefone"
+                type="text"
+                className={`form-control ${fieldErrors.telefone ? 'is-invalid' : ''}`}
+                value={telefone}
+                onChange={handleTelefoneChange}
+                placeholder="(00) 00000-0000"
+                required
+              />
+              {fieldErrors.telefone && (
+                <small style={{ color: 'var(--danger, #ef4444)', marginTop: '4px', display: 'block' }}>
+                  {fieldErrors.telefone}
+                </small>
+              )}
+            </div>
+
+            {/* E-mail */}
+            <div className="form-group">
+              <label className="form-label" htmlFor="conta-email">
+                E-mail de Contato <span style={{ color: 'var(--danger, #ef4444)' }}>*</span>
+              </label>
+              <input
+                id="conta-email"
+                type="email"
+                className={`form-control ${fieldErrors.email ? 'is-invalid' : ''}`}
+                value={email}
+                onChange={(e) => {
+                  setEmail(e.target.value);
+                  if (fieldErrors.email) setFieldErrors(prev => ({ ...prev, email: undefined }));
+                }}
+                placeholder="contato@suaempresa.com.br"
+                required
+              />
+              {fieldErrors.email && (
+                <small style={{ color: 'var(--danger, #ef4444)', marginTop: '4px', display: 'block' }}>
+                  {fieldErrors.email}
+                </small>
+              )}
+            </div>
+
+            {/* Ações Etapa 1 */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '20px' }}>
+              <button
+                type="submit"
+                className="btn btn-primary"
+                style={{ width: '100%', fontWeight: 600 }}
+                disabled={loading}
+              >
+                {loading ? 'Validando dados...' : 'Continuar'}
+              </button>
+              <Link
+                to="/login"
+                className="btn btn-outline"
+                style={{ width: '100%', textAlign: 'center', textDecoration: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}
+              >
+                <ArrowLeft size={16} />
+                <span>Voltar para login</span>
+              </Link>
+            </div>
+          </form>
+        ) : (
+          /* ============================================================ */
+          /* ETAPA 2: CADASTRO DO USUÁRIO MASTER                          */
+          /* ============================================================ */
+          <form onSubmit={handleConcluirCadastro}>
+            {/* Login */}
+            <div className="form-group">
+              <label className="form-label" htmlFor="master-login">
+                Login de Acesso <span style={{ color: 'var(--danger, #ef4444)' }}>*</span>
+              </label>
+              <input
+                id="master-login"
+                type="text"
+                className={`form-control ${fieldErrors.login ? 'is-invalid' : ''}`}
+                value={login}
+                onChange={(e) => {
+                  setLogin(e.target.value);
+                  if (fieldErrors.login) setFieldErrors(prev => ({ ...prev, login: undefined }));
+                }}
+                placeholder="Ex: joao.silva ou joao@empresa.com"
+                autoComplete="username"
+                required
+              />
+              <small style={{ color: 'var(--text-muted)', fontSize: '0.8rem', marginTop: '4px', display: 'block' }}>
+                Identificador exclusivo utilizado para fazer login no sistema.
+              </small>
+              {fieldErrors.login && (
+                <small style={{ color: 'var(--danger, #ef4444)', marginTop: '4px', display: 'block' }}>
+                  {fieldErrors.login}
+                </small>
+              )}
+            </div>
+
+            {/* Nome do Master */}
+            <div className="form-group">
+              <label className="form-label" htmlFor="master-nome">
+                Nome do Usuário Master <span style={{ color: 'var(--danger, #ef4444)' }}>*</span>
+              </label>
+              <input
+                id="master-nome"
+                type="text"
+                className={`form-control ${fieldErrors.master_nome ? 'is-invalid' : ''}`}
+                value={masterNome}
+                onChange={(e) => {
+                  setMasterNome(e.target.value);
+                  if (fieldErrors.master_nome) setFieldErrors(prev => ({ ...prev, master_nome: undefined }));
+                }}
+                placeholder="Nome completo do responsável"
+                required
+              />
+              {fieldErrors.master_nome && (
+                <small style={{ color: 'var(--danger, #ef4444)', marginTop: '4px', display: 'block' }}>
+                  {fieldErrors.master_nome}
+                </small>
+              )}
+            </div>
+
+            {/* Senha */}
+            <div className="form-group">
+              <label className="form-label" htmlFor="master-senha">
+                Senha de Acesso <span style={{ color: 'var(--danger, #ef4444)' }}>*</span>
+              </label>
+              <div style={{ position: 'relative' }}>
+                <input
+                  id="master-senha"
+                  type={showSenha ? 'text' : 'password'}
+                  className={`form-control ${fieldErrors.senha ? 'is-invalid' : ''}`}
+                  value={senha}
+                  onChange={(e) => {
+                    setSenha(e.target.value);
+                    if (fieldErrors.senha) setFieldErrors(prev => ({ ...prev, senha: undefined }));
+                  }}
+                  placeholder="Mínimo de 6 caracteres"
+                  autoComplete="new-password"
+                  required
+                  style={{ paddingRight: '42px' }}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowSenha(!showSenha)}
+                  aria-label={showSenha ? 'Ocultar senha' : 'Exibir senha'}
+                  style={{
+                    position: 'absolute',
+                    right: '10px',
+                    top: '50%',
+                    transform: 'translateY(-50%)',
+                    background: 'none',
+                    border: 'none',
+                    color: 'var(--text-muted)',
+                    cursor: 'pointer',
+                    padding: '4px',
+                    display: 'flex',
+                    alignItems: 'center'
+                  }}
+                >
+                  {showSenha ? <EyeOff size={18} /> : <Eye size={18} />}
+                </button>
+              </div>
+              <small style={{ color: 'var(--text-muted)', fontSize: '0.8rem', marginTop: '4px', display: 'block' }}>
+                A senha deve conter no mínimo 6 caracteres.
+              </small>
+              {fieldErrors.senha && (
+                <small style={{ color: 'var(--danger, #ef4444)', marginTop: '4px', display: 'block' }}>
+                  {fieldErrors.senha}
+                </small>
+              )}
+            </div>
+
+            {/* Ações Etapa 2 */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '20px' }}>
+              <button
+                type="submit"
+                className="btn btn-primary"
+                style={{ width: '100%', fontWeight: 600 }}
+                disabled={loading}
+              >
+                {loading ? 'Concluindo cadastro...' : 'Concluir cadastro'}
+              </button>
+              <button
+                type="button"
+                onClick={handleVoltarEtapa1}
+                className="btn btn-outline"
+                style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}
+                disabled={loading}
+              >
+                <ArrowLeft size={16} />
+                <span>Voltar (preservar dados da conta)</span>
+              </button>
+            </div>
+          </form>
+        )}
       </div>
     </div>
   );
@@ -29000,6 +29742,7 @@ export default function App() {
       <BrowserRouter>
         <Routes>
           <Route path="/login" element={<Login />} />
+          <Route path="/nova-conta" element={<NovaConta />} />
           <Route path="/proposta/:token" element={<PropostaPublica />} />
           <Route path="/proposta-publica/:token" element={<PropostaPublica />} />
           <Route 
