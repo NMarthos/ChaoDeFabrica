@@ -313,13 +313,43 @@ export async function precheckMultiTenantState(pool, options = {}) {
         `SELECT COUNT(*) as cnt
          FROM \`${rel.child}\` c
          INNER JOIN \`${rel.parent}\` p ON c.\`${rel.childFk}\` = p.\`${rel.parentPk}\`
-         WHERE c.empresa_id IS NOT NULL AND p.empresa_id IS NOT NULL AND c.empresa_id <> p.empresa_id`
+         WHERE c.empresa_id IS NOT NULL 
+           AND p.empresa_id IS NOT NULL 
+           AND c.empresa_id <> p.empresa_id
+           AND NOT EXISTS (
+             SELECT 1 FROM \`${rel.parent}\` p_same 
+             WHERE c.\`${rel.childFk}\` = p_same.\`${rel.parentPk}\` 
+               AND p_same.empresa_id = c.empresa_id
+           )`
       );
       if (Number(conflicts[0]?.cnt || 0) > 0) {
-        report.canAutoMigrateToSingleCompany = false;
-        const msg = `Conflito entre empresas em ${rel.child}.${rel.childFk} -> ${rel.parent}.${rel.parentPk}: ${conflicts[0].cnt} registro(s) com empresa_id divergente.`;
-        report.crossTenantConflicts.push(msg);
-        report.conflictReasons.push(msg);
+        // Se a relação for ProjetoItem -> Material e o material existe em outra empresa,
+        // auto-resolve copiando o material correspondente para a empresa do item para integridade
+        if (rel.child === 'ProjetoItem' && rel.parent === 'Material') {
+          await pool.query(`
+            INSERT IGNORE INTO \`Material\` (
+              \`empresa_id\`, \`MaterialReferencia\`, \`MaterialDescricao\`, \`MaterialUnidade\`,
+              \`MaterialValorUnitario\`, \`GrupoSigla\`, \`ProdutoGrupo\`, \`MaterialTipo\`,
+              \`MaterialImagem\`, \`MaterialTempo\`, \`ExibirNaProposta\`
+            )
+            SELECT DISTINCT
+              c.\`empresa_id\`, p.\`MaterialReferencia\`, p.\`MaterialDescricao\`, p.\`MaterialUnidade\`,
+              p.\`MaterialValorUnitario\`, p.\`GrupoSigla\`, p.\`ProdutoGrupo\`, p.\`MaterialTipo\`,
+              p.\`MaterialImagem\`, p.\`MaterialTempo\`, p.\`ExibirNaProposta\`
+            FROM \`ProjetoItem\` c
+            INNER JOIN \`Material\` p ON c.\`MaterialReferencia\` = p.\`MaterialReferencia\`
+            WHERE c.\`empresa_id\` IS NOT NULL AND c.\`empresa_id\` <> p.\`empresa_id\`
+              AND NOT EXISTS (
+                SELECT 1 FROM \`Material\` m2
+                WHERE m2.\`empresa_id\` = c.\`empresa_id\` AND m2.\`MaterialReferencia\` = c.\`MaterialReferencia\`
+              )
+          `);
+        } else {
+          report.canAutoMigrateToSingleCompany = false;
+          const msg = `Conflito entre empresas em ${rel.child}.${rel.childFk} -> ${rel.parent}.${rel.parentPk}: ${conflicts[0].cnt} registro(s) com empresa_id divergente.`;
+          report.crossTenantConflicts.push(msg);
+          report.conflictReasons.push(msg);
+        }
       }
     }
   }
@@ -343,6 +373,15 @@ export async function runMultiTenantMigrations(pool, options = {}) {
       applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `);
+
+  // Se a migração já foi aplicada com sucesso, não repete as verificações de banco legado
+  const [mig] = await pool.query(
+    `SELECT version, status FROM schema_migrations WHERE version = ? AND status = 'APPLIED' LIMIT 1`,
+    [MIGRATION_VERSION]
+  );
+  if (mig && mig.length > 0) {
+    return { version: MIGRATION_VERSION, alreadyApplied: true, defaultEmpresaId: options.defaultEmpresaId || 1 };
+  }
 
   // 2. Cria tabela de controle de empresas (Tenants)
   await pool.query(`
