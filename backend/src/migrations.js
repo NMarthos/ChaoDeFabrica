@@ -73,6 +73,7 @@ export const GLOBAL_FUNCOES_SEED = [
   { codigo: 'FINANCEIRO_ESCRITA', nome: 'Gerenciar Financeiro', modulo: 'Financeiro', descricao: 'Permite efetivar fluxo, baixar parcelas, estornar e configurar parâmetros financeiros' },
   { codigo: 'ADMIN_USUARIOS', nome: 'Administrar Usuários da Empresa', modulo: 'Segurança', descricao: 'Permite listar, criar, ativar/desativar e alterar usuários da própria empresa' },
   { codigo: 'ADMIN_PERFIS', nome: 'Administrar Perfis de Acesso', modulo: 'Segurança', descricao: 'Permite criar e editar perfis de acesso da própria empresa' },
+  { codigo: 'ADMIN_CONFIGURACOES', nome: 'Configurações da Empresa', modulo: 'Segurança', descricao: 'Permite consultar e manter as configurações da empresa (ConfigEmpresa)' },
   { codigo: 'ADMIN_PARAMETROS', nome: 'Administrar Parâmetros da Empresa', modulo: 'Administrativo', descricao: 'Permite alterar parâmetros institucionais e logomarca da empresa' }
 ];
 
@@ -1014,6 +1015,65 @@ export async function runNovaContaMigration(pool) {
      VALUES (?, ?, 'APPLIED', ?)
      ON DUPLICATE KEY UPDATE status = 'APPLIED', report = VALUES(report), applied_at = CURRENT_TIMESTAMP`,
     [MIGRATION_VERSION, 'Fluxo Público Nova Conta: tipo_pessoa, cpf_cnpj, login unico, situacao, datas e perfil Master', JSON.stringify({ timestamp: new Date().toISOString() })]
+  );
+
+  return { version: MIGRATION_VERSION, applied: true };
+}
+
+/**
+ * Migração da tabela ConfigEmpresa:
+ * EmpresaID PK (FK para empresas), ConfigChave CHAR(30) PK, ConfigValor CHAR(100) PK,
+ * ConfigGestor CHAR(1) ('E' = Empresa, 'M' = Master).
+ */
+export async function runConfigEmpresaMigration(pool) {
+  const MIGRATION_VERSION = 'V2026_10_30_CONFIG_EMPRESA_V1';
+
+  const [mig] = await pool.query(
+    `SELECT version FROM schema_migrations WHERE version = ? AND status = 'APPLIED' LIMIT 1`,
+    [MIGRATION_VERSION]
+  );
+  if (mig && mig.length > 0) {
+    return { version: MIGRATION_VERSION, alreadyApplied: true };
+  }
+
+  // 1. Cria a tabela ConfigEmpresa com chave primária composta (EmpresaID, ConfigChave, ConfigValor)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ConfigEmpresa (
+      EmpresaID INT NOT NULL,
+      ConfigChave CHAR(30) NOT NULL,
+      ConfigValor CHAR(100) NOT NULL,
+      ConfigGestor CHAR(1) NOT NULL DEFAULT 'E',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (EmpresaID, ConfigChave, ConfigValor),
+      INDEX idx_configempresa_empresa (EmpresaID),
+      INDEX idx_configempresa_chave (EmpresaID, ConfigChave)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+
+  // 2. Garante a FK para empresas(id)
+  await ensureForeignKey(pool, 'ConfigEmpresa', 'fk_configempresa_empresa', '`EmpresaID`', 'empresas', '`id`', 'CASCADE', 'CASCADE');
+
+  // 3. Cadastra a função no catálogo global de funções
+  await pool.query(
+    `INSERT INTO funcoes (codigo, nome, modulo, descricao)
+     VALUES (?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE nome = VALUES(nome), modulo = VALUES(modulo), descricao = VALUES(descricao)`,
+    ['ADMIN_CONFIGURACOES', 'Configurações da Empresa', 'Segurança', 'Permite consultar e manter as configurações da empresa (ConfigEmpresa)']
+  );
+
+  // 4. Garante permissão nos perfis das empresas
+  const [empresas] = await pool.query(`SELECT id FROM empresas`);
+  for (const emp of empresas) {
+    await ensureCompanyProfilesAndPermissions(pool, emp.id);
+  }
+
+  // 5. Registra migração concluída
+  await pool.query(
+    `INSERT INTO schema_migrations (version, description, status, report)
+     VALUES (?, ?, 'APPLIED', ?)
+     ON DUPLICATE KEY UPDATE status = 'APPLIED', report = VALUES(report), applied_at = CURRENT_TIMESTAMP`,
+    [MIGRATION_VERSION, 'Criação da tabela ConfigEmpresa e permissão ADMIN_CONFIGURACOES', JSON.stringify({ timestamp: new Date().toISOString() })]
   );
 
   return { version: MIGRATION_VERSION, applied: true };

@@ -3,7 +3,7 @@ import bcrypt from 'bcryptjs';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { runMultiTenantMigrations, runNovaContaMigration, ensureCompanyProfilesAndPermissions } from './migrations.js';
+import { runMultiTenantMigrations, runNovaContaMigration, runConfigEmpresaMigration, ensureCompanyProfilesAndPermissions } from './migrations.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -663,6 +663,21 @@ export async function initDb(options = {}) {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
   `);
 
+  // Tabela: ConfigEmpresa
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS ConfigEmpresa (
+      EmpresaID INT NOT NULL,
+      ConfigChave CHAR(30) NOT NULL,
+      ConfigValor CHAR(100) NOT NULL,
+      ConfigGestor CHAR(1) NOT NULL DEFAULT 'E',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (EmpresaID, ConfigChave, ConfigValor),
+      INDEX idx_configempresa_empresa (EmpresaID),
+      INDEX idx_configempresa_chave (EmpresaID, ConfigChave)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+  `);
+
   // 4. Migrações automáticas de colunas adicionais
   await ensureColumn(db, 'servicos', 'sequencia', 'INT DEFAULT 0');
   await ensureColumn(db, 'clientes', 'tipo_pessoa', "VARCHAR(20) NOT NULL DEFAULT 'Física'");
@@ -752,6 +767,9 @@ export async function initDb(options = {}) {
 
   // 5.1 Executa a migração versionada para suporte a Nova Conta (tipo_pessoa, cpf_cnpj, login, situacao, datas, vigência e perfil Master)
   await runNovaContaMigration(pool);
+
+  // 5.2 Executa a migração versionada para a tabela ConfigEmpresa e permissões de segurança
+  await runConfigEmpresaMigration(pool);
 
   // 6. Seeds padrão para a empresa inicial caso o banco esteja vazio
   await seedCompanyDefaults(db, defaultEmpresaId);

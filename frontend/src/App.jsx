@@ -952,6 +952,23 @@ export const PRODUTO_GRUPOS = [
   { id: 8, nome: 'Outros' }
 ];
 
+// Domínio de Unidades de Materiais
+export const UNIDADES_MATERIAL = [
+  { sigla: 'CAR', label: 'CAR - Cartela' },
+  { sigla: 'BAL', label: 'BAL - Balde' },
+  { sigla: 'CHP', label: 'CHP - Chapa' },
+  { sigla: 'CXA', label: 'CXA - Caixa' },
+  { sigla: 'DIA', label: 'DIA - Diária' },
+  { sigla: 'GLA', label: 'GLA - Galão' },
+  { sigla: 'HOR', label: 'HOR - Hora' },
+  { sigla: 'KG',  label: 'KG - Kilo' },
+  { sigla: 'L',   label: 'L - Litro' },
+  { sigla: 'M2',  label: 'M2 - Metro quadrado' },
+  { sigla: 'PAR', label: 'PAR - Par' },
+  { sigla: 'M',   label: 'M - Metro' },
+  { sigla: 'UNI', label: 'UNI - Unidade' }
+];
+
 export const getGrupoInfo = (id) => {
   const num = parseInt(id, 10) || 8;
   const found = PRODUTO_GRUPOS.find(g => g.id === num);
@@ -3757,6 +3774,7 @@ function Layout() {
       items: [
         { path: '/empresa', label: 'Dados da Empresa', icon: Building2 },
         { path: '/usuarios', label: 'Gestão de Usuários', icon: Users },
+        { path: '/configuracoes-empresa', label: 'Configurações', icon: Settings },
         { path: '/seguranca', label: 'Segurança', icon: ShieldCheck }
       ]
     }
@@ -3897,6 +3915,8 @@ function Layout() {
           <Route path="/configuracoes" element={<Configuracoes />} />
           <Route path="/empresa" element={<DadosEmpresa />} />
           <Route path="/usuarios" element={<GestaoUsuarios />} />
+          <Route path="/configuracoes-empresa" element={<ConfiguracoesEmpresa />} />
+          <Route path="/config-empresa" element={<ConfiguracoesEmpresa />} />
           <Route path="/seguranca" element={<Seguranca />} />
           <Route path="/financeiro" element={<Financeiro />} />
           <Route path="/administrativo" element={<Administrativo />} />
@@ -7967,6 +7987,653 @@ function GestaoUsuarios() {
   );
 }
 
+// 6.3 Configurações da Empresa (ConfigEmpresa)
+function ConfiguracoesEmpresa() {
+  const [configs, setConfigs] = useState([]);
+  const [isMaster, setIsMaster] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+  const [searchTerm, setSearchTerm] = useState('');
+  const [filtroGestor, setFiltroGestor] = useState('todos');
+
+  // Modal Create / Edit
+  const [showModal, setShowModal] = useState(false);
+  const [editMode, setEditMode] = useState(false);
+  const [originalItem, setOriginalItem] = useState(null);
+  const [formData, setFormData] = useState({
+    ConfigChave: '',
+    ConfigValor: '',
+    ConfigGestor: 'E'
+  });
+  const [saving, setSaving] = useState(false);
+  const [modalErrors, setModalErrors] = useState({});
+
+  // Modal Delete
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [itemToDelete, setItemToDelete] = useState(null);
+  const [deleting, setDeleting] = useState(false);
+
+  const carregarConfigs = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const res = await api.get('/config-empresa');
+      setConfigs(res.data.configs || []);
+      setIsMaster(Boolean(res.data.isMaster));
+    } catch (err) {
+      console.error('Erro ao carregar configurações:', err);
+      setError(err.response?.data?.error || 'Erro ao carregar configurações da empresa.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    carregarConfigs();
+  }, []);
+
+  const handleOpenCreateModal = () => {
+    setEditMode(false);
+    setOriginalItem(null);
+    setFormData({
+      ConfigChave: '',
+      ConfigValor: '',
+      ConfigGestor: 'E'
+    });
+    setModalErrors({});
+    setShowModal(true);
+  };
+
+  const handleOpenEditModal = (item) => {
+    if (!item.podeAlterar) {
+      alert('Esta configuração é gerenciada pelo Master (M) e não pode ser alterada por usuários da empresa.');
+      return;
+    }
+    setEditMode(true);
+    setOriginalItem(item);
+    setFormData({
+      ConfigChave: item.ConfigChave,
+      ConfigValor: item.ConfigValor,
+      ConfigGestor: item.ConfigGestor || 'E'
+    });
+    setModalErrors({});
+    setShowModal(true);
+  };
+
+  const handleOpenDeleteModal = (item) => {
+    if (!item.podeAlterar) {
+      alert('Esta configuração é gerenciada pelo Master (M) e não pode ser excluída por usuários da empresa.');
+      return;
+    }
+    setItemToDelete(item);
+    setShowDeleteModal(true);
+  };
+
+  const handleSalvar = async (e) => {
+    e.preventDefault();
+    const errors = {};
+    const chave = (formData.ConfigChave || '').trim();
+    const valor = (formData.ConfigValor || '').trim();
+    const gestor = (formData.ConfigGestor || 'E').trim().toUpperCase();
+
+    if (!chave) {
+      errors.ConfigChave = 'A Chave é obrigatória.';
+    } else if (chave.length > 30) {
+      errors.ConfigChave = 'A Chave deve ter no máximo 30 caracteres.';
+    }
+
+    if (!valor) {
+      errors.ConfigValor = 'O Valor é obrigatório.';
+    } else if (valor.length > 100) {
+      errors.ConfigValor = 'O Valor deve ter no máximo 100 caracteres.';
+    }
+
+    if (gestor !== 'E' && gestor !== 'M') {
+      errors.ConfigGestor = "O Gestor deve ser 'E' (Empresa) ou 'M' (Master).";
+    } else if (gestor === 'M' && !isMaster) {
+      errors.ConfigGestor = 'Apenas usuários Master podem selecionar o gestor Master (M).';
+    }
+
+    if (Object.keys(errors).length > 0) {
+      setModalErrors(errors);
+      return;
+    }
+
+    setSaving(true);
+    setModalErrors({});
+    try {
+      if (editMode) {
+        await api.put('/config-empresa', {
+          oldChave: originalItem.ConfigChave,
+          oldValor: originalItem.ConfigValor,
+          ConfigChave: chave,
+          ConfigValor: valor,
+          ConfigGestor: gestor
+        });
+        setSuccess('Configuração atualizada com sucesso!');
+      } else {
+        await api.post('/config-empresa', {
+          ConfigChave: chave,
+          ConfigValor: valor,
+          ConfigGestor: gestor
+        });
+        setSuccess('Configuração cadastrada com sucesso!');
+      }
+      setShowModal(false);
+      carregarConfigs();
+      setTimeout(() => setSuccess(''), 4000);
+    } catch (err) {
+      const msg = err.response?.data?.error || 'Erro ao salvar configuração.';
+      setModalErrors({ geral: msg });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleConfirmarExclusao = async () => {
+    if (!itemToDelete) return;
+    setDeleting(true);
+    try {
+      await api.delete('/config-empresa', {
+        params: {
+          chave: itemToDelete.ConfigChave,
+          valor: itemToDelete.ConfigValor
+        }
+      });
+      setSuccess(`Configuração "${itemToDelete.ConfigChave}" excluída com sucesso!`);
+      setShowDeleteModal(false);
+      setItemToDelete(null);
+      carregarConfigs();
+      setTimeout(() => setSuccess(''), 4000);
+    } catch (err) {
+      alert(err.response?.data?.error || 'Erro ao excluir configuração.');
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const configsFiltradas = configs.filter((c) => {
+    const matchSearch =
+      c.ConfigChave.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      c.ConfigValor.toLowerCase().includes(searchTerm.toLowerCase());
+    const matchGestor =
+      filtroGestor === 'todos' || c.ConfigGestor === filtroGestor;
+    return matchSearch && matchGestor;
+  });
+
+  const totalConfigs = configs.length;
+  const totalEmpresa = configs.filter((c) => c.ConfigGestor === 'E').length;
+  const totalMaster = configs.filter((c) => c.ConfigGestor === 'M').length;
+
+  return (
+    <div>
+      <div className="content-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '16px' }}>
+        <div>
+          <h1 className="page-title" style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <Settings size={28} style={{ color: 'var(--accent-cyan)' }} />
+            <span>Configurações</span>
+          </h1>
+          <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginTop: '4px' }}>
+            Manutenção de parâmetros técnicos e chaves de configuração da empresa (ConfigEmpresa).
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={handleOpenCreateModal}
+          className="btn btn-primary"
+          style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
+        >
+          <Plus size={18} />
+          <span>Nova Configuração</span>
+        </button>
+      </div>
+
+      {/* Alertas */}
+      {error && (
+        <div className="alert alert-danger" style={{ marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <AlertCircle size={18} />
+          <span>{error}</span>
+        </div>
+      )}
+      {success && (
+        <div className="alert alert-success" style={{ marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <CheckCircle2 size={18} />
+          <span>{success}</span>
+        </div>
+      )}
+
+      {/* Cards de Métricas */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '16px', marginBottom: '20px' }}>
+        <div className="glass-card" style={{ padding: '16px', display: 'flex', alignItems: 'center', gap: '14px' }}>
+          <div style={{ width: '42px', height: '42px', borderRadius: '10px', background: 'rgba(59, 130, 246, 0.15)', color: '#3b82f6', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <Settings size={22} />
+          </div>
+          <div>
+            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Total de Registros</div>
+            <div style={{ fontSize: '1.4rem', fontWeight: 700 }}>{totalConfigs}</div>
+          </div>
+        </div>
+
+        <div className="glass-card" style={{ padding: '16px', display: 'flex', alignItems: 'center', gap: '14px' }}>
+          <div style={{ width: '42px', height: '42px', borderRadius: '10px', background: 'rgba(16, 185, 129, 0.15)', color: '#10b981', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <Building2 size={22} />
+          </div>
+          <div>
+            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Gestor Empresa (E)</div>
+            <div style={{ fontSize: '1.4rem', fontWeight: 700, color: '#10b981' }}>{totalEmpresa}</div>
+          </div>
+        </div>
+
+        <div className="glass-card" style={{ padding: '16px', display: 'flex', alignItems: 'center', gap: '14px' }}>
+          <div style={{ width: '42px', height: '42px', borderRadius: '10px', background: 'rgba(168, 85, 247, 0.15)', color: '#a855f7', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <ShieldCheck size={22} />
+          </div>
+          <div>
+            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Gestor Master (M)</div>
+            <div style={{ fontSize: '1.4rem', fontWeight: 700, color: '#a855f7' }}>{totalMaster}</div>
+          </div>
+        </div>
+      </div>
+
+      {/* Barra de Filtros e Busca */}
+      <div className="glass-card" style={{ padding: '16px', marginBottom: '20px' }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '14px', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flex: '1 1 300px', maxWidth: '500px', position: 'relative' }}>
+            <Search size={18} style={{ position: 'absolute', left: '12px', color: 'var(--text-muted)' }} />
+            <input
+              type="text"
+              className="form-control"
+              style={{ paddingLeft: '38px' }}
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              placeholder="Buscar por Chave ou Valor..."
+            />
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <label style={{ fontSize: '0.85rem', color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>Filtrar por Gestor:</label>
+            <select
+              className="form-control"
+              style={{ width: 'auto', minWidth: '160px' }}
+              value={filtroGestor}
+              onChange={(e) => setFiltroGestor(e.target.value)}
+            >
+              <option value="todos">Todos ({totalConfigs})</option>
+              <option value="E">Empresa ({totalEmpresa})</option>
+              <option value="M">Master ({totalMaster})</option>
+            </select>
+            <button
+              type="button"
+              onClick={carregarConfigs}
+              className="btn btn-secondary"
+              title="Recarregar dados"
+              style={{ padding: '8px 12px' }}
+            >
+              <RefreshCw size={16} />
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Tabela de Configurações */}
+      <div className="glass-card">
+        {loading ? (
+          <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-muted)' }}>
+            <RefreshCw size={28} className="icon-spin" style={{ marginBottom: '12px' }} />
+            <div>Carregando configurações...</div>
+          </div>
+        ) : configsFiltradas.length === 0 ? (
+          <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-muted)' }}>
+            <Settings size={36} style={{ marginBottom: '12px', opacity: 0.4 }} />
+            <div style={{ fontSize: '1rem', fontWeight: 600 }}>Nenhuma configuração encontrada</div>
+            <div style={{ fontSize: '0.85rem', marginTop: '4px' }}>
+              {searchTerm || filtroGestor !== 'todos'
+                ? 'Tente ajustar os filtros de busca.'
+                : 'Clique no botão "Nova Configuração" para cadastrar o primeiro registro.'}
+            </div>
+          </div>
+        ) : (
+          <div className="table-container">
+            <table className="table" style={{ width: '100%' }}>
+              <thead>
+                <tr>
+                  <th style={{ width: '220px' }}>Chave (ConfigChave)</th>
+                  <th>Valor (ConfigValor)</th>
+                  <th style={{ width: '150px', textAlign: 'center' }}>Gestor</th>
+                  <th style={{ width: '140px', textAlign: 'center' }}>Permissão</th>
+                  <th style={{ width: '100px', textAlign: 'right' }}>Ações</th>
+                </tr>
+              </thead>
+              <tbody>
+                {configsFiltradas.map((item, idx) => {
+                  const isGestorMaster = item.ConfigGestor === 'M';
+                  return (
+                    <tr key={`${item.ConfigChave}-${item.ConfigValor}-${idx}`}>
+                      <td style={{ fontWeight: 600 }}>
+                        <span
+                          style={{
+                            fontFamily: 'monospace',
+                            fontSize: '0.85rem',
+                            background: 'rgba(255, 255, 255, 0.06)',
+                            padding: '3px 8px',
+                            borderRadius: '4px',
+                            border: '1px solid var(--glass-border)',
+                            color: 'var(--accent-cyan, #06b6d4)'
+                          }}
+                        >
+                          {item.ConfigChave}
+                        </span>
+                      </td>
+                      <td style={{ wordBreak: 'break-word', color: 'var(--text-color)' }}>
+                        {item.ConfigValor}
+                      </td>
+                      <td style={{ textAlign: 'center' }}>
+                        {isGestorMaster ? (
+                          <span
+                            className="badge"
+                            style={{
+                              background: 'rgba(168, 85, 247, 0.15)',
+                              color: '#a855f7',
+                              border: '1px solid rgba(168, 85, 247, 0.35)',
+                              padding: '4px 10px',
+                              borderRadius: '6px',
+                              fontWeight: 600,
+                              fontSize: '0.8rem',
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '4px'
+                            }}
+                            title="M - Master: somente usuários Master podem alterar"
+                          >
+                            <ShieldCheck size={14} />
+                            <span>Master (M)</span>
+                          </span>
+                        ) : (
+                          <span
+                            className="badge badge-success"
+                            style={{
+                              padding: '4px 10px',
+                              borderRadius: '6px',
+                              fontWeight: 600,
+                              fontSize: '0.8rem',
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '4px'
+                            }}
+                            title="E - Empresa: alterável por usuários da empresa"
+                          >
+                            <Building2 size={14} />
+                            <span>Empresa (E)</span>
+                          </span>
+                        )}
+                      </td>
+                      <td style={{ textAlign: 'center', fontSize: '0.8rem' }}>
+                        {item.podeAlterar ? (
+                          <span style={{ color: '#10b981', fontWeight: 500 }}>
+                            Permitido
+                          </span>
+                        ) : (
+                          <span style={{ color: 'var(--text-muted)' }} title="Apenas Master pode alterar">
+                            Somente Leitura
+                          </span>
+                        )}
+                      </td>
+                      <td style={{ textAlign: 'right' }}>
+                        <div style={{ display: 'inline-flex', gap: '6px', justifyContent: 'flex-end' }}>
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-icon"
+                            onClick={() => handleOpenEditModal(item)}
+                            disabled={!item.podeAlterar}
+                            title={
+                              item.podeAlterar
+                                ? 'Editar Configuração'
+                                : 'Somente usuários Master podem alterar este registro (Gestor M)'
+                            }
+                            style={{
+                              padding: '6px',
+                              opacity: item.podeAlterar ? 1 : 0.4,
+                              cursor: item.podeAlterar ? 'pointer' : 'not-allowed'
+                            }}
+                          >
+                            <Edit2 size={15} />
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-danger btn-icon"
+                            onClick={() => handleOpenDeleteModal(item)}
+                            disabled={!item.podeAlterar}
+                            title={
+                              item.podeAlterar
+                                ? 'Excluir Configuração'
+                                : 'Somente usuários Master podem excluir este registro (Gestor M)'
+                            }
+                            style={{
+                              padding: '6px',
+                              opacity: item.podeAlterar ? 1 : 0.4,
+                              cursor: item.podeAlterar ? 'pointer' : 'not-allowed'
+                            }}
+                          >
+                            <Trash2 size={15} />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* Modal Criar / Editar */}
+      {showModal && (
+        <div className="modal-overlay">
+          <div className="glass-card modal-content" style={{ maxWidth: '520px', width: '92%' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+              <h3 style={{ margin: 0, fontWeight: 700, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <Settings size={20} style={{ color: 'var(--accent-cyan)' }} />
+                <span>{editMode ? 'Editar Configuração' : 'Nova Configuração'}</span>
+              </h3>
+              <button
+                type="button"
+                onClick={() => setShowModal(false)}
+                style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer' }}
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            {modalErrors.geral && (
+              <div className="alert alert-danger" style={{ marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <AlertCircle size={18} />
+                <span>{modalErrors.geral}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleSalvar}>
+              {/* ConfigChave */}
+              <div className="form-group" style={{ marginBottom: '14px' }}>
+                <label className="form-label" style={{ fontWeight: 600 }}>
+                  Chave (ConfigChave) * <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 400 }}>(Máx. 30 caracteres)</span>
+                </label>
+                <input
+                  type="text"
+                  className={`form-control ${modalErrors.ConfigChave ? 'is-invalid' : ''}`}
+                  value={formData.ConfigChave}
+                  onChange={(e) => {
+                    setFormData(prev => ({ ...prev, ConfigChave: e.target.value.toUpperCase() }));
+                    if (modalErrors.ConfigChave) setModalErrors(prev => ({ ...prev, ConfigChave: undefined }));
+                  }}
+                  placeholder="EX: NOME_PARAMETRO"
+                  maxLength={30}
+                  required
+                />
+                {modalErrors.ConfigChave && (
+                  <div style={{ color: 'var(--color-danger, #ef4444)', fontSize: '0.8rem', marginTop: '4px' }}>
+                    {modalErrors.ConfigChave}
+                  </div>
+                )}
+              </div>
+
+              {/* ConfigValor */}
+              <div className="form-group" style={{ marginBottom: '14px' }}>
+                <label className="form-label" style={{ fontWeight: 600 }}>
+                  Valor (ConfigValor) * <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 400 }}>(Máx. 100 caracteres)</span>
+                </label>
+                <input
+                  type="text"
+                  className={`form-control ${modalErrors.ConfigValor ? 'is-invalid' : ''}`}
+                  value={formData.ConfigValor}
+                  onChange={(e) => {
+                    setFormData(prev => ({ ...prev, ConfigValor: e.target.value }));
+                    if (modalErrors.ConfigValor) setModalErrors(prev => ({ ...prev, ConfigValor: undefined }));
+                  }}
+                  placeholder="Conteúdo ou valor da configuração"
+                  maxLength={100}
+                  required
+                />
+                {modalErrors.ConfigValor && (
+                  <div style={{ color: 'var(--color-danger, #ef4444)', fontSize: '0.8rem', marginTop: '4px' }}>
+                    {modalErrors.ConfigValor}
+                  </div>
+                )}
+              </div>
+
+              {/* ConfigGestor */}
+              <div className="form-group" style={{ marginBottom: '20px' }}>
+                <label className="form-label" style={{ fontWeight: 600 }}>
+                  Gestor Responsável (ConfigGestor) *
+                </label>
+                <select
+                  className={`form-control ${modalErrors.ConfigGestor ? 'is-invalid' : ''}`}
+                  value={formData.ConfigGestor}
+                  onChange={(e) => {
+                    setFormData(prev => ({ ...prev, ConfigGestor: e.target.value }));
+                    if (modalErrors.ConfigGestor) setModalErrors(prev => ({ ...prev, ConfigGestor: undefined }));
+                  }}
+                  disabled={!isMaster}
+                >
+                  <option value="E">E - Empresa (alterável pelos usuários da empresa)</option>
+                  <option value="M" disabled={!isMaster}>
+                    M - Master (alterável exclusivamente por usuários Master){!isMaster ? ' [Restrito ao Master]' : ''}
+                  </option>
+                </select>
+                <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '4px' }}>
+                  {isMaster ? (
+                    <span>👑 Como usuário Master, você pode atribuir a gestão para a Empresa (E) ou proteger como Master (M).</span>
+                  ) : (
+                    <span>🏢 Usuários da empresa criam registros com gestor Empresa (E). O gestor Master (M) é restrito a administradores Master.</span>
+                  )}
+                </div>
+                {modalErrors.ConfigGestor && (
+                  <div style={{ color: 'var(--color-danger, #ef4444)', fontSize: '0.8rem', marginTop: '4px' }}>
+                    {modalErrors.ConfigGestor}
+                  </div>
+                )}
+              </div>
+
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '24px' }}>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => setShowModal(false)}
+                  disabled={saving}
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  className="btn btn-primary"
+                  disabled={saving}
+                  style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: '130px', justifyContent: 'center' }}
+                >
+                  {saving ? (
+                    <>
+                      <RefreshCw size={16} className="icon-spin" />
+                      <span>Salvando...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Save size={16} />
+                      <span>{editMode ? 'Salvar Alterações' : 'Criar Configuração'}</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Confirmar Exclusão */}
+      {showDeleteModal && itemToDelete && (
+        <div className="modal-overlay">
+          <div className="glass-card modal-content" style={{ maxWidth: '420px', width: '90%' }}>
+            <div style={{ textAlign: 'center', marginBottom: '16px' }}>
+              <AlertTriangle size={36} style={{ color: 'var(--color-danger, #ef4444)', margin: '0 auto 12px auto' }} />
+              <h3 style={{ margin: 0, fontWeight: 700 }}>Excluir Configuração?</h3>
+              <p style={{ color: 'var(--text-muted)', marginTop: '8px', fontSize: '0.9rem' }}>
+                Você tem certeza que deseja remover esta configuração da empresa?
+              </p>
+            </div>
+
+            <div
+              style={{
+                background: 'rgba(255, 255, 255, 0.04)',
+                border: '1px solid var(--glass-border)',
+                borderRadius: '8px',
+                padding: '12px',
+                marginBottom: '20px',
+                fontSize: '0.85rem'
+              }}
+            >
+              <div><strong>Chave:</strong> <span style={{ fontFamily: 'monospace', color: 'var(--accent-cyan)' }}>{itemToDelete.ConfigChave}</span></div>
+              <div style={{ marginTop: '4px' }}><strong>Valor:</strong> {itemToDelete.ConfigValor}</div>
+              <div style={{ marginTop: '4px' }}>
+                <strong>Gestor:</strong> {itemToDelete.ConfigGestor === 'M' ? 'Master (M)' : 'Empresa (E)'}
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => { setShowDeleteModal(false); setItemToDelete(null); }}
+                disabled={deleting}
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                className="btn btn-danger"
+                onClick={handleConfirmarExclusao}
+                disabled={deleting}
+                style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
+              >
+                {deleting ? (
+                  <>
+                    <RefreshCw size={16} className="icon-spin" />
+                    <span>Excluindo...</span>
+                  </>
+                ) : (
+                  <>
+                    <Trash2 size={16} />
+                    <span>Sim, Excluir</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // 4.5. Serviços CRUD Page
 function Servicos() {
   const [servicos, setServicos] = useState([]);
@@ -8661,16 +9328,12 @@ function Produtos() {
                         onChange={(e) => setUnidade(e.target.value)}
                         required
                       >
-                        <option value="CHP">CHP (Chapa)</option>
-                        <option value="M2">M2 (Metro Quadrado)</option>
-                        <option value="M">M (Metro)</option>
-                        <option value="L">L (Litro)</option>
-                        <option value="UNI">UNI (Unidade)</option>
-                        <option value="PAR">PAR (Par)</option>
-                        <option value="KG">KG (Quilograma)</option>
-                        <option value="CXA">CXA (Caixa)</option>
-                        <option value="VAR">VAR (Vara)</option>
-                        <option value="DIA">DIA (Diária)</option>
+                        {UNIDADES_MATERIAL.map(u => (
+                          <option key={u.sigla} value={u.sigla}>{u.label}</option>
+                        ))}
+                        {unidade && !UNIDADES_MATERIAL.some(u => u.sigla === unidade) && (
+                          <option value={unidade}>{unidade}</option>
+                        )}
                       </select>
                     </div>
                   </div>
@@ -12942,16 +13605,12 @@ function MateriaisCrudModal({ isOpen, onClose, onMaterialsUpdated }) {
                         onChange={(e) => setUnidade(e.target.value)}
                         required
                       >
-                        <option value="CHP">CHP (Chapa)</option>
-                        <option value="M2">M2 (Metro Quadrado)</option>
-                        <option value="M">M (Metro)</option>
-                        <option value="L">L (Litro)</option>
-                        <option value="UNI">UNI (Unidade)</option>
-                        <option value="PAR">PAR (Par)</option>
-                        <option value="KG">KG (Quilograma)</option>
-                        <option value="CXA">CXA (Caixa)</option>
-                        <option value="VAR">VAR (Vara)</option>
-                        <option value="DIA">DIA (Diária)</option>
+                        {UNIDADES_MATERIAL.map(u => (
+                          <option key={u.sigla} value={u.sigla}>{u.label}</option>
+                        ))}
+                        {unidade && !UNIDADES_MATERIAL.some(u => u.sigla === unidade) && (
+                          <option value={unidade}>{unidade}</option>
+                        )}
                       </select>
                     </div>
                   </div>
@@ -22589,16 +23248,12 @@ function Orcamentos() {
                         onChange={(e) => setMatUnidade(e.target.value)}
                         required
                       >
-                        <option value="CHP">CHP (Chapa)</option>
-                        <option value="M2">M2 (Metro Quadrado)</option>
-                        <option value="M">M (Metro)</option>
-                        <option value="L">L (Litro)</option>
-                        <option value="UNI">UNI (Unidade)</option>
-                        <option value="PAR">PAR (Par)</option>
-                        <option value="KG">KG (Quilograma)</option>
-                        <option value="CXA">CXA (Caixa)</option>
-                        <option value="VAR">VAR (Vara)</option>
-                        <option value="DIA">DIA (Diária)</option>
+                        {UNIDADES_MATERIAL.map(u => (
+                          <option key={u.sigla} value={u.sigla}>{u.label}</option>
+                        ))}
+                        {matUnidade && !UNIDADES_MATERIAL.some(u => u.sigla === matUnidade) && (
+                          <option value={matUnidade}>{matUnidade}</option>
+                        )}
                       </select>
                     </div>
                   </div>
@@ -25801,16 +26456,12 @@ function Projetos() {
                         onChange={(e) => setMatUnidade(e.target.value)}
                         required
                       >
-                        <option value="CHP">CHP (Chapa)</option>
-                        <option value="M2">M2 (Metro Quadrado)</option>
-                        <option value="M">M (Metro)</option>
-                        <option value="L">L (Litro)</option>
-                        <option value="UNI">UNI (Unidade)</option>
-                        <option value="PAR">PAR (Par)</option>
-                        <option value="KG">KG (Quilograma)</option>
-                        <option value="CXA">CXA (Caixa)</option>
-                        <option value="VAR">VAR (Vara)</option>
-                        <option value="DIA">DIA (Diária)</option>
+                        {UNIDADES_MATERIAL.map(u => (
+                          <option key={u.sigla} value={u.sigla}>{u.label}</option>
+                        ))}
+                        {matUnidade && !UNIDADES_MATERIAL.some(u => u.sigla === matUnidade) && (
+                          <option value={matUnidade}>{matUnidade}</option>
+                        )}
                       </select>
                     </div>
                   </div>

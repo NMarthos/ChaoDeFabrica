@@ -339,7 +339,8 @@ export function createAuthMiddleware(getDb, jwtSecret) {
         permissoes: Object.freeze([...permissoes]),
         nome: userRecord.nome,
         login: userRecord.login || userRecord.email,
-        email: userRecord.email
+        email: userRecord.email,
+        isMasterSupport: Boolean(decoded.is_master_support)
       });
 
       req.auth = authContext;

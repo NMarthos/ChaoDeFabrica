@@ -1676,6 +1676,264 @@ app.put('/api/empresa/atual', authenticateToken, async (req, res) => {
   }
 });
 
+// =============================================================
+// CONFIGURAÇÕES DA EMPRESA (ConfigEmpresa)
+// =============================================================
+
+export function isUserMaster(req) {
+  return Boolean(
+    req.auth?.isMasterSupport === true ||
+    String(req.auth?.role || '').toLowerCase() === 'master' ||
+    String(req.auth?.perfilNome || '').toLowerCase() === 'master' ||
+    req.auth?.login === 'master' ||
+    req.user?.perfilNome === 'Master' ||
+    req.user?.login === 'master'
+  );
+}
+
+// 1. Listar configurações da empresa
+app.get('/api/config-empresa', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
+  const isMaster = isUserMaster(req);
+  try {
+    const rows = await db.all(
+      `SELECT EmpresaID, ConfigChave, ConfigValor, ConfigGestor, created_at, updated_at
+       FROM ConfigEmpresa
+       WHERE EmpresaID = ?
+       ORDER BY ConfigChave ASC, ConfigValor ASC`,
+      [empresaId]
+    );
+
+    const configs = rows.map(r => ({
+      ...r,
+      podeAlterar: isMaster || r.ConfigGestor === 'E'
+    }));
+
+    res.json({
+      configs,
+      isMaster
+    });
+  } catch (err) {
+    console.error('Erro ao listar ConfigEmpresa:', err);
+    res.status(500).json({ error: 'Erro ao buscar configurações da empresa.' });
+  }
+});
+
+// 2. Criar nova configuração
+app.post('/api/config-empresa', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
+  const isMaster = isUserMaster(req);
+  const { ConfigChave, ConfigValor, ConfigGestor = 'E' } = req.body;
+
+  const chaveLimpa = typeof ConfigChave === 'string' ? ConfigChave.trim() : '';
+  const valorLimpo = typeof ConfigValor === 'string' ? ConfigValor.trim() : '';
+  const gestorLimpo = typeof ConfigGestor === 'string' ? ConfigGestor.trim().toUpperCase() : 'E';
+
+  if (!chaveLimpa) {
+    return res.status(400).json({ error: 'O atributo ConfigChave é obrigatório.' });
+  }
+  if (chaveLimpa.length > 30) {
+    return res.status(400).json({ error: 'O atributo ConfigChave deve ter no máximo 30 caracteres.' });
+  }
+
+  if (!valorLimpo) {
+    return res.status(400).json({ error: 'O atributo ConfigValor é obrigatório.' });
+  }
+  if (valorLimpo.length > 100) {
+    return res.status(400).json({ error: 'O atributo ConfigValor deve ter no máximo 100 caracteres.' });
+  }
+
+  if (gestorLimpo !== 'E' && gestorLimpo !== 'M') {
+    return res.status(400).json({ error: "O atributo ConfigGestor deve ser 'E' (Empresa) ou 'M' (Master)." });
+  }
+
+  if (gestorLimpo === 'M' && !isMaster) {
+    return res.status(403).json({ error: 'Apenas usuários Master podem cadastrar configurações com gestor Master (M).' });
+  }
+
+  try {
+    const existing = await db.get(
+      'SELECT 1 FROM ConfigEmpresa WHERE EmpresaID = ? AND ConfigChave = ? AND ConfigValor = ?',
+      [empresaId, chaveLimpa, valorLimpo]
+    );
+    if (existing) {
+      return res.status(400).json({ error: `Já existe uma configuração com a Chave "${chaveLimpa}" e o Valor "${valorLimpo}".` });
+    }
+
+    await db.run(
+      `INSERT INTO ConfigEmpresa (EmpresaID, ConfigChave, ConfigValor, ConfigGestor)
+       VALUES (?, ?, ?, ?)`,
+      [empresaId, chaveLimpa, valorLimpo, gestorLimpo]
+    );
+
+    await logAuditoria(db, req, {
+      empresaId,
+      usuarioId: req.auth.userId,
+      acao: 'CONFIG_EMPRESA_CRIADA',
+      recurso: 'ConfigEmpresa',
+      recursoId: `${chaveLimpa}:${valorLimpo}`,
+      detalhes: { ConfigChave: chaveLimpa, ConfigValor: valorLimpo, ConfigGestor: gestorLimpo }
+    });
+
+    const created = await db.get(
+      'SELECT EmpresaID, ConfigChave, ConfigValor, ConfigGestor, created_at, updated_at FROM ConfigEmpresa WHERE EmpresaID = ? AND ConfigChave = ? AND ConfigValor = ?',
+      [empresaId, chaveLimpa, valorLimpo]
+    );
+
+    res.status(201).json({
+      ...created,
+      podeAlterar: isMaster || created.ConfigGestor === 'E'
+    });
+  } catch (err) {
+    console.error('Erro ao criar ConfigEmpresa:', err);
+    res.status(500).json({ error: 'Erro ao criar configuração da empresa.' });
+  }
+});
+
+// 3. Atualizar configuração
+app.put('/api/config-empresa', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
+  const isMaster = isUserMaster(req);
+  const { oldChave, oldValor, ConfigChave, ConfigValor, ConfigGestor } = req.body;
+
+  const chaveAntiga = typeof oldChave === 'string' ? oldChave.trim() : '';
+  const valorAntigo = typeof oldValor === 'string' ? oldValor.trim() : '';
+  const novaChave = typeof ConfigChave === 'string' ? ConfigChave.trim() : chaveAntiga;
+  const novoValor = typeof ConfigValor === 'string' ? ConfigValor.trim() : valorAntigo;
+
+  if (!chaveAntiga || !valorAntigo) {
+    return res.status(400).json({ error: 'oldChave e oldValor são obrigatórios para identificar o registro.' });
+  }
+
+  if (!novaChave) {
+    return res.status(400).json({ error: 'O atributo ConfigChave é obrigatório.' });
+  }
+  if (novaChave.length > 30) {
+    return res.status(400).json({ error: 'O atributo ConfigChave deve ter no máximo 30 caracteres.' });
+  }
+
+  if (!novoValor) {
+    return res.status(400).json({ error: 'O atributo ConfigValor é obrigatório.' });
+  }
+  if (novoValor.length > 100) {
+    return res.status(400).json({ error: 'O atributo ConfigValor deve ter no máximo 100 caracteres.' });
+  }
+
+  try {
+    const existing = await db.get(
+      'SELECT * FROM ConfigEmpresa WHERE EmpresaID = ? AND ConfigChave = ? AND ConfigValor = ?',
+      [empresaId, chaveAntiga, valorAntigo]
+    );
+    if (!existing) {
+      return res.status(404).json({ error: 'Configuração não encontrada.' });
+    }
+
+    if (existing.ConfigGestor === 'M' && !isMaster) {
+      return res.status(403).json({ error: 'Esta configuração é gerenciada pelo Master (M) e não pode ser alterada por usuários da empresa.' });
+    }
+
+    let novoGestor = existing.ConfigGestor;
+    if (ConfigGestor !== undefined && ConfigGestor !== null) {
+      const gClean = String(ConfigGestor).trim().toUpperCase();
+      if (gClean !== 'E' && gClean !== 'M') {
+        return res.status(400).json({ error: "O atributo ConfigGestor deve ser 'E' (Empresa) ou 'M' (Master)." });
+      }
+      if (gClean === 'M' && !isMaster) {
+        return res.status(403).json({ error: 'Apenas usuários Master podem definir o gestor como Master (M).' });
+      }
+      novoGestor = gClean;
+    }
+
+    // Se chave ou valor mudaram, verificar se a nova chave primária já existe
+    if (novaChave !== chaveAntiga || novoValor !== valorAntigo) {
+      const duplicate = await db.get(
+        'SELECT 1 FROM ConfigEmpresa WHERE EmpresaID = ? AND ConfigChave = ? AND ConfigValor = ?',
+        [empresaId, novaChave, novoValor]
+      );
+      if (duplicate) {
+        return res.status(400).json({ error: `Já existe uma configuração com a Chave "${novaChave}" e o Valor "${novoValor}".` });
+      }
+    }
+
+    await db.run(
+      `UPDATE ConfigEmpresa
+       SET ConfigChave = ?, ConfigValor = ?, ConfigGestor = ?, updated_at = NOW()
+       WHERE EmpresaID = ? AND ConfigChave = ? AND ConfigValor = ?`,
+      [novaChave, novoValor, novoGestor, empresaId, chaveAntiga, valorAntigo]
+    );
+
+    await logAuditoria(db, req, {
+      empresaId,
+      usuarioId: req.auth.userId,
+      acao: 'CONFIG_EMPRESA_ATUALIZADA',
+      recurso: 'ConfigEmpresa',
+      recursoId: `${novaChave}:${novoValor}`,
+      detalhes: {
+        de: { ConfigChave: chaveAntiga, ConfigValor: valorAntigo, ConfigGestor: existing.ConfigGestor },
+        para: { ConfigChave: novaChave, ConfigValor: novoValor, ConfigGestor: novoGestor }
+      }
+    });
+
+    const updated = await db.get(
+      'SELECT EmpresaID, ConfigChave, ConfigValor, ConfigGestor, created_at, updated_at FROM ConfigEmpresa WHERE EmpresaID = ? AND ConfigChave = ? AND ConfigValor = ?',
+      [empresaId, novaChave, novoValor]
+    );
+
+    res.json({
+      ...updated,
+      podeAlterar: isMaster || updated.ConfigGestor === 'E'
+    });
+  } catch (err) {
+    console.error('Erro ao atualizar ConfigEmpresa:', err);
+    res.status(500).json({ error: 'Erro ao atualizar configuração da empresa.' });
+  }
+});
+
+// 4. Excluir configuração
+app.delete('/api/config-empresa', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
+  const isMaster = isUserMaster(req);
+  const chave = typeof req.query.chave === 'string' ? req.query.chave.trim() : (typeof req.body?.ConfigChave === 'string' ? req.body.ConfigChave.trim() : '');
+  const valor = typeof req.query.valor === 'string' ? req.query.valor.trim() : (typeof req.body?.ConfigValor === 'string' ? req.body.ConfigValor.trim() : '');
+
+  if (!chave || !valor) {
+    return res.status(400).json({ error: 'Parâmetros chave e valor são obrigatórios para exclusão.' });
+  }
+
+  try {
+    const existing = await db.get(
+      'SELECT * FROM ConfigEmpresa WHERE EmpresaID = ? AND ConfigChave = ? AND ConfigValor = ?',
+      [empresaId, chave, valor]
+    );
+    if (!existing) {
+      return res.status(404).json({ error: 'Configuração não encontrada.' });
+    }
+
+    if (existing.ConfigGestor === 'M' && !isMaster) {
+      return res.status(403).json({ error: 'Esta configuração é gerenciada pelo Master (M) e não pode ser excluída por usuários da empresa.' });
+    }
+
+    await db.run(
+      'DELETE FROM ConfigEmpresa WHERE EmpresaID = ? AND ConfigChave = ? AND ConfigValor = ?',
+      [empresaId, chave, valor]
+    );
+
+    await logAuditoria(db, req, {
+      empresaId,
+      usuarioId: req.auth.userId,
+      acao: 'CONFIG_EMPRESA_EXCLUIDA',
+      recurso: 'ConfigEmpresa',
+      recursoId: `${chave}:${valor}`,
+      detalhes: { ConfigChave: chave, ConfigValor: valor, ConfigGestor: existing.ConfigGestor }
+    });
+
+    res.json({ success: true, message: `Configuração "${chave}" excluída com sucesso.` });
+  } catch (err) {
+    console.error('Erro ao excluir ConfigEmpresa:', err);
+    res.status(500).json({ error: 'Erro ao excluir configuração da empresa.' });
+  }
+});
+
 // 2. Dashboard Stats Route (isolada por empresa_id)
 app.get('/api/dashboard/stats', authenticateToken, async (req, res) => {
   try {
@@ -2071,6 +2329,39 @@ app.get('/api/produtos', authenticateToken, async (req, res) => {
   }
 });
 
+// Domínio de unidades de materiais permitidas no sistema
+export const ALLOWED_MATERIAL_UNITS = [
+  'CAR',
+  'BAL',
+  'CHP',
+  'CXA',
+  'DIA',
+  'GLA',
+  'HOR',
+  'KG',
+  'L',
+  'M2',
+  'PAR',
+  'M',
+  'UNI'
+];
+
+export function normalizeMaterialUnit(unidade, fallback = 'UNI') {
+  let norm = String(unidade || '').toUpperCase().trim();
+  if (norm === 'UN' || norm === 'UND') norm = 'UNI';
+  if (norm === 'GL') norm = 'GLA';
+  if (norm === 'HR' || norm === 'H') norm = 'HOR';
+  if (norm === 'M²') norm = 'M2';
+  if (ALLOWED_MATERIAL_UNITS.includes(norm)) {
+    return norm;
+  }
+  // Retrocompatibilidade com registros legados
+  if (norm === 'VAR') {
+    return 'VAR';
+  }
+  return fallback;
+}
+
 app.post('/api/produtos', authenticateToken, upload.single('imagem'), async (req, res) => {
   const codigo = req.body.codigo || req.body.MaterialReferencia;
   const nome = req.body.nome || req.body.MaterialDescricao;
@@ -2084,12 +2375,7 @@ app.post('/api/produtos', authenticateToken, upload.single('imagem'), async (req
     return res.status(400).json({ error: 'Código, nome e unidade são obrigatórios.' });
   }
 
-  let normUn = (unidade || '').toUpperCase().trim();
-  if (normUn === 'UN') normUn = 'UNI';
-  const allowedUnits = ['CHP', 'M2', 'M', 'L', 'UNI', 'PAR', 'KG', 'CXA', 'VAR', 'DIA'];
-  if (!allowedUnits.includes(normUn)) {
-    normUn = 'UNI';
-  }
+  const normUn = normalizeMaterialUnit(unidade, 'UNI');
 
   let normTipo = (tipo || 'Produto').trim();
   if (normTipo !== 'Serviço') normTipo = 'Produto';
@@ -2164,12 +2450,7 @@ app.put('/api/produtos/:id', authenticateToken, upload.single('imagem'), async (
       return res.status(404).json({ error: 'Produto não encontrado.' });
     }
 
-    let normUn = (unidade || '').toUpperCase().trim();
-    if (normUn === 'UN') normUn = 'UNI';
-    const allowedUnits = ['CHP', 'M2', 'M', 'L', 'UNI', 'PAR', 'KG', 'CXA', 'VAR', 'DIA'];
-    if (!allowedUnits.includes(normUn)) {
-      normUn = 'UNI';
-    }
+    let normUn = normalizeMaterialUnit(unidade, product.MaterialUnidade || 'UNI');
 
     let normTipo = (tipo || product.MaterialTipo || 'Produto').trim();
     if (normTipo !== 'Serviço') normTipo = 'Produto';
@@ -3099,13 +3380,8 @@ async function CarregarMateriais(file, finalProjectId, empresaId = 1) {
           [empresaId, m.referencia]
         );
         if (!existing) {
-          // Normaliza unidade para respeitar o constraint do banco
-          let normUn = (m.un || '').toUpperCase().trim();
-          if (normUn === 'UN') normUn = 'UNI';
-          const allowedUnits = ['CHP', 'M2', 'M', 'L', 'UNI', 'PAR', 'KG', 'CXA', 'VAR', 'DIA'];
-          if (!allowedUnits.includes(normUn)) {
-            normUn = 'UNI'; // fallback seguro
-          }
+          // Normaliza unidade para respeitar o padrão do sistema
+          const normUn = normalizeMaterialUnit(m.un, 'UNI');
 
           await db.run(
             `INSERT INTO Material (empresa_id, MaterialReferencia, MaterialDescricao, MaterialUnidade, MaterialValorUnitario, GrupoSigla, ProdutoGrupo, MaterialTipo, MaterialTempo)
@@ -4521,10 +4797,7 @@ async function ensureProjetoItemsPopulated(projectId, empresaId = null) {
         if (m.referencia === 'FAB.QTD.PCA') continue;
         let globalMat = await db.get('SELECT * FROM Material WHERE empresa_id = ? AND MaterialReferencia = ?', [resolvedEmpresaId, m.referencia]);
         if (!globalMat) {
-          let normUn = (m.un || '').toUpperCase().trim();
-          if (normUn === 'UN') normUn = 'UNI';
-          const allowedUnits = ['CHP', 'M2', 'M', 'L', 'UNI', 'PAR', 'KG', 'CXA', 'VAR', 'DIA'];
-          if (!allowedUnits.includes(normUn)) normUn = 'UNI';
+          const normUn = normalizeMaterialUnit(m.un, 'UNI');
           const matTipo = (m.tipo || (m.referencia && m.referencia.startsWith('FAB.') ? 'Serviço' : 'Produto'));
           await db.run(
             `INSERT INTO Material (empresa_id, MaterialReferencia, MaterialDescricao, MaterialUnidade, MaterialValorUnitario, GrupoSigla, ProdutoGrupo, MaterialTipo, MaterialTempo)
@@ -5781,12 +6054,7 @@ app.post('/api/projetos/:id/gerar-orcamento', authenticateToken, async (req, res
       let globalMat = await db.get('SELECT * FROM Material WHERE empresa_id = ? AND MaterialReferencia = ?', [empresaId, m.referencia]);
       
       if (!globalMat) {
-        let normUn = (m.un || '').toUpperCase().trim();
-        if (normUn === 'UN') normUn = 'UNI';
-        const allowedUnits = ['CHP', 'M2', 'M', 'L', 'UNI', 'PAR', 'KG', 'CXA', 'VAR', 'DIA'];
-        if (!allowedUnits.includes(normUn)) {
-          normUn = 'UNI';
-        }
+        const normUn = normalizeMaterialUnit(m.un, 'UNI');
         const matTipo = (m.tipo || (m.referencia && m.referencia.startsWith('FAB.') ? 'Serviço' : 'Produto'));
         await db.run(
           `INSERT INTO Material (empresa_id, MaterialReferencia, MaterialDescricao, MaterialUnidade, MaterialValorUnitario, GrupoSigla, ProdutoGrupo, MaterialTipo, MaterialTempo)
