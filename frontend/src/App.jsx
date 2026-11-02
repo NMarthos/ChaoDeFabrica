@@ -374,28 +374,58 @@ const valorPorExtenso = (valor) => {
 // Utilitário global para resolução de URL de imagens e anexos da API (com autenticação por empresa/token)
 export const getMediaUrl = (imgPath) => {
   if (!imgPath) return '';
-  if (imgPath.startsWith('http://') || imgPath.startsWith('https://') || imgPath.startsWith('blob:') || imgPath.startsWith('data:')) return imgPath;
-  let clean = imgPath.replace(/\\/g, '/').replace(/^\/+/, '');
-  if (!clean.startsWith('uploads/') && !clean.startsWith('api/uploads/')) {
-    if (clean.startsWith('empresa_') || clean.startsWith('produtos/') || clean.startsWith('anexos/') || clean.startsWith('parametros/') || clean.startsWith('layouts/')) {
-      clean = `uploads/${clean}`;
-    }
+  if (
+    imgPath.startsWith('http://') ||
+    imgPath.startsWith('https://') ||
+    imgPath.startsWith('blob:') ||
+    imgPath.startsWith('data:')
+  ) {
+    return imgPath;
   }
-  const apiRoot = (import.meta.env.VITE_API_URL || '').replace(/\/api\/?$/, '');
-  const baseUrl = apiRoot ? `${apiRoot}/${clean}` : `/${clean}`;
 
-  if (clean.startsWith('uploads/') || clean.startsWith('api/uploads/')) {
-    const sep = baseUrl.includes('?') ? '&' : '?';
-    const pathname = typeof window !== 'undefined' ? (window.location?.pathname || '') : '';
-    const pubMatch = pathname.match(/^\/proposta(?:-publica)?\/([a-zA-Z0-9_-]+)/);
-    if (pubMatch && pubMatch[1]) {
-      return `${baseUrl}${sep}share_token=${encodeURIComponent(pubMatch[1])}`;
-    }
-    const jwtToken = typeof localStorage !== 'undefined' ? (localStorage.getItem('erp_token') || localStorage.getItem('token')) : null;
-    if (jwtToken) {
-      return `${baseUrl}${sep}token=${encodeURIComponent(jwtToken)}`;
-    }
+  // Normaliza separadores e remove barras iniciais
+  let clean = imgPath.replace(/\\/g, '/').replace(/^\/+/, '');
+  // Remove eventual prefixo api/
+  clean = clean.replace(/^api\/+/i, '');
+
+  // Garante prefixo uploads/ se não possuir
+  if (!clean.startsWith('uploads/')) {
+    clean = `uploads/${clean}`;
   }
+
+  // Na Hostinger, o servidor Web (LiteSpeed/Apache) repassa rotas sob /api para o Node.js.
+  // Por isso, todo acesso a arquivos e imagens protegidos deve ser resolvido como /api/uploads/...
+  const apiRoot = (import.meta.env.VITE_API_URL || '/api').replace(/\/+$/, '');
+  const baseUrl = apiRoot.endsWith('/api')
+    ? `${apiRoot}/${clean}`
+    : `${apiRoot}/api/${clean}`;
+
+  const sep = baseUrl.includes('?') ? '&' : '?';
+  const pathname = typeof window !== 'undefined' ? (window.location?.pathname || '') : '';
+  const search = typeof window !== 'undefined' ? (window.location?.search || '') : '';
+
+  // 1) Suporte a token de proposta pública (na URL ou na query string)
+  let shareToken = null;
+  const pubMatch = pathname.match(/^\/proposta(?:-publica)?\/([a-zA-Z0-9_-]+)/);
+  if (pubMatch && pubMatch[1]) {
+    shareToken = pubMatch[1];
+  } else if (search) {
+    const params = new URLSearchParams(search);
+    shareToken = params.get('share_token') || params.get('token');
+  }
+
+  if (shareToken) {
+    return `${baseUrl}${sep}share_token=${encodeURIComponent(shareToken)}`;
+  }
+
+  // 2) Token JWT autenticado da sessão
+  const jwtToken = typeof localStorage !== 'undefined'
+    ? (localStorage.getItem('erp_token') || localStorage.getItem('token'))
+    : null;
+  if (jwtToken) {
+    return `${baseUrl}${sep}token=${encodeURIComponent(jwtToken)}`;
+  }
+
   return baseUrl;
 };
 
@@ -20426,7 +20456,10 @@ function Orcamentos() {
         nome: item.MaterialDescricao,
         preco: item.ProjetoItemVlrUnit,
         unidade: item.ProjetoItemUnidade,
-        tipo: item.MaterialTipo || 'Produto'
+        tipo: item.MaterialTipo || 'Produto',
+        imagem: item.MaterialImagem,
+        ExibirNaProposta: item.ExibirNaProposta,
+        ProdutoGrupo: item.ProdutoGrupo
       });
     }
   };
@@ -24890,7 +24923,10 @@ function Projetos() {
         nome: item.MaterialDescricao,
         preco: item.ProjetoItemVlrUnit,
         unidade: item.ProjetoItemUnidade,
-        tipo: item.MaterialTipo || 'Produto'
+        tipo: item.MaterialTipo || 'Produto',
+        imagem: item.MaterialImagem,
+        ExibirNaProposta: item.ExibirNaProposta,
+        ProdutoGrupo: item.ProdutoGrupo
       });
     }
   };

@@ -79,8 +79,14 @@ export const candidateUploadDirs = [
   process.env.UPLOADS_PATH,
   path.resolve(__dirname, '../../uploads'),
   path.resolve(__dirname, '../uploads'),
+  path.resolve(__dirname, '../../public_html/uploads'),
+  path.resolve(__dirname, '../../../public_html/uploads'),
   path.resolve(process.cwd(), 'uploads'),
-  path.resolve(process.cwd(), 'backend/uploads')
+  path.resolve(process.cwd(), 'backend/uploads'),
+  path.resolve(process.cwd(), 'public_html/uploads'),
+  path.resolve(process.cwd(), '../public_html/uploads'),
+  path.resolve(process.cwd(), '../uploads'),
+  path.resolve(process.cwd(), '../../uploads')
 ].filter(Boolean);
 
 try {
@@ -114,6 +120,21 @@ export function findUploadPhysicalPath(relPath) {
       }
     } catch (_) {}
   }
+
+  // Fallback: se não achou no caminho relativo exato, busca pelo nome do arquivo na raiz de uploads e subpastas conhecidas
+  const fileName = path.basename(relPath);
+  const subdirs = ['', 'produtos', 'parametros', 'anexos', 'layouts'];
+  for (const baseDir of candidateUploadDirs) {
+    for (const sub of subdirs) {
+      try {
+        const candidate = sub ? path.join(baseDir, sub, fileName) : path.join(baseDir, fileName);
+        if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+          return candidate;
+        }
+      } catch (_) {}
+    }
+  }
+
   return primary ? primary.fullPath : '';
 }
 
@@ -317,7 +338,12 @@ async function verifyFileBelongsToCompany(database, empresaId, normalizedRelPath
   if (!Number.isInteger(empId) || empId <= 0 || !normalizedRelPath) return false;
 
   // Se o usuário autenticado for Master, permitir acesso administrativo
-  if (req?.auth?.perfilNome === 'Master' || req?.auth?.login === 'master' || req?.auth?.role === 'master') {
+  if (
+    req?.auth?.perfilNome === 'Master' ||
+    req?.auth?.login === 'master' ||
+    req?.auth?.role === 'master' ||
+    req?.auth?.isMasterSupport
+  ) {
     return true;
   }
 
@@ -325,22 +351,18 @@ async function verifyFileBelongsToCompany(database, empresaId, normalizedRelPath
   const withLeadingSlash = `/${cleanNoLeadingSlash}`;
   const fileNameOnly = path.basename(cleanNoLeadingSlash);
 
-  // Se o caminho aponta para pasta de empresa (ex: uploads/empresa_1/...)
+  // Se o caminho aponta para a pasta física da própria empresa autenticada, libera imediatamente
   const empFolderMatch = cleanNoLeadingSlash.match(/^uploads\/empresa_(\d+)\//i);
-  if (empFolderMatch) {
-    if (Number(empFolderMatch[1]) !== empId) {
-      return false;
-    }
-    // Pertence à pasta da própria empresa autenticada
+  if (empFolderMatch && Number(empFolderMatch[1]) === empId) {
     return true;
   }
 
-  // Confirma propriedade nos registros de arquivos do banco de dados para a empresa autenticada
+  // Confirma propriedade ou vínculo do arquivo no banco de dados para a empresa autenticada
   const anexo = await database.get(
     `SELECT id FROM projeto_anexos
-     WHERE empresa_id = ? AND (caminho = ? OR caminho = ? OR nome_arquivo = ?)
+     WHERE empresa_id = ? AND (caminho = ? OR caminho = ? OR nome_arquivo = ? OR caminho LIKE ?)
      LIMIT 1`,
-    [empId, cleanNoLeadingSlash, withLeadingSlash, fileNameOnly]
+    [empId, cleanNoLeadingSlash, withLeadingSlash, fileNameOnly, `%${fileNameOnly}`]
   );
   if (anexo) return true;
 
@@ -359,6 +381,24 @@ async function verifyFileBelongsToCompany(database, empresaId, normalizedRelPath
     [empId, cleanNoLeadingSlash, withLeadingSlash, `%${fileNameOnly}`]
   );
   if (matImg) return true;
+
+  const projMatImg = await database.get(
+    `SELECT pi.ProjetoItemID FROM ProjetoItem pi
+     INNER JOIN Material m ON m.empresa_id = pi.empresa_id AND m.MaterialReferencia = pi.MaterialReferencia
+     WHERE pi.empresa_id = ? AND (m.MaterialImagem = ? OR m.MaterialImagem = ? OR m.MaterialImagem LIKE ?)
+     LIMIT 1`,
+    [empId, cleanNoLeadingSlash, withLeadingSlash, `%${fileNameOnly}`]
+  );
+  if (projMatImg) return true;
+
+  const projMatCorteImg = await database.get(
+    `SELECT pm.id FROM Projeto_Materiais pm
+     INNER JOIN Material m ON m.empresa_id = pm.empresa_id AND m.MaterialReferencia = pm.referencia
+     WHERE pm.empresa_id = ? AND (m.MaterialImagem = ? OR m.MaterialImagem = ? OR m.MaterialImagem LIKE ?)
+     LIMIT 1`,
+    [empId, cleanNoLeadingSlash, withLeadingSlash, `%${fileNameOnly}`]
+  );
+  if (projMatCorteImg) return true;
 
   const paramImg = await database.get(
     `SELECT id FROM parametros_empresa
@@ -460,12 +500,6 @@ app.get(['/uploads/*', '/api/uploads/*'], async (req, res) => {
       const withSlash = `/${cleanRel}`;
       const fileNameOnly = path.basename(cleanRel);
 
-      // Bloqueia pastas de outras empresas
-      const empFolderMatch = cleanRel.match(/^uploads\/empresa_(\d+)\//i);
-      if (empFolderMatch && Number(empFolderMatch[1]) !== empId) {
-        return res.status(404).json({ error: 'Arquivo não encontrado.' });
-      }
-
       // Verifica se o arquivo é um anexo autorizado na proposta pública (exibir_na_proposta = 'Sim'), imagem de material do orçamento ou parâmetro da empresa
       const allowedAnexo = await db.get(
         `SELECT pa.id
@@ -473,9 +507,9 @@ app.get(['/uploads/*', '/api/uploads/*'], async (req, res) => {
          INNER JOIN projetos p ON p.empresa_id = pa.empresa_id AND p.id = pa.projeto_id
          WHERE pa.empresa_id = ? AND p.orcamento_numero = ?
            AND LOWER(COALESCE(pa.exibir_na_proposta, 'sim')) = 'sim'
-           AND (pa.caminho = ? OR pa.caminho = ? OR pa.nome_arquivo = ?)
+           AND (pa.caminho = ? OR pa.caminho = ? OR pa.nome_arquivo = ? OR pa.caminho LIKE ?)
          LIMIT 1`,
-        [empId, orcNum, cleanRel, withSlash, fileNameOnly]
+        [empId, orcNum, cleanRel, withSlash, fileNameOnly, `%${fileNameOnly}`]
       );
 
       const allowedParam = !allowedAnexo && await db.get(
@@ -486,15 +520,27 @@ app.get(['/uploads/*', '/api/uploads/*'], async (req, res) => {
         [empId, cleanRel, withSlash, `%${fileNameOnly}`]
       );
 
-      const allowedMat = !allowedAnexo && !allowedParam && await db.get(
-        `SELECT m.MaterialReferencia
-         FROM Material m
-         INNER JOIN ProjetoItem pi ON pi.empresa_id = m.empresa_id AND pi.MaterialReferencia = m.MaterialReferencia
-         INNER JOIN projetos p ON p.empresa_id = pi.empresa_id AND p.id = pi.ProjetoID
-         WHERE m.empresa_id = ? AND p.orcamento_numero = ?
-           AND (m.MaterialImagem = ? OR m.MaterialImagem = ? OR m.MaterialImagem LIKE ?)
-         LIMIT 1`,
-        [empId, orcNum, cleanRel, withSlash, `%${fileNameOnly}`]
+      const allowedMat = !allowedAnexo && !allowedParam && (
+        await db.get(
+          `SELECT m.MaterialReferencia
+           FROM Material m
+           INNER JOIN ProjetoItem pi ON pi.empresa_id = m.empresa_id AND pi.MaterialReferencia = m.MaterialReferencia
+           INNER JOIN projetos p ON p.empresa_id = pi.empresa_id AND p.id = pi.ProjetoID
+           WHERE m.empresa_id = ? AND p.orcamento_numero = ?
+             AND (m.MaterialImagem = ? OR m.MaterialImagem = ? OR m.MaterialImagem LIKE ?)
+           LIMIT 1`,
+          [empId, orcNum, cleanRel, withSlash, `%${fileNameOnly}`]
+        ) ||
+        await db.get(
+          `SELECT m.MaterialReferencia
+           FROM Material m
+           INNER JOIN Projeto_Materiais pm ON pm.empresa_id = m.empresa_id AND pm.referencia = m.MaterialReferencia
+           INNER JOIN projetos p ON p.empresa_id = pm.empresa_id AND p.id = pm.projeto_id
+           WHERE m.empresa_id = ? AND p.orcamento_numero = ?
+             AND (m.MaterialImagem = ? OR m.MaterialImagem = ? OR m.MaterialImagem LIKE ?)
+           LIMIT 1`,
+          [empId, orcNum, cleanRel, withSlash, `%${fileNameOnly}`]
+        )
       );
 
       if (!allowedAnexo && !allowedParam && !allowedMat) {

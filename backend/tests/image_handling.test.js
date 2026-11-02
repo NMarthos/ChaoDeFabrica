@@ -59,45 +59,42 @@ console.log('✔ Teste 3 passou!');
 
 console.log('--- Teste 4: getMediaUrl simulando ambiente frontend ---');
 // Simula a função getMediaUrl do frontend
-const mockGetMediaUrl = (imgPath, storageToken = 'erp_token_secret_123', shareToken = null) => {
+const mockGetMediaUrl = (imgPath, storageToken = 'erp_token_secret_123', shareToken = null, apiRoot = '/api') => {
   if (!imgPath) return '';
   if (imgPath.startsWith('http://') || imgPath.startsWith('https://') || imgPath.startsWith('blob:') || imgPath.startsWith('data:')) return imgPath;
   let clean = imgPath.replace(/\\/g, '/').replace(/^\/+/, '');
-  if (!clean.startsWith('uploads/') && !clean.startsWith('api/uploads/')) {
-    if (clean.startsWith('empresa_') || clean.startsWith('produtos/') || clean.startsWith('anexos/') || clean.startsWith('parametros/') || clean.startsWith('layouts/')) {
-      clean = `uploads/${clean}`;
-    }
+  clean = clean.replace(/^api\/+/i, '');
+  if (!clean.startsWith('uploads/')) {
+    clean = `uploads/${clean}`;
   }
-  const baseUrl = `/${clean}`;
+  const baseUrl = apiRoot.endsWith('/api') ? `${apiRoot}/${clean}` : `${apiRoot}/api/${clean}`;
 
-  if (clean.startsWith('uploads/') || clean.startsWith('api/uploads/')) {
-    const sep = baseUrl.includes('?') ? '&' : '?';
-    if (shareToken) {
-      return `${baseUrl}${sep}share_token=${encodeURIComponent(shareToken)}`;
-    }
-    const jwtToken = storageToken;
-    if (jwtToken) {
-      return `${baseUrl}${sep}token=${encodeURIComponent(jwtToken)}`;
-    }
+  const sep = baseUrl.includes('?') ? '&' : '?';
+  if (shareToken) {
+    return `${baseUrl}${sep}share_token=${encodeURIComponent(shareToken)}`;
+  }
+  const jwtToken = storageToken;
+  if (jwtToken) {
+    return `${baseUrl}${sep}token=${encodeURIComponent(jwtToken)}`;
   }
   return baseUrl;
 };
 
 // Teste com caminho relativo com 'uploads/'
 const url1 = mockGetMediaUrl('uploads/empresa_1/produtos/chapa.jpg');
-assert.strictEqual(url1, '/uploads/empresa_1/produtos/chapa.jpg?token=erp_token_secret_123');
+assert.strictEqual(url1, '/api/uploads/empresa_1/produtos/chapa.jpg?token=erp_token_secret_123');
 
 // Teste com caminho sem 'uploads/'
 const url2 = mockGetMediaUrl('empresa_1/parametros/logo.png');
-assert.strictEqual(url2, '/uploads/empresa_1/parametros/logo.png?token=erp_token_secret_123');
+assert.strictEqual(url2, '/api/uploads/empresa_1/parametros/logo.png?token=erp_token_secret_123');
 
 // Teste com barra inicial
 const url3 = mockGetMediaUrl('/uploads/empresa_1/produtos/chapa.jpg');
-assert.strictEqual(url3, '/uploads/empresa_1/produtos/chapa.jpg?token=erp_token_secret_123');
+assert.strictEqual(url3, '/api/uploads/empresa_1/produtos/chapa.jpg?token=erp_token_secret_123');
 
 // Teste de proposta pública
 const urlPub = mockGetMediaUrl('uploads/empresa_1/parametros/logo.png', null, 'pub_share_xyz');
-assert.strictEqual(urlPub, '/uploads/empresa_1/parametros/logo.png?share_token=pub_share_xyz');
+assert.strictEqual(urlPub, '/api/uploads/empresa_1/parametros/logo.png?share_token=pub_share_xyz');
 
 console.log('✔ Teste 4 passou!');
 
