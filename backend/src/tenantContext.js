@@ -206,7 +206,13 @@ export function createAuthMiddleware(getDb, jwtSecret) {
       let token = authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
 
       // Suporte seguro a token em query APENAS para carregamento de mídia/downloads autenticados no navegador
-      if (!token && req.query?.token && (req.path.startsWith('/uploads/') || req.baseUrl === '/uploads' || req.path.includes('/anexos/') || req.path.includes('/download'))) {
+      if (!token && req.query?.token && (
+        req.path.includes('/uploads') ||
+        (req.baseUrl && req.baseUrl.includes('/uploads')) ||
+        (req.originalUrl && req.originalUrl.includes('/uploads')) ||
+        req.path.includes('/anexos/') ||
+        req.path.includes('/download')
+      )) {
         token = String(req.query.token).trim();
       }
 
@@ -422,11 +428,11 @@ export function resolveSafeUploadPath(uploadsBaseDir, relativeOrStoredPath) {
   if (relativeOrStoredPath.includes('\0')) return null;
 
   const baseResolved = path.resolve(uploadsBaseDir);
-  // Remove eventual prefixo /uploads/ ou uploads/
+  // Remove eventual prefixo /api/uploads/, /uploads/ ou uploads/
   const cleanRel = relativeOrStoredPath
     .replace(/\\/g, '/')
     .replace(/^\/+/, '')
-    .replace(/^uploads\/+/i, '');
+    .replace(/^(?:api\/)?uploads\/+/i, '');
 
   // Bloqueia segmentos '..' explícitos antes mesmo de resolver
   const segments = cleanRel.split('/');

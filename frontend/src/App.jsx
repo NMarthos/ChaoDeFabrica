@@ -375,18 +375,23 @@ const valorPorExtenso = (valor) => {
 export const getMediaUrl = (imgPath) => {
   if (!imgPath) return '';
   if (imgPath.startsWith('http://') || imgPath.startsWith('https://') || imgPath.startsWith('blob:') || imgPath.startsWith('data:')) return imgPath;
-  const clean = imgPath.startsWith('/') ? imgPath.substring(1) : imgPath;
+  let clean = imgPath.replace(/\\/g, '/').replace(/^\/+/, '');
+  if (!clean.startsWith('uploads/') && !clean.startsWith('api/uploads/')) {
+    if (clean.startsWith('empresa_') || clean.startsWith('produtos/') || clean.startsWith('anexos/') || clean.startsWith('parametros/') || clean.startsWith('layouts/')) {
+      clean = `uploads/${clean}`;
+    }
+  }
   const apiRoot = (import.meta.env.VITE_API_URL || '').replace(/\/api\/?$/, '');
   const baseUrl = apiRoot ? `${apiRoot}/${clean}` : `/${clean}`;
 
-  if (clean.startsWith('uploads/')) {
+  if (clean.startsWith('uploads/') || clean.startsWith('api/uploads/')) {
     const sep = baseUrl.includes('?') ? '&' : '?';
     const pathname = typeof window !== 'undefined' ? (window.location?.pathname || '') : '';
-    const pubMatch = pathname.match(/^\/proposta(?:-publica)?\/([a-fA-F0-9]+)/);
+    const pubMatch = pathname.match(/^\/proposta(?:-publica)?\/([a-zA-Z0-9_-]+)/);
     if (pubMatch && pubMatch[1]) {
       return `${baseUrl}${sep}share_token=${encodeURIComponent(pubMatch[1])}`;
     }
-    const jwtToken = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+    const jwtToken = typeof localStorage !== 'undefined' ? (localStorage.getItem('erp_token') || localStorage.getItem('token')) : null;
     if (jwtToken) {
       return `${baseUrl}${sep}token=${encodeURIComponent(jwtToken)}`;
     }
@@ -401,7 +406,7 @@ let lastEmpresaParamsFetch = 0;
 
 export const getEmpresaParametros = async () => {
   const now = Date.now();
-  const currentToken = typeof localStorage !== 'undefined' ? (localStorage.getItem('token') || '') : '';
+  const currentToken = typeof localStorage !== 'undefined' ? (localStorage.getItem('erp_token') || localStorage.getItem('token') || '') : '';
   if (cachedEmpresaParams && cachedEmpresaToken === currentToken && (now - lastEmpresaParamsFetch < 30000)) {
     return cachedEmpresaParams;
   }

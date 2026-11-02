@@ -73,6 +73,16 @@ const layoutsUploadDir = path.join(uploadsBaseDir, 'layouts');
 const anexosUploadDir = path.join(uploadsBaseDir, 'anexos');
 const parametrosUploadDir = path.join(uploadsBaseDir, 'parametros');
 
+// Lista de diretórios candidatos para resolução física de uploads em ambientes com múltiplos roots (ex: Hostinger Passenger)
+export const candidateUploadDirs = [
+  uploadsBaseDir,
+  process.env.UPLOADS_PATH,
+  path.resolve(__dirname, '../../uploads'),
+  path.resolve(__dirname, '../uploads'),
+  path.resolve(process.cwd(), 'uploads'),
+  path.resolve(process.cwd(), 'backend/uploads')
+].filter(Boolean);
+
 try {
   if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
   if (!fs.existsSync(layoutsUploadDir)) fs.mkdirSync(layoutsUploadDir, { recursive: true });
@@ -86,6 +96,25 @@ try {
 export function getUploadPhysicalPath(relPath) {
   const resolved = resolveSafeUploadPath(uploadsBaseDir, relPath);
   return resolved ? resolved.fullPath : '';
+}
+
+// Helper que busca o arquivo físico testando os diretórios candidatos caso a aplicação esteja em subpasta
+export function findUploadPhysicalPath(relPath) {
+  if (!relPath) return '';
+  const primary = resolveSafeUploadPath(uploadsBaseDir, relPath);
+  if (primary && fs.existsSync(primary.fullPath)) {
+    return primary.fullPath;
+  }
+  for (const baseDir of candidateUploadDirs) {
+    if (baseDir === uploadsBaseDir) continue;
+    try {
+      const alt = resolveSafeUploadPath(baseDir, relPath);
+      if (alt && fs.existsSync(alt.fullPath)) {
+        return alt.fullPath;
+      }
+    } catch (_) {}
+  }
+  return primary ? primary.fullPath : '';
 }
 
 export function getCompanyUploadDir(empresaId, category = 'geral') {
@@ -283,18 +312,27 @@ const requireAdmin = requireCompanyAdmin(() => db);
  * Verifica se um caminho relativo de arquivo em /uploads pertence à empresa informada
  * (tanto pela pasta física uploads/empresa_<id>/ quanto pelos metadados registrados no banco).
  */
-async function verifyFileBelongsToCompany(database, empresaId, normalizedRelPath) {
+async function verifyFileBelongsToCompany(database, empresaId, normalizedRelPath, req = null) {
   const empId = Number(empresaId);
   if (!Number.isInteger(empId) || empId <= 0 || !normalizedRelPath) return false;
+
+  // Se o usuário autenticado for Master, permitir acesso administrativo
+  if (req?.auth?.perfilNome === 'Master' || req?.auth?.login === 'master' || req?.auth?.role === 'master') {
+    return true;
+  }
 
   const cleanNoLeadingSlash = normalizedRelPath.replace(/^\/+/, '');
   const withLeadingSlash = `/${cleanNoLeadingSlash}`;
   const fileNameOnly = path.basename(cleanNoLeadingSlash);
 
-  // Se o caminho aponta explicitamente para a pasta de outra empresa (ex: uploads/empresa_2/...), bloqueia imediatamente!
+  // Se o caminho aponta para pasta de empresa (ex: uploads/empresa_1/...)
   const empFolderMatch = cleanNoLeadingSlash.match(/^uploads\/empresa_(\d+)\//i);
-  if (empFolderMatch && Number(empFolderMatch[1]) !== empId) {
-    return false;
+  if (empFolderMatch) {
+    if (Number(empFolderMatch[1]) !== empId) {
+      return false;
+    }
+    // Pertence à pasta da própria empresa autenticada
+    return true;
   }
 
   // Confirma propriedade nos registros de arquivos do banco de dados para a empresa autenticada
@@ -338,16 +376,34 @@ async function verifyFileBelongsToCompany(database, empresaId, normalizedRelPath
   );
   if (projUrl) return true;
 
+  const modImg = await database.get(
+    `SELECT pm.id FROM Projeto_Modulo pm
+     INNER JOIN projetos p ON p.id = pm.projeto_id
+     WHERE p.empresa_id = ? AND (pm.imagem = ? OR pm.imagem = ? OR pm.imagem LIKE ?)
+     LIMIT 1`,
+    [empId, cleanNoLeadingSlash, withLeadingSlash, `%${fileNameOnly}`]
+  );
+  if (modImg) return true;
+
+  const pecaImg = await database.get(
+    `SELECT pp.id FROM Projeto_Pecas pp
+     INNER JOIN projetos p ON p.id = pp.projeto_id
+     WHERE p.empresa_id = ? AND (pp.imagem = ? OR pp.imagem = ? OR pp.imagem LIKE ?)
+     LIMIT 1`,
+    [empId, cleanNoLeadingSlash, withLeadingSlash, `%${fileNameOnly}`]
+  );
+  if (pecaImg) return true;
+
   return false;
 }
 
 /**
- * Entrega autenticada e controlada de arquivos sob /uploads/* (substitui express.static público).
+ * Entrega autenticada e controlada de arquivos sob /uploads/* e /api/uploads/* (substitui express.static público).
  * Suporta:
  * 1) Usuário autenticado da empresa proprietária do arquivo (Bearer token ou ?token=...).
  * 2) Proposta pública compartilhada (?share_token=...) APENAS para anexos/imagens autorizados daquela proposta.
  */
-app.get('/uploads/*', async (req, res) => {
+app.get(['/uploads/*', '/api/uploads/*'], async (req, res) => {
   try {
     // Validação estrita contra Path Traversal na URL bruta antes mesmo da normalização do Express
     const rawUrlPath = decodeURIComponent((req.originalUrl || req.url || '').split('?')[0]);
@@ -355,10 +411,30 @@ app.get('/uploads/*', async (req, res) => {
       return res.status(400).json({ error: 'Caminho de arquivo inválido.' });
     }
 
-    const safeResolved = resolveSafeUploadPath(uploadsBaseDir, rawUrlPath);
+    const normalizedReqPath = rawUrlPath.replace(/^\/api(?=\/)/i, '');
+    const safeResolved = resolveSafeUploadPath(uploadsBaseDir, normalizedReqPath);
     if (!safeResolved) {
       return res.status(400).json({ error: 'Caminho de arquivo inválido.' });
     }
+
+    // Helper para envio com MIME type e cache control corretos
+    const sendSafeFile = (filePath) => {
+      const mimeTypes = {
+        '.png': 'image/png',
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.webp': 'image/webp',
+        '.gif': 'image/gif',
+        '.svg': 'image/svg+xml',
+        '.pdf': 'application/pdf'
+      };
+      const ext = path.extname(filePath).toLowerCase();
+      if (mimeTypes[ext]) {
+        res.setHeader('Content-Type', mimeTypes[ext]);
+      }
+      res.setHeader('Cache-Control', 'private, max-age=86400');
+      return res.sendFile(filePath);
+    };
 
     // Caso 1: Acesso via token de proposta pública (?share_token=...)
     const shareToken = req.query?.share_token ? String(req.query.share_token).trim() : null;
@@ -404,7 +480,7 @@ app.get('/uploads/*', async (req, res) => {
 
       const allowedParam = !allowedAnexo && await db.get(
         `SELECT id FROM parametros_empresa
-         WHERE empresa_id = ? AND chave IN ('EMP_LOGO', 'EMP_ASS')
+         WHERE empresa_id = ? AND (chave IN ('EMP_LOGO', 'EMP_ASS', 'LOGO', 'LOGO_EMP', 'ASSINATURA') OR chave LIKE '%LOGO%' OR chave LIKE '%ASS%')
            AND (conteudo = ? OR conteudo = ? OR conteudo LIKE ?)
          LIMIT 1`,
         [empId, cleanRel, withSlash, `%${fileNameOnly}`]
@@ -431,17 +507,20 @@ app.get('/uploads/*', async (req, res) => {
         return res.status(404).json({ error: 'Arquivo não encontrado.' });
       }
 
-      if (!fs.existsSync(safeResolved.fullPath)) {
+      const physicalPath = findUploadPhysicalPath(safeResolved.normalizedRelPath);
+      if (!physicalPath || !fs.existsSync(physicalPath)) {
         return res.status(404).json({ error: 'Arquivo não encontrado.' });
       }
-      return res.sendFile(safeResolved.fullPath);
+      return sendSafeFile(physicalPath);
     }
 
     // Caso 2: Acesso autenticado (valida JWT, usuário ativo, empresa ativa e vínculo)
     return authenticateToken(req, res, async () => {
       const empId = req.auth.empresaId;
-      const belongs = await verifyFileBelongsToCompany(db, empId, safeResolved.normalizedRelPath);
-      if (!belongs || !fs.existsSync(safeResolved.fullPath)) {
+      const belongs = await verifyFileBelongsToCompany(db, empId, safeResolved.normalizedRelPath, req);
+      const physicalPath = findUploadPhysicalPath(safeResolved.normalizedRelPath);
+
+      if (!belongs || !physicalPath || !fs.existsSync(physicalPath)) {
         await logAuditoria(db, req, {
           empresaId: empId,
           usuarioId: req.auth.userId,
@@ -451,7 +530,7 @@ app.get('/uploads/*', async (req, res) => {
         });
         return res.status(404).json({ error: 'Arquivo não encontrado.' });
       }
-      return res.sendFile(safeResolved.fullPath);
+      return sendSafeFile(physicalPath);
     });
   } catch (err) {
     console.error('[Uploads] Erro ao servir arquivo protegido:', err);
@@ -3477,17 +3556,20 @@ function parsePecasFromText(text) {
   return pecas;
 }
 
-// Rotina de Carga de Peças e Etiquetas (CarregarPecas)
-async function CarregarPecas(file, finalProjectId, empresaId = 1) {
+/**
+ * Extrai imagens embutidas (desenhos técnicos e códigos de barra) de um PDF com robustez para Node.js / Linux / Hostinger.
+ */
+async function extractImagesFromPdf(pdfjs, filePath) {
+  const imageBase64List = [];
   try {
-    const pdfjs = await getPdfJs();
-    const pdf = await getPdfParse();
-    // Extração das imagens reais (desenho e código de barras) do PDF usando a build legacy do pdfjs
-    console.log(`[CarregarPecas] Iniciando extração de imagens reais de: "${file.path}"`);
-    const loadingTask = pdfjs.getDocument(file.path);
+    if (!fs.existsSync(filePath)) {
+      console.warn(`[extractImagesFromPdf] Arquivo não encontrado: ${filePath}`);
+      return imageBase64List;
+    }
+    const fileBytes = new Uint8Array(fs.readFileSync(filePath));
+    const loadingTask = pdfjs.getDocument({ data: fileBytes, disableFontFace: true });
     const pdfDoc = await loadingTask.promise;
     const numPages = pdfDoc.numPages;
-    const imageBase64List = [];
 
     for (let i = 1; i <= numPages; i++) {
       const page = await pdfDoc.getPage(i);
@@ -3499,33 +3581,88 @@ async function CarregarPecas(file, finalProjectId, empresaId = 1) {
           const imgName = args[0];
 
           const imgObj = await new Promise((resolve) => {
-            page.objs.get(imgName, (obj) => {
-              resolve(obj);
-            });
+            let settled = false;
+            const timer = setTimeout(() => {
+              if (!settled) {
+                settled = true;
+                resolve(null);
+              }
+            }, 1000);
+            try {
+              page.objs.get(imgName, (obj) => {
+                if (!settled) {
+                  settled = true;
+                  clearTimeout(timer);
+                  resolve(obj);
+                }
+              });
+            } catch (_) {
+              if (!settled) {
+                settled = true;
+                clearTimeout(timer);
+                resolve(null);
+              }
+            }
           });
 
           if (imgObj) {
             const { width, height, data: imgData } = imgObj;
-            if (imgData instanceof Uint8Array && typeof width === 'number' && typeof height === 'number') {
-              // Converter RGB para RGBA
-              const rgbaData = new Uint8ClampedArray((imgData.length / 3) * 4);
-              for (let k = 0; k < imgData.length; k += 3) {
-                rgbaData[(k * 4) / 3] = imgData[k];
-                rgbaData[(k * 4) / 3 + 1] = imgData[k + 1];
-                rgbaData[(k * 4) / 3 + 2] = imgData[k + 2];
-                rgbaData[(k * 4) / 3 + 3] = 255;
+            if (imgData instanceof Uint8Array && typeof width === 'number' && typeof height === 'number' && width > 0 && height > 0) {
+              const totalPixels = width * height;
+              let rgbaData = null;
+
+              if (imgData.length === totalPixels * 4) {
+                rgbaData = imgData;
+              } else if (imgData.length === totalPixels * 3) {
+                rgbaData = new Uint8ClampedArray(totalPixels * 4);
+                for (let k = 0, p = 0; k < imgData.length; k += 3, p += 4) {
+                  rgbaData[p] = imgData[k];
+                  rgbaData[p + 1] = imgData[k + 1];
+                  rgbaData[p + 2] = imgData[k + 2];
+                  rgbaData[p + 3] = 255;
+                }
+              } else if (imgData.length === totalPixels) {
+                // Grayscale 1 canal (típico em códigos de barras)
+                rgbaData = new Uint8ClampedArray(totalPixels * 4);
+                for (let k = 0, p = 0; k < imgData.length; k++, p += 4) {
+                  const val = imgData[k];
+                  rgbaData[p] = val;
+                  rgbaData[p + 1] = val;
+                  rgbaData[p + 2] = val;
+                  rgbaData[p + 3] = 255;
+                }
               }
 
-              const png = new PNG({ width, height });
-              png.data = Buffer.from(rgbaData);
-              const buffer = PNG.sync.write(png);
-              const base64 = `data:image/png;base64,${buffer.toString('base64')}`;
-              imageBase64List.push(base64);
+              if (rgbaData) {
+                try {
+                  const png = new PNG({ width, height });
+                  png.data = Buffer.from(rgbaData);
+                  const buffer = PNG.sync.write(png);
+                  const base64 = `data:image/png;base64,${buffer.toString('base64')}`;
+                  imageBase64List.push(base64);
+                } catch (pngErr) {
+                  console.warn('[extractImagesFromPdf] Falha ao converter imagem para PNG:', pngErr.message);
+                }
+              }
             }
           }
         }
       }
     }
+  } catch (err) {
+    console.error('[extractImagesFromPdf] Erro durante extração de imagens:', err);
+  }
+  return imageBase64List;
+}
+
+// Rotina de Carga de Peças e Etiquetas (CarregarPecas)
+async function CarregarPecas(file, finalProjectId, empresaId = 1) {
+  try {
+    const pdfjs = await getPdfJs();
+    const pdf = await getPdfParse();
+    // Extração das imagens reais (desenho e código de barras) do PDF usando a build legacy do pdfjs
+    console.log(`[CarregarPecas] Iniciando extração de imagens reais de: "${file.path}"`);
+    const imageBase64List = await extractImagesFromPdf(pdfjs, file.path);
     console.log(`[CarregarPecas] Extraídas ${imageBase64List.length} imagens (desenhos e códigos de barra) do PDF.`);
 
     // Extração dos dados textuais
@@ -3693,47 +3830,7 @@ app.post('/api/arquivos-importados', authenticateToken, uploadLayouts.array('arq
           const pdfjs = await getPdfJs();
           const pdf = await getPdfParse();
           console.log(`[CargaModulos] Iniciando extração de imagens reais de: "${file.path}"`);
-          const loadingTask = pdfjs.getDocument(file.path);
-          const pdfDoc = await loadingTask.promise;
-          const numPages = pdfDoc.numPages;
-          const imageBase64List = [];
-
-          for (let i = 1; i <= numPages; i++) {
-            const page = await pdfDoc.getPage(i);
-            const ops = await page.getOperatorList();
-
-            for (let j = 0; j < ops.fnArray.length; j++) {
-              if (ops.fnArray[j] === pdfjs.OPS.paintImageXObject) {
-                const args = ops.argsArray[j];
-                const imgName = args[0];
-
-                const imgObj = await new Promise((resolve) => {
-                  page.objs.get(imgName, (obj) => {
-                    resolve(obj);
-                  });
-                });
-
-                if (imgObj) {
-                  const { width, height, data: imgData } = imgObj;
-                  if (imgData instanceof Uint8Array && typeof width === 'number' && typeof height === 'number') {
-                    const rgbaData = new Uint8ClampedArray((imgData.length / 3) * 4);
-                    for (let k = 0; k < imgData.length; k += 3) {
-                      rgbaData[(k * 4) / 3] = imgData[k];
-                      rgbaData[(k * 4) / 3 + 1] = imgData[k + 1];
-                      rgbaData[(k * 4) / 3 + 2] = imgData[k + 2];
-                      rgbaData[(k * 4) / 3 + 3] = 255;
-                    }
-
-                    const png = new PNG({ width, height });
-                    png.data = Buffer.from(rgbaData);
-                    const buffer = PNG.sync.write(png);
-                    const base64 = `data:image/png;base64,${buffer.toString('base64')}`;
-                    imageBase64List.push(base64);
-                  }
-                }
-              }
-            }
-          }
+          const imageBase64List = await extractImagesFromPdf(pdfjs, file.path);
           console.log(`[CargaModulos] Extraídas ${imageBase64List.length} imagens reais do PDF.`);
 
           const fileBuffer = fs.readFileSync(file.path);
@@ -7621,8 +7718,13 @@ app.post('/api/public/propostas/:token/aprovar', async (req, res) => {
 // Upload de Imagem para Parâmetro (Tipo 7)
 const parametrosStorage = multer.diskStorage({
   destination: (req, file, cb) => {
-    const empresaId = req.auth?.empresaId || req.user?.empresa_id || 1;
-    cb(null, getTenantUploadDir(empresaId, 'parametros'));
+    try {
+      const empresaId = req.auth?.empresaId || req.user?.empresa_id || 1;
+      const { fullDir } = getCompanyUploadDir(empresaId, 'parametros');
+      cb(null, fullDir);
+    } catch (err) {
+      cb(err);
+    }
   },
   filename: (req, file, cb) => {
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
