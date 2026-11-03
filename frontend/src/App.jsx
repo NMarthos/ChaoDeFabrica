@@ -15627,10 +15627,10 @@ function ModalConclusaoProposta({ isOpen, onClose, orcamento, projetos = [], par
   if (!isOpen || !orcamento) return null;
 
   const navigate = useNavigate();
+  const { user } = useAuth();
   const dataHojeStr = new Date().toISOString().split('T')[0];
 
   const [formasPagamento, setFormasPagamento] = useState([]);
-  const [selectedFormaId, setSelectedFormaId] = useState('all');
   const [descontoPerc, setDescontoPerc] = useState('0,00');
   const [descontoValor, setDescontoValor] = useState('0,00');
   const [precoFinal, setPrecoFinal] = useState('0,00');
@@ -15919,88 +15919,112 @@ function ModalConclusaoProposta({ isOpen, onClose, orcamento, projetos = [], par
     setError('');
   };
 
-  // Determinar a Forma de Pagamento recomendada pela regra de faixa de valor da proposta
-  const activeFormas = formasPagamento.filter(fp => fp.ativo !== 'Nao');
-  const baseRegra = currentPrecoFinal > 0 ? currentPrecoFinal : precoBaseOriginal;
-  
-  let formaRecomendada = activeFormas.find(f => {
+  // 1. O primeiro filtro é da empresa do usuário logado (e formas ativas)
+  const userEmpresaId = user?.empresa_id;
+  const formasEmpresa = formasPagamento.filter(fp => {
+    if (fp.ativo === 'Nao') return false;
+    if (userEmpresaId && fp.empresa_id && String(fp.empresa_id) !== String(userEmpresaId)) {
+      return false;
+    }
+    return true;
+  });
+
+  // 2. O sistema deve identificar a Forma de pagamento enquadrando o valor da proposta entre o Valor mínimo e máximo da forma de pagamento. Só 1 forma deve ser selecionada.
+  const valorProposta = currentPrecoFinal > 0 ? currentPrecoFinal : precoBaseOriginal;
+
+  // Busca na ordem de maior especificidade:
+  // a) Faixa fechada com valor_minimo e valor_maximo definidos (ex: min <= valor <= max)
+  let formaSelecionada = formasEmpresa.find(f => {
     const min = parseFloat(f.valor_minimo) || 0;
     const max = parseFloat(f.valor_maximo) || 0;
-    if (min > 0 && max > 0) return baseRegra >= min && baseRegra <= max;
-    if (min > 0 && max === 0) return baseRegra >= min;
-    if (min === 0 && max > 0) return baseRegra <= max;
-    return false;
+    return min > 0 && max > 0 && valorProposta >= min && valorProposta <= max;
   });
 
-  if (!formaRecomendada && activeFormas.length > 0) {
-    formaRecomendada = activeFormas.find(f => (parseFloat(f.valor_minimo) || 0) === 0 && (parseFloat(f.valor_maximo) || 0) === 0) || activeFormas[0];
+  // b) Faixa com valor_maximo definido e valor_minimo zerado (ex: orçamentos de até R$ 10.000,00)
+  if (!formaSelecionada) {
+    const comMax = formasEmpresa
+      .filter(f => {
+        const min = parseFloat(f.valor_minimo) || 0;
+        const max = parseFloat(f.valor_maximo) || 0;
+        return min === 0 && max > 0 && valorProposta <= max;
+      })
+      .sort((a, b) => (parseFloat(a.valor_maximo) || 0) - (parseFloat(b.valor_maximo) || 0));
+
+    if (comMax.length > 0) {
+      formaSelecionada = comMax[0];
+    }
   }
 
-  const formasParaExibir = (selectedFormaId && selectedFormaId !== 'all')
-    ? activeFormas.filter(f => String(f.id) === String(selectedFormaId))
-    : activeFormas;
+  // c) Faixa com valor_minimo definido e valor_maximo zerado/ilimitado (ex: acima de R$ 10.000,00)
+  if (!formaSelecionada) {
+    const comMin = formasEmpresa
+      .filter(f => {
+        const min = parseFloat(f.valor_minimo) || 0;
+        const max = parseFloat(f.valor_maximo) || 0;
+        return min > 0 && (parseFloat(f.valor_maximo) || 0) === 0 && valorProposta >= min;
+      })
+      .sort((a, b) => (parseFloat(b.valor_minimo) || 0) - (parseFloat(a.valor_minimo) || 0));
 
-  const condicoesArray = [];
-  formasParaExibir.forEach(f => {
-    const isRecomendada = Boolean(formaRecomendada && String(f.id) === String(formaRecomendada.id));
-    (f.condicoes || []).forEach(c => {
-      condicoesArray.push({
-        ...c,
-        formaId: f.id,
-        formaNome: f.nome,
-        isRecomendada
-      });
+    if (comMin.length > 0) {
+      formaSelecionada = comMin[0];
+    }
+  }
+
+  // d) Faixa sem limites (valor_minimo = 0 e valor_maximo = 0)
+  if (!formaSelecionada) {
+    formaSelecionada = formasEmpresa.find(f => {
+      const min = parseFloat(f.valor_minimo) || 0;
+      const max = parseFloat(f.valor_maximo) || 0;
+      return min === 0 && max === 0;
     });
-  });
+  }
 
-  // Sincronizar condição selecionada quando formas carregadas
+  // e) Fallback: primeira forma ativa da empresa
+  if (!formaSelecionada && formasEmpresa.length > 0) {
+    formaSelecionada = formasEmpresa[0];
+  }
+
+  // 3. O sistema deve exibir na tela as condições de pagamento da Forma de pagamento selecionada no item 2.
+  const condicoesArray = Array.isArray(formaSelecionada?.condicoes) ? formaSelecionada.condicoes : [];
+
+  // Sincronizar condição selecionada quando formas carregadas ou formaSelecionada alterada
   useEffect(() => {
-    if (formasPagamento.length === 0) return;
+    if (formasEmpresa.length === 0 || !formaSelecionada) return;
     const base = precoBaseOriginal > 0 ? precoBaseOriginal : (parseFloat(orcamento.total_venda) || 0);
     const descVlr = parsePtBrToFloat(descontoValor) || parseFloat(orcamento.desconto_valor) || 0;
     const finalVlr = parsePtBrToFloat(precoFinal) || ((orcamento.total_venda !== null && orcamento.total_venda !== undefined) ? parseFloat(orcamento.total_venda) : Math.max(0, base - descVlr));
     const dtEntrInit = dataEntrada || (orcamento.data_entrada ? String(orcamento.data_entrada).split('T')[0].split(' ')[0] : dataHojeStr);
 
-    const allConds = [];
-    formasPagamento.forEach(fp => {
-      (fp.condicoes || []).forEach(c => {
-        allConds.push({ ...c, formaId: fp.id, formaNome: fp.nome });
-      });
-    });
-
-    const fpTarget = (formaPagamento || orcamento.forma_pagamento_selecionada || '').trim();
+    const fpTarget = (formaPagamento || orcamento.forma_pagamento_selecionada || '').trim().toLowerCase();
     let matchedCond = null;
-    if (fpTarget && allConds.length > 0) {
-      matchedCond = allConds.find(c => {
-        const descCompleta = `${c.formaNome} - ${c.descricao || c.meio_pagamento || ''}`.trim().toLowerCase();
-        const fpLower = fpTarget.toLowerCase();
+    if (fpTarget && condicoesArray.length > 0) {
+      matchedCond = condicoesArray.find(c => {
+        const descCompleta = `${formaSelecionada.nome} - ${c.descricao || c.meio_pagamento || ''}`.trim().toLowerCase();
         const descLower = (c.descricao || '').toLowerCase();
-        return descCompleta === fpLower || descLower === fpLower || fpLower.includes(descLower);
+        return descCompleta === fpTarget || descLower === fpTarget || fpTarget.includes(descLower);
       });
     }
 
     if (!matchedCond && condicoesArray.length > 0) {
-      const condRec = condicoesArray.find(c => c.isRecomendada);
-      matchedCond = condRec || condicoesArray[0];
+      matchedCond = condicoesArray[0];
     }
 
     if (matchedCond) {
       setCondicaoSelecionada(matchedCond);
-      if (!formaPagamento) {
-        const desc = `${matchedCond.formaNome} - ${matchedCond.descricao || matchedCond.meio_pagamento || ''}`.trim();
-        setFormaPagamento(desc);
-      }
+      const desc = `${formaSelecionada.nome} - ${matchedCond.descricao || matchedCond.meio_pagamento || ''}`.trim();
+      setFormaPagamento(desc);
+
       if (!orcamento.fluxo_financeiro || fluxoFinanceiro.length === 0) {
         const generated = calcularFluxoDefault(matchedCond, finalVlr, dtEntrInit);
         setFluxoFinanceiro(generated);
       }
     }
-  }, [formasPagamento.length, orcamento?.numero]);
+  }, [formasPagamento.length, formaSelecionada?.id, orcamento?.numero]);
 
   // Manipulador ao clicar numa condição de pagamento da tabela (define a forma e gera o fluxo financeiro)
-  const handleSelecionarCondicao = (cond, formaNome) => {
-    const fNome = formaNome || cond.formaNome || '';
-    const descCompleta = fNome ? `${fNome} - ${cond.descricao || cond.meio_pagamento || ''}`.trim() : (cond.descricao || cond.meio_pagamento || '').trim();
+  const handleSelecionarCondicao = (cond) => {
+    const formaNome = formaSelecionada?.nome || '';
+    const descCompleta = formaNome ? `${formaNome} - ${cond.descricao || cond.meio_pagamento || ''}`.trim() : (cond.descricao || cond.meio_pagamento || '').trim();
     setFormaPagamento(descCompleta);
     setCondicaoSelecionada(cond);
     const novoFluxo = calcularFluxoDefault(cond, currentPrecoFinal, dataEntrada);
@@ -16518,82 +16542,64 @@ function ModalConclusaoProposta({ isOpen, onClose, orcamento, projetos = [], par
                     {activeTabConclusao === 'formas' ? (
                       /* TAB 1 CONTENT: FORMAS & CONDIÇÕES */
                       <>
-                        {/* Barra de Filtro de Formas de Pagamento */}
+                        {/* Card com a Forma de Pagamento Enquadrada */}
                         <div style={{
                           display: 'flex',
                           alignItems: 'center',
                           justifyContent: 'space-between',
                           flexWrap: 'wrap',
-                          gap: '8px',
-                          padding: '8px 12px',
-                          background: 'rgba(255, 255, 255, 0.02)',
+                          gap: '10px',
+                          padding: '10px 14px',
+                          background: 'rgba(6, 182, 212, 0.08)',
                           borderRadius: '6px',
-                          border: '1px solid var(--glass-border)'
+                          border: '1px solid rgba(6, 182, 212, 0.25)'
                         }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1, minWidth: '260px' }}>
-                            <Filter size={14} style={{ color: 'var(--accent-cyan)' }} />
-                            <span style={{ fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-muted)' }}>Forma de Pagamento:</span>
-                            <select
-                              value={selectedFormaId}
-                              onChange={(e) => setSelectedFormaId(e.target.value)}
-                              style={{
-                                padding: '5px 10px',
-                                fontSize: '0.78rem',
-                                borderRadius: '5px',
-                                background: 'var(--bg-card)',
-                                border: '1px solid var(--glass-border)',
-                                color: 'var(--text-main)',
-                                cursor: 'pointer',
-                                flex: 1,
-                                maxWidth: '360px'
-                              }}
-                            >
-                              <option value="all">Todas as Formas ({activeFormas.reduce((acc, f) => acc + (f.condicoes?.length || 0), 0)} opções)</option>
-                              {activeFormas.map(f => (
-                                <option key={f.id} value={f.id}>
-                                  {f.nome} ({(f.condicoes || []).length} {f.condicoes?.length === 1 ? 'opção' : 'opções'})
-                                  {formaRecomendada && f.id === formaRecomendada.id ? ' ★ Sugerida' : ''}
-                                </option>
-                              ))}
-                            </select>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                            <CreditCard size={18} style={{ color: 'var(--accent-cyan)' }} />
+                            <div>
+                              <div style={{ fontSize: '0.85rem', fontWeight: 700, color: 'var(--text-main)', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <span>Forma de Pagamento:</span>
+                                <span style={{ color: 'var(--accent-cyan)' }}>{formaSelecionada ? formaSelecionada.nome : 'Nenhuma forma enquadrada'}</span>
+                                {formaSelecionada && (
+                                  <span style={{
+                                    fontSize: '0.64rem',
+                                    background: 'rgba(16, 185, 129, 0.15)',
+                                    color: '#34D399',
+                                    border: '1px solid rgba(16, 185, 129, 0.3)',
+                                    padding: '1px 6px',
+                                    borderRadius: '3px',
+                                    fontWeight: 700
+                                  }}>
+                                    Enquadrada para a Proposta
+                                  </span>
+                                )}
+                              </div>
+                              {formaSelecionada && (
+                                <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '2px' }}>
+                                  {parseFloat(formaSelecionada.valor_minimo) > 0 || parseFloat(formaSelecionada.valor_maximo) > 0 ? (
+                                    <span>
+                                      Faixa: R$ {formatDecimalPtBr(formaSelecionada.valor_minimo)} até {parseFloat(formaSelecionada.valor_maximo) > 0 ? `R$ ${formatDecimalPtBr(formaSelecionada.valor_maximo)}` : 'ilimitado'}
+                                      {' • '}Valor da Proposta: <strong style={{ color: 'var(--text-main)' }}>R$ {formatDecimalPtBr(valorProposta)}</strong>
+                                    </span>
+                                  ) : (
+                                    <span>Válida para qualquer valor de proposta • Valor da Proposta: <strong style={{ color: 'var(--text-main)' }}>R$ {formatDecimalPtBr(valorProposta)}</strong></span>
+                                  )}
+                                  {formaSelecionada.descricao ? ` • ${formaSelecionada.descricao}` : ''}
+                                </div>
+                              )}
+                            </div>
                           </div>
 
-                          {formaRecomendada && (
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.72rem', color: 'var(--text-muted)' }}>
-                              <span>Sugerida p/ valor:</span>
-                              <button
-                                type="button"
-                                onClick={() => setSelectedFormaId(String(formaRecomendada.id))}
-                                style={{
-                                  border: '1px solid rgba(6, 182, 212, 0.4)',
-                                  background: selectedFormaId === String(formaRecomendada.id) ? 'rgba(6, 182, 212, 0.25)' : 'rgba(6, 182, 212, 0.1)',
-                                  color: 'var(--accent-cyan)',
-                                  padding: '2px 8px',
-                                  borderRadius: '12px',
-                                  cursor: 'pointer',
-                                  fontWeight: 600,
-                                  fontSize: '0.72rem'
-                                }}
-                                title="Clique para filtrar apenas esta forma"
-                              >
-                                ★ {formaRecomendada.nome}
-                              </button>
-                              {selectedFormaId !== 'all' && (
-                                <button
-                                  type="button"
-                                  onClick={() => setSelectedFormaId('all')}
-                                  style={{
-                                    border: 'none',
-                                    background: 'transparent',
-                                    color: 'var(--text-muted)',
-                                    cursor: 'pointer',
-                                    fontSize: '0.72rem',
-                                    textDecoration: 'underline'
-                                  }}
-                                >
-                                  Ver todas
-                                </button>
-                              )}
+                          {formaSelecionada && (
+                            <div style={{
+                              fontSize: '0.72rem',
+                              color: 'var(--accent-cyan)',
+                              background: 'rgba(6, 182, 212, 0.15)',
+                              padding: '3px 8px',
+                              borderRadius: '4px',
+                              fontWeight: 600
+                            }}>
+                              {condicoesArray.length} {condicoesArray.length === 1 ? 'condição disponível' : 'condições disponíveis'}
                             </div>
                           )}
                         </div>
@@ -16604,19 +16610,20 @@ function ModalConclusaoProposta({ isOpen, onClose, orcamento, projetos = [], par
                               <thead>
                                 <tr style={{ background: 'rgba(255, 255, 255, 0.02)', borderBottom: '1px solid var(--glass-border)', color: 'var(--text-muted)' }}>
                                   <th style={{ padding: '7px 8px', width: '38px', textAlign: 'center' }}>Sel.</th>
-                                  <th style={{ padding: '7px 10px', textAlign: 'left', width: '160px' }}>Forma</th>
                                   <th style={{ padding: '7px 10px', textAlign: 'left' }}>Condição / Detalhes</th>
-                                  <th style={{ padding: '7px 10px', textAlign: 'center', width: '70px' }}>Desc.</th>
-                                  <th style={{ padding: '7px 10px', textAlign: 'right', width: '95px' }}>Entrada</th>
+                                  <th style={{ padding: '7px 10px', textAlign: 'center', width: '75px' }}>Desc.</th>
+                                  <th style={{ padding: '7px 10px', textAlign: 'right', width: '100px' }}>Entrada</th>
                                   <th style={{ padding: '7px 10px', textAlign: 'right', width: '140px' }}>Saldo / Parcelamento</th>
-                                  <th style={{ padding: '7px 10px', textAlign: 'right', width: '105px' }}>Total</th>
+                                  <th style={{ padding: '7px 10px', textAlign: 'right', width: '110px' }}>Total</th>
                                 </tr>
                               </thead>
                               <tbody>
                                 {condicoesArray.length === 0 ? (
                                   <tr>
-                                    <td colSpan="7" style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '16px' }}>
-                                      Nenhuma condição de pagamento cadastrada ou ativa para esta seleção.
+                                    <td colSpan="6" style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '16px' }}>
+                                      {formaSelecionada 
+                                        ? `Nenhuma condição de pagamento cadastrada para a forma "${formaSelecionada.nome}".`
+                                        : 'Nenhuma forma de pagamento enquadrada para o valor desta proposta.'}
                                     </td>
                                   </tr>
                                 ) : (
@@ -16648,18 +16655,15 @@ function ModalConclusaoProposta({ isOpen, onClose, orcamento, projetos = [], par
                                       detalheTexto = `Sem entrada + ${numParcelas}x de R$ ${formatDecimalPtBr(valorParcela)}${meio ? ` no ${meio}` : ''}`;
                                     }
 
-                                    const descCompleta = `${c.formaNome || ''} - ${c.descricao || c.meio_pagamento || ''}`.trim();
+                                    const descCompleta = `${formaSelecionada?.nome || ''} - ${c.descricao || c.meio_pagamento || ''}`.trim();
                                     const isSelected = formaPagamento === descCompleta || 
                                       formaPagamento === c.descricao ||
-                                      (condicaoSelecionada && (
-                                        (condicaoSelecionada.id === c.id && (!condicaoSelecionada.formaId || condicaoSelecionada.formaId === c.formaId)) ||
-                                        (condicaoSelecionada.descricao === c.descricao && condicaoSelecionada.formaNome === c.formaNome)
-                                      ));
+                                      (condicaoSelecionada && (condicaoSelecionada.id === c.id || condicaoSelecionada.descricao === c.descricao));
 
                                     return (
                                       <tr 
-                                        key={`${c.formaId}-${c.id}`}
-                                        onClick={() => handleSelecionarCondicao(c, c.formaNome || '')}
+                                        key={c.id}
+                                        onClick={() => handleSelecionarCondicao(c)}
                                         style={{ 
                                           cursor: 'pointer',
                                           borderBottom: '1px solid rgba(255, 255, 255, 0.04)',
@@ -16672,7 +16676,7 @@ function ModalConclusaoProposta({ isOpen, onClose, orcamento, projetos = [], par
                                             type="radio" 
                                             name="formaPagamentoRadio" 
                                             checked={isSelected}
-                                            onChange={() => handleSelecionarCondicao(c, c.formaNome || '')}
+                                            onChange={() => handleSelecionarCondicao(c)}
                                             style={{ 
                                               cursor: 'pointer',
                                               accentColor: 'var(--accent-cyan)',
@@ -16683,24 +16687,6 @@ function ModalConclusaoProposta({ isOpen, onClose, orcamento, projetos = [], par
                                               verticalAlign: 'middle'
                                             }}
                                           />
-                                        </td>
-                                        <td style={{ padding: '7px 10px', verticalAlign: 'middle' }}>
-                                          <div style={{ fontWeight: 600, color: 'var(--accent-cyan)', display: 'flex', alignItems: 'center', gap: '4px', flexWrap: 'wrap' }}>
-                                            <span>{c.formaNome || 'Geral'}</span>
-                                            {c.isRecomendada && (
-                                              <span style={{
-                                                fontSize: '0.62rem',
-                                                background: 'rgba(234, 179, 8, 0.15)',
-                                                color: '#FACC15',
-                                                border: '1px solid rgba(234, 179, 8, 0.3)',
-                                                padding: '0 4px',
-                                                borderRadius: '3px',
-                                                fontWeight: 700
-                                              }}>
-                                                Sugerida
-                                              </span>
-                                            )}
-                                          </div>
                                         </td>
                                         <td style={{ padding: '7px 10px', verticalAlign: 'middle' }}>
                                           <div style={{ fontWeight: isSelected ? 700 : 600, color: isSelected ? 'var(--accent-cyan)' : 'var(--text-main)' }}>

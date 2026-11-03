@@ -6577,19 +6577,19 @@ app.get('/api/configuracoes/financeiro', authenticateToken, async (req, res) => 
 app.get('/api/formas-pagamento', authenticateToken, async (req, res) => {
   const empresaId = req.auth.empresaId;
   try {
-    let formas = await db.all('SELECT * FROM formas_pagamento WHERE empresa_id = ? ORDER BY ordem ASC, id ASC', [empresaId]);
+    let formas = await db.all('SELECT * FROM formas_pagamento WHERE empresa_id = ? AND (ativo IS NULL OR ativo != ?) ORDER BY ordem ASC, id ASC', [empresaId, 'Nao']);
     let condicoes = await db.all('SELECT * FROM condicoes_pagamento WHERE empresa_id = ? ORDER BY ordem ASC, id ASC', [empresaId]);
 
     // Se a empresa ainda não tiver formas de pagamento cadastradas, garante as formas padrão
     if (!formas || formas.length === 0) {
       await seedCompanyDefaults(db, empresaId);
-      formas = await db.all('SELECT * FROM formas_pagamento WHERE empresa_id = ? ORDER BY ordem ASC, id ASC', [empresaId]);
+      formas = await db.all('SELECT * FROM formas_pagamento WHERE empresa_id = ? AND (ativo IS NULL OR ativo != ?) ORDER BY ordem ASC, id ASC', [empresaId, 'Nao']);
       condicoes = await db.all('SELECT * FROM condicoes_pagamento WHERE empresa_id = ? ORDER BY ordem ASC, id ASC', [empresaId]);
     }
 
     const result = formas.map(f => ({
       ...f,
-      condicoes: condicoes.filter(c => c.forma_pagamento_id === f.id)
+      condicoes: condicoes.filter(c => String(c.forma_pagamento_id) === String(f.id))
     }));
 
     res.json(result);
