@@ -16381,20 +16381,64 @@ function ModalConclusaoProposta({ isOpen, onClose, orcamento, projetos = [], par
 
                     {/* Status do Piso de Alerta */}
                     {isAbaixoDoPiso ? (
-                      <div style={{ background: 'rgba(239, 68, 68, 0.12)', border: '1px solid #EF4444', borderRadius: '4px', padding: '4px 6px', display: 'flex', gap: '6px', alignItems: 'center', marginTop: 'auto' }}>
+                      <div style={{ background: 'rgba(239, 68, 68, 0.12)', border: '1px solid #EF4444', borderRadius: '4px', padding: '4px 6px', display: 'flex', gap: '6px', alignItems: 'center' }}>
                         <AlertTriangle size={13} style={{ color: '#EF4444', flexShrink: 0 }} />
                         <div style={{ fontSize: '0.68rem', color: '#FCA5A5', lineHeight: '1.2' }}>
                           <strong>Piso Ultrapassado!</strong> Margem ({currentMargemLiquidaPerc.toFixed(1)}%) &lt; Piso ({pisoAlertaPerc.toFixed(1)}%).
                         </div>
                       </div>
                     ) : (
-                      <div style={{ background: 'rgba(16, 185, 129, 0.08)', border: '1px solid rgba(16, 185, 129, 0.3)', borderRadius: '4px', padding: '3px 6px', display: 'flex', gap: '4px', alignItems: 'center', marginTop: 'auto' }}>
+                      <div style={{ background: 'rgba(16, 185, 129, 0.08)', border: '1px solid rgba(16, 185, 129, 0.3)', borderRadius: '4px', padding: '3px 6px', display: 'flex', gap: '4px', alignItems: 'center' }}>
                         <CheckCircle2 size={13} style={{ color: 'var(--color-success)', flexShrink: 0 }} />
                         <span style={{ fontSize: '0.68rem', color: '#6EE7B7' }}>
                           Margem OK: <strong>{currentMargemLiquidaPerc.toFixed(1)}%</strong> (Piso: {pisoAlertaPerc.toFixed(1)}%).
                         </span>
                       </div>
                     )}
+
+                    {/* PARTE INFERIOR: Anotação do Fechamento e Situação */}
+                    <div style={{ 
+                      borderTop: '1px solid var(--glass-border)', 
+                      paddingTop: '6px', 
+                      marginTop: '4px',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '4px'
+                    }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                          <Edit2 size={12} style={{ color: 'var(--accent-cyan)' }} />
+                          <span style={{ fontSize: '0.7rem', fontWeight: 700, color: 'var(--accent-cyan)', textTransform: 'uppercase' }}>
+                            Anotação do Fechamento
+                          </span>
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+                          <label style={{ fontSize: '0.68rem', color: 'var(--text-muted)', fontWeight: 600, margin: 0 }}>
+                            Situação:
+                          </label>
+                          <select 
+                            value={situacao} 
+                            onChange={(e) => setSituacao(e.target.value)}
+                            className="form-control"
+                            style={{ fontSize: '0.74rem', fontWeight: 600, padding: '1px 5px', height: '24px', minWidth: '130px' }}
+                          >
+                            <option value="Em Aberto">Em Aberto</option>
+                            <option value="Em Negociação">Em Negociação</option>
+                            <option value="Aprovado">Aprovado (Fechado)</option>
+                            <option value="Recusado">Recusado</option>
+                            <option value="Cancelado">Cancelado</option>
+                          </select>
+                        </div>
+                      </div>
+                      <textarea 
+                        rows={2}
+                        value={anotacoesConclusao}
+                        onChange={(e) => setAnotacoesConclusao(e.target.value)}
+                        placeholder="Ex: Negociado desconto especial para pagamento à vista com entrega prevista em 30 dias..."
+                        className="form-control"
+                        style={{ fontSize: '0.76rem', resize: 'vertical', minHeight: '44px' }}
+                      />
+                    </div>
                   </div>
 
                   {/* Caixa 2: Indicadores de Rentabilidade (DRE) */}
@@ -16430,6 +16474,26 @@ function ModalConclusaoProposta({ isOpen, onClose, orcamento, projetos = [], par
                         {currentMargemLiquidaPerc.toFixed(1)}%
                       </span>
                     </div>
+
+                    {orcamento.anotacoes_cliente && (
+                      <div style={{ 
+                        marginTop: 'auto',
+                        background: 'rgba(139, 92, 246, 0.05)', 
+                        border: '1px solid rgba(139, 92, 246, 0.25)', 
+                        borderRadius: '6px', 
+                        padding: '6px 10px' 
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '4px', marginBottom: '2px' }}>
+                          <FileText size={12} style={{ color: '#C084FC' }} />
+                          <span style={{ fontSize: '0.7rem', fontWeight: 700, color: '#C084FC', textTransform: 'uppercase' }}>
+                            Anotações do Cliente
+                          </span>
+                        </div>
+                        <div style={{ fontSize: '0.75rem', color: 'var(--text-main)', fontStyle: 'italic', whiteSpace: 'pre-wrap', maxHeight: '55px', overflowY: 'auto' }}>
+                          {orcamento.anotacoes_cliente}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
 
@@ -16474,7 +16538,7 @@ function ModalConclusaoProposta({ isOpen, onClose, orcamento, projetos = [], par
                         }}
                       >
                         <CreditCard size={15} />
-                        <span>Forma de pagamento</span>
+                        <span>Forma de pagamento{formaSelecionada ? `: ${formaSelecionada.nome}` : ''}</span>
                       </button>
 
                       {/* Tab 2: Fluxo financeiro */}
@@ -16540,199 +16604,135 @@ function ModalConclusaoProposta({ isOpen, onClose, orcamento, projetos = [], par
                   {/* Tab Body */}
                   <div style={{ padding: '12px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
                     {activeTabConclusao === 'formas' ? (
-                      /* TAB 1 CONTENT: FORMAS & CONDIÇÕES */
-                      <>
-                        {/* Card com a Forma de Pagamento Enquadrada */}
-                        <div style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'space-between',
-                          flexWrap: 'wrap',
-                          gap: '10px',
-                          padding: '10px 14px',
-                          background: 'rgba(6, 182, 212, 0.08)',
-                          borderRadius: '6px',
-                          border: '1px solid rgba(6, 182, 212, 0.25)'
-                        }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                            <CreditCard size={18} style={{ color: 'var(--accent-cyan)' }} />
-                            <div>
-                              <div style={{ fontSize: '0.85rem', fontWeight: 700, color: 'var(--text-main)', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                <span>Forma de Pagamento:</span>
-                                <span style={{ color: 'var(--accent-cyan)' }}>{formaSelecionada ? formaSelecionada.nome : 'Nenhuma forma enquadrada'}</span>
-                                {formaSelecionada && (
-                                  <span style={{
-                                    fontSize: '0.64rem',
-                                    background: 'rgba(16, 185, 129, 0.15)',
-                                    color: '#34D399',
-                                    border: '1px solid rgba(16, 185, 129, 0.3)',
-                                    padding: '1px 6px',
-                                    borderRadius: '3px',
-                                    fontWeight: 700
-                                  }}>
-                                    Enquadrada para a Proposta
-                                  </span>
-                                )}
-                              </div>
-                              {formaSelecionada && (
-                                <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '2px' }}>
-                                  {parseFloat(formaSelecionada.valor_minimo) > 0 || parseFloat(formaSelecionada.valor_maximo) > 0 ? (
-                                    <span>
-                                      Faixa: R$ {formatDecimalPtBr(formaSelecionada.valor_minimo)} até {parseFloat(formaSelecionada.valor_maximo) > 0 ? `R$ ${formatDecimalPtBr(formaSelecionada.valor_maximo)}` : 'ilimitado'}
-                                      {' • '}Valor da Proposta: <strong style={{ color: 'var(--text-main)' }}>R$ {formatDecimalPtBr(valorProposta)}</strong>
-                                    </span>
-                                  ) : (
-                                    <span>Válida para qualquer valor de proposta • Valor da Proposta: <strong style={{ color: 'var(--text-main)' }}>R$ {formatDecimalPtBr(valorProposta)}</strong></span>
-                                  )}
-                                  {formaSelecionada.descricao ? ` • ${formaSelecionada.descricao}` : ''}
-                                </div>
-                              )}
-                            </div>
-                          </div>
-
-                          {formaSelecionada && (
-                            <div style={{
-                              fontSize: '0.72rem',
-                              color: 'var(--accent-cyan)',
-                              background: 'rgba(6, 182, 212, 0.15)',
-                              padding: '3px 8px',
-                              borderRadius: '4px',
-                              fontWeight: 600
-                            }}>
-                              {condicoesArray.length} {condicoesArray.length === 1 ? 'condição disponível' : 'condições disponíveis'}
-                            </div>
-                          )}
-                        </div>
-
-                        <div style={{ border: '1px solid var(--glass-border)', borderRadius: '6px', overflow: 'hidden', background: 'rgba(0, 0, 0, 0.15)' }}>
-                          <div style={{ maxHeight: '220px', overflowY: 'auto' }}>
-                            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.76rem' }}>
-                              <thead>
-                                <tr style={{ background: 'rgba(255, 255, 255, 0.02)', borderBottom: '1px solid var(--glass-border)', color: 'var(--text-muted)' }}>
-                                  <th style={{ padding: '7px 8px', width: '38px', textAlign: 'center' }}>Sel.</th>
-                                  <th style={{ padding: '7px 10px', textAlign: 'left' }}>Condição / Detalhes</th>
-                                  <th style={{ padding: '7px 10px', textAlign: 'center', width: '75px' }}>Desc.</th>
-                                  <th style={{ padding: '7px 10px', textAlign: 'right', width: '100px' }}>Entrada</th>
-                                  <th style={{ padding: '7px 10px', textAlign: 'right', width: '140px' }}>Saldo / Parcelamento</th>
-                                  <th style={{ padding: '7px 10px', textAlign: 'right', width: '110px' }}>Total</th>
+                      /* TAB 1 CONTENT: APENAS AS CONDIÇÕES PARA O USUÁRIO ESCOLHER */
+                      <div style={{ border: '1px solid var(--glass-border)', borderRadius: '6px', overflow: 'hidden', background: 'rgba(0, 0, 0, 0.15)' }}>
+                        <div style={{ maxHeight: '340px', overflowY: 'auto' }}>
+                          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.76rem' }}>
+                            <thead>
+                              <tr style={{ background: 'rgba(255, 255, 255, 0.02)', borderBottom: '1px solid var(--glass-border)', color: 'var(--text-muted)' }}>
+                                <th style={{ padding: '8px 8px', width: '38px', textAlign: 'center' }}>Sel.</th>
+                                <th style={{ padding: '8px 10px', textAlign: 'left' }}>Condição / Detalhes</th>
+                                <th style={{ padding: '8px 10px', textAlign: 'center', width: '75px' }}>Desc.</th>
+                                <th style={{ padding: '8px 10px', textAlign: 'right', width: '100px' }}>Entrada</th>
+                                <th style={{ padding: '8px 10px', textAlign: 'right', width: '140px' }}>Saldo / Parcelamento</th>
+                                <th style={{ padding: '8px 10px', textAlign: 'right', width: '110px' }}>Total</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {condicoesArray.length === 0 ? (
+                                <tr>
+                                  <td colSpan="6" style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '24px' }}>
+                                    {formaSelecionada 
+                                      ? `Nenhuma condição de pagamento cadastrada para a forma "${formaSelecionada.nome}".`
+                                      : 'Nenhuma forma de pagamento enquadrada para o valor desta proposta.'}
+                                  </td>
                                 </tr>
-                              </thead>
-                              <tbody>
-                                {condicoesArray.length === 0 ? (
-                                  <tr>
-                                    <td colSpan="6" style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '16px' }}>
-                                      {formaSelecionada 
-                                        ? `Nenhuma condição de pagamento cadastrada para a forma "${formaSelecionada.nome}".`
-                                        : 'Nenhuma forma de pagamento enquadrada para o valor desta proposta.'}
-                                    </td>
-                                  </tr>
-                                ) : (
-                                  condicoesArray.map((c) => {
-                                    const percDesc = parseFloat(c.perc_desconto) || 0;
-                                    const baseCalculo = currentPrecoFinal > 0 ? currentPrecoFinal : precoBaseOriginal;
-                                    const valorFinalComDesconto = baseCalculo;
-                                    const percEntrada = parseFloat(c.perc_entrada) || 0;
-                                    const valorEntrada = valorFinalComDesconto * (percEntrada / 100);
-                                    const valorSaldo = valorFinalComDesconto - valorEntrada;
-                                    const numParcelas = parseInt(c.num_parcelas, 10) || 0;
-                                    const valorParcela = numParcelas > 0 ? (valorSaldo / numParcelas) : 0;
-                                    const meio = (c.meio_pagamento || '').trim();
+                              ) : (
+                                condicoesArray.map((c) => {
+                                  const percDesc = parseFloat(c.perc_desconto) || 0;
+                                  const baseCalculo = currentPrecoFinal > 0 ? currentPrecoFinal : precoBaseOriginal;
+                                  const valorFinalComDesconto = baseCalculo;
+                                  const percEntrada = parseFloat(c.perc_entrada) || 0;
+                                  const valorEntrada = valorFinalComDesconto * (percEntrada / 100);
+                                  const valorSaldo = valorFinalComDesconto - valorEntrada;
+                                  const numParcelas = parseInt(c.num_parcelas, 10) || 0;
+                                  const valorParcela = numParcelas > 0 ? (valorSaldo / numParcelas) : 0;
+                                  const meio = (c.meio_pagamento || '').trim();
 
-                                    let detalheTexto = '';
-                                    if (percEntrada >= 100) {
-                                      detalheTexto = percDesc > 0
-                                        ? `Pagamento integral com ${percDesc}% de desconto`
-                                        : `Pagamento integral à vista (R$ ${formatDecimalPtBr(valorFinalComDesconto)})`;
-                                    } else if (percEntrada > 0) {
-                                      if (numParcelas === 1) {
-                                        detalheTexto = `Entrada de R$ ${formatDecimalPtBr(valorEntrada)} (${percEntrada}%) + Saldo de R$ ${formatDecimalPtBr(valorSaldo)} na entrega`;
-                                      } else if (numParcelas > 1) {
-                                        detalheTexto = `Entrada de R$ ${formatDecimalPtBr(valorEntrada)} (${percEntrada}%) + ${numParcelas}x de R$ ${formatDecimalPtBr(valorParcela)}${meio ? ` no ${meio}` : ''}`;
-                                      } else {
-                                        detalheTexto = `Entrada de R$ ${formatDecimalPtBr(valorEntrada)} (${percEntrada}%)`;
-                                      }
-                                    } else if (numParcelas > 0) {
-                                      detalheTexto = `Sem entrada + ${numParcelas}x de R$ ${formatDecimalPtBr(valorParcela)}${meio ? ` no ${meio}` : ''}`;
+                                  let detalheTexto = '';
+                                  if (percEntrada >= 100) {
+                                    detalheTexto = percDesc > 0
+                                      ? `Pagamento integral com ${percDesc}% de desconto`
+                                      : `Pagamento integral à vista (R$ ${formatDecimalPtBr(valorFinalComDesconto)})`;
+                                  } else if (percEntrada > 0) {
+                                    if (numParcelas === 1) {
+                                      detalheTexto = `Entrada de R$ ${formatDecimalPtBr(valorEntrada)} (${percEntrada}%) + Saldo de R$ ${formatDecimalPtBr(valorSaldo)} na entrega`;
+                                    } else if (numParcelas > 1) {
+                                      detalheTexto = `Entrada de R$ ${formatDecimalPtBr(valorEntrada)} (${percEntrada}%) + ${numParcelas}x de R$ ${formatDecimalPtBr(valorParcela)}${meio ? ` no ${meio}` : ''}`;
+                                    } else {
+                                      detalheTexto = `Entrada de R$ ${formatDecimalPtBr(valorEntrada)} (${percEntrada}%)`;
                                     }
+                                  } else if (numParcelas > 0) {
+                                    detalheTexto = `Sem entrada + ${numParcelas}x de R$ ${formatDecimalPtBr(valorParcela)}${meio ? ` no ${meio}` : ''}`;
+                                  }
 
-                                    const descCompleta = `${formaSelecionada?.nome || ''} - ${c.descricao || c.meio_pagamento || ''}`.trim();
-                                    const isSelected = formaPagamento === descCompleta || 
-                                      formaPagamento === c.descricao ||
-                                      (condicaoSelecionada && (condicaoSelecionada.id === c.id || condicaoSelecionada.descricao === c.descricao));
+                                  const descCompleta = `${formaSelecionada?.nome || ''} - ${c.descricao || c.meio_pagamento || ''}`.trim();
+                                  const isSelected = formaPagamento === descCompleta || 
+                                    formaPagamento === c.descricao ||
+                                    (condicaoSelecionada && (condicaoSelecionada.id === c.id || condicaoSelecionada.descricao === c.descricao));
 
-                                    return (
-                                      <tr 
-                                        key={c.id}
-                                        onClick={() => handleSelecionarCondicao(c)}
-                                        style={{ 
-                                          cursor: 'pointer',
-                                          borderBottom: '1px solid rgba(255, 255, 255, 0.04)',
-                                          background: isSelected ? 'rgba(6, 182, 212, 0.14)' : 'transparent',
-                                          transition: 'background 0.15s ease'
-                                        }}
-                                      >
-                                        <td style={{ padding: '7px 8px', textAlign: 'center', verticalAlign: 'middle' }}>
-                                          <input 
-                                            type="radio" 
-                                            name="formaPagamentoRadio" 
-                                            checked={isSelected}
-                                            onChange={() => handleSelecionarCondicao(c)}
-                                            style={{ 
-                                              cursor: 'pointer',
-                                              accentColor: 'var(--accent-cyan)',
-                                              width: '16px',
-                                              height: '16px',
-                                              margin: 0,
-                                              display: 'inline-block',
-                                              verticalAlign: 'middle'
-                                            }}
-                                          />
-                                        </td>
-                                        <td style={{ padding: '7px 10px', verticalAlign: 'middle' }}>
-                                          <div style={{ fontWeight: isSelected ? 700 : 600, color: isSelected ? 'var(--accent-cyan)' : 'var(--text-main)' }}>
-                                            {c.descricao || 'Opção'}
-                                          </div>
-                                          <div style={{ fontSize: '0.69rem', color: 'var(--text-muted)', marginTop: '2px' }}>
-                                            {detalheTexto}
-                                          </div>
-                                        </td>
-                                        <td style={{ padding: '7px 10px', textAlign: 'center', verticalAlign: 'middle' }}>
-                                          {percDesc > 0 ? (
-                                            <span style={{ background: 'rgba(16, 185, 129, 0.15)', color: '#34D399', fontWeight: 700, fontSize: '0.72rem', padding: '1px 5px', borderRadius: '3px' }}>
-                                              {percDesc}%
-                                            </span>
-                                          ) : (
-                                            <span style={{ color: 'var(--text-muted)' }}>-</span>
-                                          )}
-                                        </td>
-                                        <td style={{ padding: '7px 10px', textAlign: 'right', verticalAlign: 'middle' }}>
-                                          <div style={{ fontWeight: 600 }}>R$ {formatDecimalPtBr(valorEntrada)}</div>
-                                          <div style={{ fontSize: '0.67rem', color: 'var(--text-muted)' }}>{percEntrada}%</div>
-                                        </td>
-                                        <td style={{ padding: '7px 10px', textAlign: 'right', verticalAlign: 'middle' }}>
-                                          {numParcelas > 0 ? (
-                                            <div>
-                                              <div style={{ fontWeight: 600, color: 'var(--accent-cyan)' }}>
-                                                {numParcelas === 1 ? '1x ' : `${numParcelas}x `}R$ {formatDecimalPtBr(valorParcela)}
-                                              </div>
-                                              {meio && <div style={{ fontSize: '0.67rem', color: 'var(--text-muted)' }}>{meio}</div>}
+                                  return (
+                                    <tr 
+                                      key={c.id}
+                                      onClick={() => handleSelecionarCondicao(c)}
+                                      style={{ 
+                                        cursor: 'pointer',
+                                        borderBottom: '1px solid rgba(255, 255, 255, 0.04)',
+                                        background: isSelected ? 'rgba(6, 182, 212, 0.14)' : 'transparent',
+                                        transition: 'background 0.15s ease'
+                                      }}
+                                    >
+                                      <td style={{ padding: '8px 8px', textAlign: 'center', verticalAlign: 'middle' }}>
+                                        <input 
+                                          type="radio" 
+                                          name="formaPagamentoRadio" 
+                                          checked={isSelected}
+                                          onChange={() => handleSelecionarCondicao(c)}
+                                          style={{ 
+                                            cursor: 'pointer',
+                                            accentColor: 'var(--accent-cyan)',
+                                            width: '16px',
+                                            height: '16px',
+                                            margin: 0,
+                                            display: 'inline-block',
+                                            verticalAlign: 'middle'
+                                          }}
+                                        />
+                                      </td>
+                                      <td style={{ padding: '8px 10px', verticalAlign: 'middle' }}>
+                                        <div style={{ fontWeight: isSelected ? 700 : 600, color: isSelected ? 'var(--accent-cyan)' : 'var(--text-main)', fontSize: '0.8rem' }}>
+                                          {c.descricao || 'Opção'}
+                                        </div>
+                                        <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '2px' }}>
+                                          {detalheTexto}
+                                        </div>
+                                      </td>
+                                      <td style={{ padding: '8px 10px', textAlign: 'center', verticalAlign: 'middle' }}>
+                                        {percDesc > 0 ? (
+                                          <span style={{ background: 'rgba(16, 185, 129, 0.15)', color: '#34D399', fontWeight: 700, fontSize: '0.74rem', padding: '1px 6px', borderRadius: '3px' }}>
+                                            {percDesc}%
+                                          </span>
+                                        ) : (
+                                          <span style={{ color: 'var(--text-muted)' }}>-</span>
+                                        )}
+                                      </td>
+                                      <td style={{ padding: '8px 10px', textAlign: 'right', verticalAlign: 'middle' }}>
+                                        <div style={{ fontWeight: 600 }}>R$ {formatDecimalPtBr(valorEntrada)}</div>
+                                        <div style={{ fontSize: '0.68rem', color: 'var(--text-muted)' }}>{percEntrada}%</div>
+                                      </td>
+                                      <td style={{ padding: '8px 10px', textAlign: 'right', verticalAlign: 'middle' }}>
+                                        {numParcelas > 0 ? (
+                                          <div>
+                                            <div style={{ fontWeight: 600, color: 'var(--accent-cyan)' }}>
+                                              {numParcelas === 1 ? '1x ' : `${numParcelas}x `}R$ {formatDecimalPtBr(valorParcela)}
                                             </div>
-                                          ) : (
-                                            <span style={{ color: 'var(--text-muted)' }}>-</span>
-                                          )}
-                                        </td>
-                                        <td style={{ padding: '7px 10px', textAlign: 'right', verticalAlign: 'middle', fontWeight: 800, color: 'var(--text-main)' }}>
-                                          R$ {formatDecimalPtBr(valorFinalComDesconto)}
-                                        </td>
-                                      </tr>
-                                    );
-                                  })
-                                )}
-                              </tbody>
-                            </table>
-                          </div>
+                                            {meio && <div style={{ fontSize: '0.68rem', color: 'var(--text-muted)' }}>{meio}</div>}
+                                          </div>
+                                        ) : (
+                                          <span style={{ color: 'var(--text-muted)' }}>-</span>
+                                        )}
+                                      </td>
+                                      <td style={{ padding: '8px 10px', textAlign: 'right', verticalAlign: 'middle', fontWeight: 800, color: 'var(--text-main)', fontSize: '0.82rem' }}>
+                                        R$ {formatDecimalPtBr(valorFinalComDesconto)}
+                                      </td>
+                                    </tr>
+                                  );
+                                })
+                              )}
+                            </tbody>
+                          </table>
                         </div>
-                      </>
+                      </div>
                     ) : (
                       /* TAB 2 CONTENT: FLUXO DE VENCIMENTO */
                       <>
@@ -16800,78 +16800,6 @@ function ModalConclusaoProposta({ isOpen, onClose, orcamento, projetos = [], par
                         </div>
                       </>
                     )}
-                  </div>
-                </div>
-
-                {/* BLOCO 4: Anotações do Fechamento & Situação */}
-                <div style={{ 
-                  display: 'grid', 
-                  gridTemplateColumns: orcamento.anotacoes_cliente ? '1fr 1fr' : '1fr', 
-                  gap: '12px' 
-                }}>
-                  {/* Anotações do Cliente (se existirem) */}
-                  {orcamento.anotacoes_cliente && (
-                    <div style={{ 
-                      background: 'rgba(139, 92, 246, 0.04)', 
-                      border: '1px solid rgba(139, 92, 246, 0.25)', 
-                      borderRadius: '6px', 
-                      padding: '8px 12px' 
-                    }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '4px', marginBottom: '4px' }}>
-                        <FileText size={13} style={{ color: '#C084FC' }} />
-                        <span style={{ fontSize: '0.72rem', fontWeight: 700, color: '#C084FC', textTransform: 'uppercase' }}>
-                          Anotações do Cliente
-                        </span>
-                      </div>
-                      <div style={{ fontSize: '0.78rem', color: 'var(--text-main)', fontStyle: 'italic', whiteSpace: 'pre-wrap', maxHeight: '60px', overflowY: 'auto' }}>
-                        {orcamento.anotacoes_cliente}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Anotações Internas do Fechamento com Situação */}
-                  <div style={{ 
-                    background: 'rgba(255, 255, 255, 0.02)', 
-                    border: '1px solid var(--glass-border)', 
-                    borderRadius: '6px', 
-                    padding: '8px 12px',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: '6px'
-                  }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                        <Edit2 size={13} style={{ color: 'var(--accent-cyan)' }} />
-                        <span style={{ fontSize: '0.72rem', fontWeight: 700, color: 'var(--accent-cyan)', textTransform: 'uppercase' }}>
-                          Anotações do Fechamento
-                        </span>
-                      </div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                        <label style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontWeight: 600, margin: 0 }}>
-                          Situação:
-                        </label>
-                        <select 
-                          value={situacao} 
-                          onChange={(e) => setSituacao(e.target.value)}
-                          className="form-control"
-                          style={{ fontSize: '0.78rem', fontWeight: 600, padding: '2px 6px', height: '26px', minWidth: '150px' }}
-                        >
-                          <option value="Em Aberto">Em Aberto</option>
-                          <option value="Em Negociação">Em Negociação</option>
-                          <option value="Aprovado">Aprovado (Fechado)</option>
-                          <option value="Recusado">Recusado</option>
-                          <option value="Cancelado">Cancelado</option>
-                        </select>
-                      </div>
-                    </div>
-                    <textarea 
-                      rows={2}
-                      value={anotacoesConclusao}
-                      onChange={(e) => setAnotacoesConclusao(e.target.value)}
-                      placeholder="Ex: Negociado desconto especial para pagamento à vista com entrega prevista em 30 dias..."
-                      className="form-control"
-                      style={{ fontSize: '0.8rem', resize: 'vertical' }}
-                    />
                   </div>
                 </div>
 
