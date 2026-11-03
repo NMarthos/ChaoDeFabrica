@@ -862,27 +862,70 @@ export async function seedCompanyDefaults(db, empresaId, companyInfo = {}) {
   // Formas e condições de pagamento padrão da empresa
   const countFormas = await db.get('SELECT COUNT(*) as cnt FROM formas_pagamento WHERE empresa_id = ?', [empresaId]);
   if (countFormas && Number(countFormas.cnt) === 0) {
-    const resForma = await db.run(
+    const resForma1 = await db.run(
       `INSERT INTO formas_pagamento (empresa_id, nome, descricao, valor_minimo, valor_maximo, ativo, ordem)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [empresaId, 'Orçamento até 10 mil', 'Condições para orçamentos de até R$ 10.000,00', 0, 10000, 'Sim', 1]
     );
-    const formaId = resForma.lastID;
-    if (formaId) {
+    const formaId1 = resForma1.lastID;
+    if (formaId1) {
       await db.run(
         `INSERT INTO condicoes_pagamento (empresa_id, forma_pagamento_id, perc_entrada, num_parcelas, perc_desconto, meio_pagamento, descricao, ordem)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [empresaId, formaId, 100, 0, 10, '', 'À vista - 10% desc', 1]
+        [empresaId, formaId1, 100, 0, 10, 'PIX', 'À vista - 10% desc', 1]
       );
       await db.run(
         `INSERT INTO condicoes_pagamento (empresa_id, forma_pagamento_id, perc_entrada, num_parcelas, perc_desconto, meio_pagamento, descricao, ordem)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [empresaId, formaId, 50, 1, 5, '', 'Entrada 50% + saldo entrega', 2]
+        [empresaId, formaId1, 50, 1, 5, 'PIX', 'Entrada 50% + saldo entrega', 2]
       );
       await db.run(
         `INSERT INTO condicoes_pagamento (empresa_id, forma_pagamento_id, perc_entrada, num_parcelas, perc_desconto, meio_pagamento, descricao, ordem)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [empresaId, formaId, 40, 3, 0, 'C.Crédito', 'Entrada 40% + 3x C.Crédito', 3]
+        [empresaId, formaId1, 40, 3, 0, 'Cartão', 'Entrada 40% + 3x Cartão', 3]
+      );
+    }
+
+    const resForma2 = await db.run(
+      `INSERT INTO formas_pagamento (empresa_id, nome, descricao, valor_minimo, valor_maximo, ativo, ordem)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [empresaId, 'Parcelado no Cartão de Crédito', 'Parcelamento em cartão de crédito sem juros', 0, 0, 'Sim', 2]
+    );
+    const formaId2 = resForma2.lastID;
+    if (formaId2) {
+      await db.run(
+        `INSERT INTO condicoes_pagamento (empresa_id, forma_pagamento_id, perc_entrada, num_parcelas, perc_desconto, meio_pagamento, descricao, ordem)
+         VALUES (?, ?, 30, 6, 0, 'Cartão', 'Entrada 30% + 6x no Cartão', 1)`,
+        [empresaId, formaId2]
+      );
+      await db.run(
+        `INSERT INTO condicoes_pagamento (empresa_id, forma_pagamento_id, perc_entrada, num_parcelas, perc_desconto, meio_pagamento, descricao, ordem)
+         VALUES (?, ?, 20, 10, 0, 'Cartão', 'Entrada 20% + 10x no Cartão', 2)`,
+        [empresaId, formaId2]
+      );
+      await db.run(
+        `INSERT INTO condicoes_pagamento (empresa_id, forma_pagamento_id, perc_entrada, num_parcelas, perc_desconto, meio_pagamento, descricao, ordem)
+         VALUES (?, ?, 0, 12, 0, 'Cartão', '12x no Cartão de Crédito', 3)`,
+        [empresaId, formaId2]
+      );
+    }
+
+    const resForma3 = await db.run(
+      `INSERT INTO formas_pagamento (empresa_id, nome, descricao, valor_minimo, valor_maximo, ativo, ordem)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [empresaId, 'Boleto Faturado', 'Opções faturadas com entrada e boletos bancários', 0, 0, 'Sim', 3]
+    );
+    const formaId3 = resForma3.lastID;
+    if (formaId3) {
+      await db.run(
+        `INSERT INTO condicoes_pagamento (empresa_id, forma_pagamento_id, perc_entrada, num_parcelas, perc_desconto, meio_pagamento, descricao, ordem)
+         VALUES (?, ?, 40, 3, 0, 'Boleto', 'Entrada 40% + 3x no Boleto', 1)`,
+        [empresaId, formaId3]
+      );
+      await db.run(
+        `INSERT INTO condicoes_pagamento (empresa_id, forma_pagamento_id, perc_entrada, num_parcelas, perc_desconto, meio_pagamento, descricao, ordem)
+         VALUES (?, ?, 30, 4, 0, 'Boleto', 'Entrada 30% + 4x no Boleto', 2)`,
+        [empresaId, formaId3]
       );
     }
   }

@@ -68,6 +68,7 @@ import {
   FileSignature,
   Receipt,
   Sliders,
+  Filter,
   Type,
   Hash,
   Layers,
@@ -15629,6 +15630,7 @@ function ModalConclusaoProposta({ isOpen, onClose, orcamento, projetos = [], par
   const dataHojeStr = new Date().toISOString().split('T')[0];
 
   const [formasPagamento, setFormasPagamento] = useState([]);
+  const [selectedFormaId, setSelectedFormaId] = useState('all');
   const [descontoPerc, setDescontoPerc] = useState('0,00');
   const [descontoValor, setDescontoValor] = useState('0,00');
   const [precoFinal, setPrecoFinal] = useState('0,00');
@@ -15917,11 +15919,11 @@ function ModalConclusaoProposta({ isOpen, onClose, orcamento, projetos = [], par
     setError('');
   };
 
-  // Determinar a Forma de Pagamento automaticamente pela regra de faixa de valor da proposta
+  // Determinar a Forma de Pagamento recomendada pela regra de faixa de valor da proposta
   const activeFormas = formasPagamento.filter(fp => fp.ativo !== 'Nao');
   const baseRegra = currentPrecoFinal > 0 ? currentPrecoFinal : precoBaseOriginal;
   
-  let selectedFormaObj = activeFormas.find(f => {
+  let formaRecomendada = activeFormas.find(f => {
     const min = parseFloat(f.valor_minimo) || 0;
     const max = parseFloat(f.valor_maximo) || 0;
     if (min > 0 && max > 0) return baseRegra >= min && baseRegra <= max;
@@ -15930,11 +15932,26 @@ function ModalConclusaoProposta({ isOpen, onClose, orcamento, projetos = [], par
     return false;
   });
 
-  if (!selectedFormaObj && activeFormas.length > 0) {
-    selectedFormaObj = activeFormas.find(f => (parseFloat(f.valor_minimo) || 0) === 0 && (parseFloat(f.valor_maximo) || 0) === 0) || activeFormas[0];
+  if (!formaRecomendada && activeFormas.length > 0) {
+    formaRecomendada = activeFormas.find(f => (parseFloat(f.valor_minimo) || 0) === 0 && (parseFloat(f.valor_maximo) || 0) === 0) || activeFormas[0];
   }
 
-  const condicoesArray = Array.isArray(selectedFormaObj?.condicoes) ? selectedFormaObj.condicoes : [];
+  const formasParaExibir = (selectedFormaId && selectedFormaId !== 'all')
+    ? activeFormas.filter(f => String(f.id) === String(selectedFormaId))
+    : activeFormas;
+
+  const condicoesArray = [];
+  formasParaExibir.forEach(f => {
+    const isRecomendada = Boolean(formaRecomendada && String(f.id) === String(formaRecomendada.id));
+    (f.condicoes || []).forEach(c => {
+      condicoesArray.push({
+        ...c,
+        formaId: f.id,
+        formaNome: f.nome,
+        isRecomendada
+      });
+    });
+  });
 
   // Sincronizar condição selecionada quando formas carregadas
   useEffect(() => {
@@ -15947,7 +15964,7 @@ function ModalConclusaoProposta({ isOpen, onClose, orcamento, projetos = [], par
     const allConds = [];
     formasPagamento.forEach(fp => {
       (fp.condicoes || []).forEach(c => {
-        allConds.push({ ...c, formaNome: fp.nome });
+        allConds.push({ ...c, formaId: fp.id, formaNome: fp.nome });
       });
     });
 
@@ -15963,7 +15980,8 @@ function ModalConclusaoProposta({ isOpen, onClose, orcamento, projetos = [], par
     }
 
     if (!matchedCond && condicoesArray.length > 0) {
-      matchedCond = { ...condicoesArray[0], formaNome: selectedFormaObj?.nome || '' };
+      const condRec = condicoesArray.find(c => c.isRecomendada);
+      matchedCond = condRec || condicoesArray[0];
     }
 
     if (matchedCond) {
@@ -15981,7 +15999,8 @@ function ModalConclusaoProposta({ isOpen, onClose, orcamento, projetos = [], par
 
   // Manipulador ao clicar numa condição de pagamento da tabela (define a forma e gera o fluxo financeiro)
   const handleSelecionarCondicao = (cond, formaNome) => {
-    const descCompleta = `${formaNome} - ${cond.descricao || cond.meio_pagamento || ''}`.trim();
+    const fNome = formaNome || cond.formaNome || '';
+    const descCompleta = fNome ? `${fNome} - ${cond.descricao || cond.meio_pagamento || ''}`.trim() : (cond.descricao || cond.meio_pagamento || '').trim();
     setFormaPagamento(descCompleta);
     setCondicaoSelecionada(cond);
     const novoFluxo = calcularFluxoDefault(cond, currentPrecoFinal, dataEntrada);
@@ -16499,24 +16518,105 @@ function ModalConclusaoProposta({ isOpen, onClose, orcamento, projetos = [], par
                     {activeTabConclusao === 'formas' ? (
                       /* TAB 1 CONTENT: FORMAS & CONDIÇÕES */
                       <>
+                        {/* Barra de Filtro de Formas de Pagamento */}
+                        <div style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          flexWrap: 'wrap',
+                          gap: '8px',
+                          padding: '8px 12px',
+                          background: 'rgba(255, 255, 255, 0.02)',
+                          borderRadius: '6px',
+                          border: '1px solid var(--glass-border)'
+                        }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1, minWidth: '260px' }}>
+                            <Filter size={14} style={{ color: 'var(--accent-cyan)' }} />
+                            <span style={{ fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-muted)' }}>Forma de Pagamento:</span>
+                            <select
+                              value={selectedFormaId}
+                              onChange={(e) => setSelectedFormaId(e.target.value)}
+                              style={{
+                                padding: '5px 10px',
+                                fontSize: '0.78rem',
+                                borderRadius: '5px',
+                                background: 'var(--bg-card)',
+                                border: '1px solid var(--glass-border)',
+                                color: 'var(--text-main)',
+                                cursor: 'pointer',
+                                flex: 1,
+                                maxWidth: '360px'
+                              }}
+                            >
+                              <option value="all">Todas as Formas ({activeFormas.reduce((acc, f) => acc + (f.condicoes?.length || 0), 0)} opções)</option>
+                              {activeFormas.map(f => (
+                                <option key={f.id} value={f.id}>
+                                  {f.nome} ({(f.condicoes || []).length} {f.condicoes?.length === 1 ? 'opção' : 'opções'})
+                                  {formaRecomendada && f.id === formaRecomendada.id ? ' ★ Sugerida' : ''}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+
+                          {formaRecomendada && (
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                              <span>Sugerida p/ valor:</span>
+                              <button
+                                type="button"
+                                onClick={() => setSelectedFormaId(String(formaRecomendada.id))}
+                                style={{
+                                  border: '1px solid rgba(6, 182, 212, 0.4)',
+                                  background: selectedFormaId === String(formaRecomendada.id) ? 'rgba(6, 182, 212, 0.25)' : 'rgba(6, 182, 212, 0.1)',
+                                  color: 'var(--accent-cyan)',
+                                  padding: '2px 8px',
+                                  borderRadius: '12px',
+                                  cursor: 'pointer',
+                                  fontWeight: 600,
+                                  fontSize: '0.72rem'
+                                }}
+                                title="Clique para filtrar apenas esta forma"
+                              >
+                                ★ {formaRecomendada.nome}
+                              </button>
+                              {selectedFormaId !== 'all' && (
+                                <button
+                                  type="button"
+                                  onClick={() => setSelectedFormaId('all')}
+                                  style={{
+                                    border: 'none',
+                                    background: 'transparent',
+                                    color: 'var(--text-muted)',
+                                    cursor: 'pointer',
+                                    fontSize: '0.72rem',
+                                    textDecoration: 'underline'
+                                  }}
+                                >
+                                  Ver todas
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        </div>
+
                         <div style={{ border: '1px solid var(--glass-border)', borderRadius: '6px', overflow: 'hidden', background: 'rgba(0, 0, 0, 0.15)' }}>
-                          <div style={{ maxHeight: '200px', overflowY: 'auto' }}>
+                          <div style={{ maxHeight: '220px', overflowY: 'auto' }}>
                             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.76rem' }}>
                               <thead>
                                 <tr style={{ background: 'rgba(255, 255, 255, 0.02)', borderBottom: '1px solid var(--glass-border)', color: 'var(--text-muted)' }}>
                                   <th style={{ padding: '7px 8px', width: '38px', textAlign: 'center' }}>Sel.</th>
-                                  <th style={{ padding: '7px 10px', textAlign: 'left' }}>Opção / Detalhes</th>
-                                  <th style={{ padding: '7px 10px', textAlign: 'center', width: '75px' }}>Desc.</th>
-                                  <th style={{ padding: '7px 10px', textAlign: 'right', width: '100px' }}>Entrada</th>
+                                  <th style={{ padding: '7px 10px', textAlign: 'left', width: '160px' }}>Forma</th>
+                                  <th style={{ padding: '7px 10px', textAlign: 'left' }}>Condição / Detalhes</th>
+                                  <th style={{ padding: '7px 10px', textAlign: 'center', width: '70px' }}>Desc.</th>
+                                  <th style={{ padding: '7px 10px', textAlign: 'right', width: '95px' }}>Entrada</th>
                                   <th style={{ padding: '7px 10px', textAlign: 'right', width: '140px' }}>Saldo / Parcelamento</th>
-                                  <th style={{ padding: '7px 10px', textAlign: 'right', width: '110px' }}>Total</th>
+                                  <th style={{ padding: '7px 10px', textAlign: 'right', width: '105px' }}>Total</th>
                                 </tr>
                               </thead>
                               <tbody>
                                 {condicoesArray.length === 0 ? (
                                   <tr>
-                                    <td colSpan="6" style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '14px' }}>
-                                      Nenhuma condição de pagamento cadastrada para esta regra.
+                                    <td colSpan="7" style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '16px' }}>
+                                      Nenhuma condição de pagamento cadastrada ou ativa para esta seleção.
                                     </td>
                                   </tr>
                                 ) : (
@@ -16548,13 +16648,18 @@ function ModalConclusaoProposta({ isOpen, onClose, orcamento, projetos = [], par
                                       detalheTexto = `Sem entrada + ${numParcelas}x de R$ ${formatDecimalPtBr(valorParcela)}${meio ? ` no ${meio}` : ''}`;
                                     }
 
-                                    const descCompleta = `${selectedFormaObj?.nome || ''} - ${c.descricao || c.meio_pagamento || ''}`.trim();
-                                    const isSelected = formaPagamento === descCompleta || formaPagamento === c.descricao;
+                                    const descCompleta = `${c.formaNome || ''} - ${c.descricao || c.meio_pagamento || ''}`.trim();
+                                    const isSelected = formaPagamento === descCompleta || 
+                                      formaPagamento === c.descricao ||
+                                      (condicaoSelecionada && (
+                                        (condicaoSelecionada.id === c.id && (!condicaoSelecionada.formaId || condicaoSelecionada.formaId === c.formaId)) ||
+                                        (condicaoSelecionada.descricao === c.descricao && condicaoSelecionada.formaNome === c.formaNome)
+                                      ));
 
                                     return (
                                       <tr 
-                                        key={c.id}
-                                        onClick={() => handleSelecionarCondicao(c, selectedFormaObj?.nome || '')}
+                                        key={`${c.formaId}-${c.id}`}
+                                        onClick={() => handleSelecionarCondicao(c, c.formaNome || '')}
                                         style={{ 
                                           cursor: 'pointer',
                                           borderBottom: '1px solid rgba(255, 255, 255, 0.04)',
@@ -16567,7 +16672,7 @@ function ModalConclusaoProposta({ isOpen, onClose, orcamento, projetos = [], par
                                             type="radio" 
                                             name="formaPagamentoRadio" 
                                             checked={isSelected}
-                                            onChange={() => handleSelecionarCondicao(c, selectedFormaObj?.nome || '')}
+                                            onChange={() => handleSelecionarCondicao(c, c.formaNome || '')}
                                             style={{ 
                                               cursor: 'pointer',
                                               accentColor: 'var(--accent-cyan)',
@@ -16578,6 +16683,24 @@ function ModalConclusaoProposta({ isOpen, onClose, orcamento, projetos = [], par
                                               verticalAlign: 'middle'
                                             }}
                                           />
+                                        </td>
+                                        <td style={{ padding: '7px 10px', verticalAlign: 'middle' }}>
+                                          <div style={{ fontWeight: 600, color: 'var(--accent-cyan)', display: 'flex', alignItems: 'center', gap: '4px', flexWrap: 'wrap' }}>
+                                            <span>{c.formaNome || 'Geral'}</span>
+                                            {c.isRecomendada && (
+                                              <span style={{
+                                                fontSize: '0.62rem',
+                                                background: 'rgba(234, 179, 8, 0.15)',
+                                                color: '#FACC15',
+                                                border: '1px solid rgba(234, 179, 8, 0.3)',
+                                                padding: '0 4px',
+                                                borderRadius: '3px',
+                                                fontWeight: 700
+                                              }}>
+                                                Sugerida
+                                              </span>
+                                            )}
+                                          </div>
                                         </td>
                                         <td style={{ padding: '7px 10px', verticalAlign: 'middle' }}>
                                           <div style={{ fontWeight: isSelected ? 700 : 600, color: isSelected ? 'var(--accent-cyan)' : 'var(--text-main)' }}>

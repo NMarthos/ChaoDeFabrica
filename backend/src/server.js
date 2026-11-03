@@ -6577,8 +6577,15 @@ app.get('/api/configuracoes/financeiro', authenticateToken, async (req, res) => 
 app.get('/api/formas-pagamento', authenticateToken, async (req, res) => {
   const empresaId = req.auth.empresaId;
   try {
-    const formas = await db.all('SELECT * FROM formas_pagamento WHERE empresa_id = ? ORDER BY ordem ASC, id ASC', [empresaId]);
-    const condicoes = await db.all('SELECT * FROM condicoes_pagamento WHERE empresa_id = ? ORDER BY ordem ASC, id ASC', [empresaId]);
+    let formas = await db.all('SELECT * FROM formas_pagamento WHERE empresa_id = ? ORDER BY ordem ASC, id ASC', [empresaId]);
+    let condicoes = await db.all('SELECT * FROM condicoes_pagamento WHERE empresa_id = ? ORDER BY ordem ASC, id ASC', [empresaId]);
+
+    // Se a empresa ainda não tiver formas de pagamento cadastradas, garante as formas padrão
+    if (!formas || formas.length === 0) {
+      await seedCompanyDefaults(db, empresaId);
+      formas = await db.all('SELECT * FROM formas_pagamento WHERE empresa_id = ? ORDER BY ordem ASC, id ASC', [empresaId]);
+      condicoes = await db.all('SELECT * FROM condicoes_pagamento WHERE empresa_id = ? ORDER BY ordem ASC, id ASC', [empresaId]);
+    }
 
     const result = formas.map(f => ({
       ...f,
