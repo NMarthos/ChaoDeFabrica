@@ -13365,7 +13365,7 @@ function MateriaisCrudModal({ isOpen, onClose, onMaterialsUpdated }) {
   });
 
   return (
-    <div className="modal-overlay" style={{ zIndex: 1100 }} onClick={onClose}>
+    <div className="modal-overlay" style={{ zIndex: 1200 }} onClick={onClose}>
       <div 
         className="glass-card modal-content" 
         style={{ maxWidth: '1100px', width: '95%', maxHeight: '90vh', display: 'flex', flexDirection: 'column' }} 
@@ -13558,7 +13558,7 @@ function MateriaisCrudModal({ isOpen, onClose, onMaterialsUpdated }) {
 
       {/* Submodal for Create / Edit */}
       {showFormModal && (
-        <div className="modal-overlay" style={{ zIndex: 1200 }} onClick={() => setShowFormModal(false)}>
+        <div className="modal-overlay" style={{ zIndex: 1300 }} onClick={() => setShowFormModal(false)}>
           <div className="glass-card modal-content" style={{ maxWidth: '880px', width: '95%', maxHeight: '90vh', overflowY: 'auto' }} onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
               <h3 className="modal-title">{editMode ? 'Editar Material' : 'Novo Material'}</h3>
@@ -13931,7 +13931,7 @@ function ModalSubstituirMateriais({
   };
 
   return (
-    <div className="modal-overlay" onClick={onClose} style={{ zIndex: 1050 }}>
+    <div className="modal-overlay" onClick={onClose} style={{ zIndex: 1200 }}>
       <div 
         className="modal-content glass-card" 
         onClick={(e) => e.stopPropagation()} 
@@ -23242,7 +23242,7 @@ function Orcamentos() {
       )}
 
       {showEditMaterialModal && (
-        <div className="modal-overlay" style={{ zIndex: 1100 }} onClick={() => setShowEditMaterialModal(false)}>
+        <div className="modal-overlay" style={{ zIndex: 1250 }} onClick={() => setShowEditMaterialModal(false)}>
           <div className="glass-card modal-content" style={{ maxWidth: '880px', width: '95%', maxHeight: '90vh', overflowY: 'auto' }} onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
               <h3 className="modal-title">Editar Produto</h3>
@@ -26453,7 +26453,7 @@ function Projetos() {
       />
 
       {showEditMaterialModal && (
-        <div className="modal-overlay" style={{ zIndex: 1100 }} onClick={() => setShowEditMaterialModal(false)}>
+        <div className="modal-overlay" style={{ zIndex: 1250 }} onClick={() => setShowEditMaterialModal(false)}>
           <div className="glass-card modal-content" style={{ maxWidth: '880px', width: '95%', maxHeight: '90vh', overflowY: 'auto' }} onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
               <h3 className="modal-title">Editar Produto</h3>
