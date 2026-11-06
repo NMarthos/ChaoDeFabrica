@@ -208,8 +208,9 @@ export function createAuthMiddleware(getDb, jwtSecret) {
       // Suporte seguro a token em query APENAS para carregamento de mídia/downloads autenticados no navegador
       if (!token && req.query?.token && (
         req.path.includes('/uploads') ||
-        (req.baseUrl && req.baseUrl.includes('/uploads')) ||
-        (req.originalUrl && req.originalUrl.includes('/uploads')) ||
+        req.path.includes('/midia') ||
+        (req.baseUrl && (req.baseUrl.includes('/uploads') || req.baseUrl.includes('/midia'))) ||
+        (req.originalUrl && (req.originalUrl.includes('/uploads') || req.originalUrl.includes('/midia'))) ||
         req.path.includes('/anexos/') ||
         req.path.includes('/download')
       )) {

@@ -685,6 +685,7 @@ export async function initDb(options = {}) {
   await ensureColumn(db, 'Material', 'ExibirNaProposta', "VARCHAR(10) DEFAULT 'Nao'");
   await ensureColumn(db, 'Material', 'ProdutoGrupo', 'INT DEFAULT 8');
   await ensureColumn(db, 'Material', 'MaterialTempo', 'INT DEFAULT 0');
+  await ensureColumn(db, 'Material', 'MaterialImagemBase64', 'LONGTEXT DEFAULT NULL');
   await ensureColumn(db, 'projetos', 'ProjetoURL', 'TEXT DEFAULT NULL');
   await ensureColumn(db, 'projetos', 'ProjetoQtdPecas', 'INT DEFAULT 0');
   await ensureColumn(db, 'projetos', 'CustoMaterial', 'DECIMAL(15,2) DEFAULT 0.00');
@@ -718,6 +719,11 @@ export async function initDb(options = {}) {
   await ensureColumn(db, 'usuarios', 'assinatura', 'TEXT DEFAULT NULL');
 
   await ensureColumn(db, 'projeto_anexos', 'exibir_na_proposta', "VARCHAR(10) DEFAULT 'Sim'");
+  await ensureColumn(db, 'projeto_anexos', 'conteudo_base64', 'LONGTEXT DEFAULT NULL');
+  await ensureColumn(db, 'parametros_empresa', 'conteudo_base64', 'LONGTEXT DEFAULT NULL');
+  try {
+    await db.exec('ALTER TABLE `parametros_empresa` MODIFY COLUMN `conteudo` VARCHAR(500) DEFAULT NULL');
+  } catch (e) {}
   await ensureColumn(db, 'proposta_compartilhamentos', 'aprovado_em', 'DATETIME DEFAULT NULL');
   await ensureColumn(db, 'proposta_compartilhamentos', 'forma_pagamento_selecionada', 'TEXT DEFAULT NULL');
   await ensureColumn(db, 'proposta_compartilhamentos', 'proposta_id', 'INT DEFAULT NULL');

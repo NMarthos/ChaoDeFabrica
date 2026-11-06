@@ -106,22 +106,22 @@ export function getUploadPhysicalPath(relPath) {
 
 // Helper que busca o arquivo físico testando os diretórios candidatos caso a aplicação esteja em subpasta
 export function findUploadPhysicalPath(relPath) {
-  if (!relPath) return '';
+  if (!relPath || typeof relPath !== 'string' || relPath.startsWith('data:')) return '';
   const primary = resolveSafeUploadPath(uploadsBaseDir, relPath);
-  if (primary && fs.existsSync(primary.fullPath)) {
+  if (primary && fs.existsSync(primary.fullPath) && fs.statSync(primary.fullPath).isFile()) {
     return primary.fullPath;
   }
   for (const baseDir of candidateUploadDirs) {
     if (baseDir === uploadsBaseDir) continue;
     try {
       const alt = resolveSafeUploadPath(baseDir, relPath);
-      if (alt && fs.existsSync(alt.fullPath)) {
+      if (alt && fs.existsSync(alt.fullPath) && fs.statSync(alt.fullPath).isFile()) {
         return alt.fullPath;
       }
     } catch (_) {}
   }
 
-  // Fallback: se não achou no caminho relativo exato, busca pelo nome do arquivo na raiz de uploads e subpastas conhecidas
+  // Fallback: se não achou no caminho relativo exato, busca pelo nome do arquivo na raiz de uploads, subpastas conhecidas e pastas empresa_*
   const fileName = path.basename(relPath);
   const subdirs = ['', 'produtos', 'parametros', 'anexos', 'layouts'];
   for (const baseDir of candidateUploadDirs) {
@@ -133,9 +133,60 @@ export function findUploadPhysicalPath(relPath) {
         }
       } catch (_) {}
     }
+    // Verifica dentro de diretórios empresa_<id>
+    try {
+      if (fs.existsSync(baseDir)) {
+        const entries = fs.readdirSync(baseDir, { withFileTypes: true });
+        for (const entry of entries) {
+          if (entry.isDirectory() && /^empresa_\d+$/i.test(entry.name)) {
+            for (const sub of subdirs) {
+              const candidate = sub
+                ? path.join(baseDir, entry.name, sub, fileName)
+                : path.join(baseDir, entry.name, fileName);
+              if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+                return candidate;
+              }
+            }
+          }
+        }
+      }
+    } catch (_) {}
   }
 
   return primary ? primary.fullPath : '';
+}
+
+export function getMimeFromExtOrHint(filePath, mimeHint = '') {
+  if (mimeHint && typeof mimeHint === 'string' && mimeHint.includes('/')) {
+    return mimeHint.split(';')[0].trim();
+  }
+  const ext = path.extname(String(filePath || '')).toLowerCase();
+  const mimeTypes = {
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.webp': 'image/webp',
+    '.gif': 'image/gif',
+    '.svg': 'image/svg+xml',
+    '.bmp': 'image/bmp',
+    '.ico': 'image/x-icon',
+    '.pdf': 'application/pdf'
+  };
+  return mimeTypes[ext] || 'application/octet-stream';
+}
+
+export function fileToDataUri(filePath, mimeHint = '') {
+  try {
+    if (!filePath || !fs.existsSync(filePath)) return null;
+    const stats = fs.statSync(filePath);
+    if (!stats.isFile() || stats.size === 0 || stats.size > 15 * 1024 * 1024) return null;
+    const mime = getMimeFromExtOrHint(filePath, mimeHint);
+    const buf = fs.readFileSync(filePath);
+    return `data:${mime};base64,${buf.toString('base64')}`;
+  } catch (err) {
+    console.warn('[fileToDataUri] Aviso ao converter arquivo para Base64:', err.message);
+    return null;
+  }
 }
 
 export function getCompanyUploadDir(empresaId, category = 'geral') {
@@ -438,42 +489,130 @@ async function verifyFileBelongsToCompany(database, empresaId, normalizedRelPath
 }
 
 /**
- * Entrega autenticada e controlada de arquivos sob /uploads/* e /api/uploads/* (substitui express.static público).
- * Suporta:
- * 1) Usuário autenticado da empresa proprietária do arquivo (Bearer token ou ?token=...).
- * 2) Proposta pública compartilhada (?share_token=...) APENAS para anexos/imagens autorizados daquela proposta.
+ * Busca o conteúdo Base64 salvo no banco para um caminho relativo de mídia, caso o arquivo físico não exista no disco.
  */
-app.get(['/uploads/*', '/api/uploads/*'], async (req, res) => {
+async function findDatabaseMediaBase64(database, empresaId, normalizedRelPath) {
+  const empId = Number(empresaId);
+  if (!database || !Number.isInteger(empId) || empId <= 0 || !normalizedRelPath) return null;
+
+  const cleanNoLeadingSlash = normalizedRelPath.replace(/^\/+/, '');
+  const withLeadingSlash = `/${cleanNoLeadingSlash}`;
+  const fileNameOnly = path.basename(cleanNoLeadingSlash);
+
   try {
-    // Validação estrita contra Path Traversal na URL bruta antes mesmo da normalização do Express
-    const rawUrlPath = decodeURIComponent((req.originalUrl || req.url || '').split('?')[0]);
-    if (rawUrlPath.includes('..') || rawUrlPath.includes('\\') || rawUrlPath.includes('\0')) {
+    const anexo = await database.get(
+      `SELECT conteudo_base64, tipo_mime, nome_original
+       FROM projeto_anexos
+       WHERE empresa_id = ? AND (caminho = ? OR caminho = ? OR nome_arquivo = ? OR caminho LIKE ?)
+         AND conteudo_base64 IS NOT NULL AND conteudo_base64 != ''
+       ORDER BY id DESC LIMIT 1`,
+      [empId, cleanNoLeadingSlash, withLeadingSlash, fileNameOnly, `%${fileNameOnly}`]
+    );
+    if (anexo && anexo.conteudo_base64) {
+      return { dataUri: anexo.conteudo_base64, mimeHint: anexo.tipo_mime || '' };
+    }
+  } catch (_) {}
+
+  try {
+    const mat = await database.get(
+      `SELECT MaterialImagemBase64, MaterialImagem
+       FROM Material
+       WHERE empresa_id = ? AND (MaterialImagem = ? OR MaterialImagem = ? OR MaterialImagem LIKE ?)
+       LIMIT 1`,
+      [empId, cleanNoLeadingSlash, withLeadingSlash, `%${fileNameOnly}`]
+    );
+    if (mat) {
+      if (mat.MaterialImagemBase64) {
+        return { dataUri: mat.MaterialImagemBase64, mimeHint: '' };
+      }
+      if (typeof mat.MaterialImagem === 'string' && mat.MaterialImagem.startsWith('data:')) {
+        return { dataUri: mat.MaterialImagem, mimeHint: '' };
+      }
+    }
+  } catch (_) {}
+
+  try {
+    const param = await database.get(
+      `SELECT conteudo_base64, conteudo
+       FROM parametros_empresa
+       WHERE empresa_id = ? AND (conteudo = ? OR conteudo = ? OR conteudo LIKE ?)
+       LIMIT 1`,
+      [empId, cleanNoLeadingSlash, withLeadingSlash, `%${fileNameOnly}`]
+    );
+    if (param) {
+      if (param.conteudo_base64) {
+        return { dataUri: param.conteudo_base64, mimeHint: '' };
+      }
+      if (typeof param.conteudo === 'string' && param.conteudo.startsWith('data:')) {
+        return { dataUri: param.conteudo, mimeHint: '' };
+      }
+    }
+  } catch (_) {}
+
+  return null;
+}
+
+/**
+ * Entrega autenticada e controlada de arquivos via /api/midia?path=... e /uploads/* ou /api/uploads/*.
+ * O endpoint /api/midia evita que servidores proxy como LiteSpeed/Nginx interceptem URLs terminadas em .jpg/.png
+ * como arquivos estáticos inexistentes em public_html.
+ */
+async function handleServeProtectedMedia(req, res, rawInputPath) {
+  try {
+    let rawUrlPath = '';
+    try {
+      rawUrlPath = decodeURIComponent(String(rawInputPath || '').split('?')[0]).trim();
+    } catch (_) {
+      rawUrlPath = String(rawInputPath || '').split('?')[0].trim();
+    }
+    if (!rawUrlPath || rawUrlPath.includes('..') || rawUrlPath.includes('\\') || rawUrlPath.includes('\0')) {
       return res.status(400).json({ error: 'Caminho de arquivo inválido.' });
     }
 
-    const normalizedReqPath = rawUrlPath.replace(/^\/api(?=\/)/i, '');
+    let normalizedReqPath = rawUrlPath.replace(/^\/api(?=\/)/i, '');
+    if (!normalizedReqPath.startsWith('/uploads/') && !normalizedReqPath.startsWith('uploads/')) {
+      normalizedReqPath = `uploads/${normalizedReqPath.replace(/^\/+/, '')}`;
+    }
     const safeResolved = resolveSafeUploadPath(uploadsBaseDir, normalizedReqPath);
     if (!safeResolved) {
       return res.status(400).json({ error: 'Caminho de arquivo inválido.' });
     }
 
-    // Helper para envio com MIME type e cache control corretos
-    const sendSafeFile = (filePath) => {
-      const mimeTypes = {
-        '.png': 'image/png',
-        '.jpg': 'image/jpeg',
-        '.jpeg': 'image/jpeg',
-        '.webp': 'image/webp',
-        '.gif': 'image/gif',
-        '.svg': 'image/svg+xml',
-        '.pdf': 'application/pdf'
-      };
-      const ext = path.extname(filePath).toLowerCase();
-      if (mimeTypes[ext]) {
-        res.setHeader('Content-Type', mimeTypes[ext]);
-      }
+    const sendBufferResponse = (buf, mimeType, fileNameHint = '') => {
+      res.setHeader('Content-Type', mimeType || 'application/octet-stream');
+      res.setHeader('Content-Length', buf.length);
       res.setHeader('Cache-Control', 'private, max-age=86400');
-      return res.sendFile(filePath);
+      res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+      if (fileNameHint) {
+        const safeDispName = path.basename(fileNameHint).replace(/["\r\n]/g, '');
+        res.setHeader('Content-Disposition', `inline; filename="${safeDispName}"`);
+      }
+      return res.status(200).end(buf);
+    };
+
+    const sendSafeFile = (filePath) => {
+      const mimeType = getMimeFromExtOrHint(filePath);
+      const buf = fs.readFileSync(filePath);
+      return sendBufferResponse(buf, mimeType, filePath);
+    };
+
+    const sendFromDbFallback = async (empId) => {
+      const dbMedia = await findDatabaseMediaBase64(db, empId, safeResolved.normalizedRelPath);
+      if (!dbMedia || !dbMedia.dataUri) return false;
+      const match = String(dbMedia.dataUri).match(/^data:([^;]+);base64,(.+)$/s);
+      const mimeType = match ? match[1] : getMimeFromExtOrHint(safeResolved.normalizedRelPath, dbMedia.mimeHint);
+      const b64Data = match ? match[2] : String(dbMedia.dataUri);
+      const buf = Buffer.from(b64Data, 'base64');
+      // Restaura o arquivo físico em disco de forma silenciosa para acelerar próximas leituras
+      try {
+        const targetDir = path.dirname(safeResolved.fullPath);
+        if (!fs.existsSync(targetDir)) {
+          fs.mkdirSync(targetDir, { recursive: true });
+        }
+        fs.writeFileSync(safeResolved.fullPath, buf);
+      } catch (_) {}
+      sendBufferResponse(buf, mimeType, safeResolved.normalizedRelPath);
+      return true;
     };
 
     // Caso 1: Acesso via token de proposta pública (?share_token=...)
@@ -500,7 +639,6 @@ app.get(['/uploads/*', '/api/uploads/*'], async (req, res) => {
       const withSlash = `/${cleanRel}`;
       const fileNameOnly = path.basename(cleanRel);
 
-      // Verifica se o arquivo é um anexo autorizado na proposta pública (exibir_na_proposta = 'Sim'), imagem de material do orçamento ou parâmetro da empresa
       const allowedAnexo = await db.get(
         `SELECT pa.id
          FROM projeto_anexos pa
@@ -554,19 +692,20 @@ app.get(['/uploads/*', '/api/uploads/*'], async (req, res) => {
       }
 
       const physicalPath = findUploadPhysicalPath(safeResolved.normalizedRelPath);
-      if (!physicalPath || !fs.existsSync(physicalPath)) {
-        return res.status(404).json({ error: 'Arquivo não encontrado.' });
+      if (physicalPath && fs.existsSync(physicalPath)) {
+        return sendSafeFile(physicalPath);
       }
-      return sendSafeFile(physicalPath);
+      if (await sendFromDbFallback(empId)) {
+        return;
+      }
+      return res.status(404).json({ error: 'Arquivo não encontrado.' });
     }
 
     // Caso 2: Acesso autenticado (valida JWT, usuário ativo, empresa ativa e vínculo)
     return authenticateToken(req, res, async () => {
       const empId = req.auth.empresaId;
       const belongs = await verifyFileBelongsToCompany(db, empId, safeResolved.normalizedRelPath, req);
-      const physicalPath = findUploadPhysicalPath(safeResolved.normalizedRelPath);
-
-      if (!belongs || !physicalPath || !fs.existsSync(physicalPath)) {
+      if (!belongs) {
         await logAuditoria(db, req, {
           empresaId: empId,
           usuarioId: req.auth.userId,
@@ -576,12 +715,38 @@ app.get(['/uploads/*', '/api/uploads/*'], async (req, res) => {
         });
         return res.status(404).json({ error: 'Arquivo não encontrado.' });
       }
-      return sendSafeFile(physicalPath);
+
+      const physicalPath = findUploadPhysicalPath(safeResolved.normalizedRelPath);
+      if (physicalPath && fs.existsSync(physicalPath)) {
+        return sendSafeFile(physicalPath);
+      }
+      if (await sendFromDbFallback(empId)) {
+        return;
+      }
+
+      await logAuditoria(db, req, {
+        empresaId: empId,
+        usuarioId: req.auth.userId,
+        acao: 'ACESSO_ARQUIVO_NEGADO_OU_INEXISTENTE',
+        recurso: 'UPLOADS',
+        recursoId: safeResolved.normalizedRelPath
+      });
+      return res.status(404).json({ error: 'Arquivo não encontrado.' });
     });
   } catch (err) {
     console.error('[Uploads] Erro ao servir arquivo protegido:', err);
     return res.status(500).json({ error: 'Erro interno ao processar arquivo.' });
   }
+}
+
+app.get('/api/midia', async (req, res) => {
+  const targetPath = req.query?.path ? String(req.query.path) : '';
+  return handleServeProtectedMedia(req, res, targetPath);
+});
+
+app.get(['/uploads/*', '/api/uploads/*'], async (req, res) => {
+  const rawUrlPath = (req.originalUrl || req.url || '').split('?')[0];
+  return handleServeProtectedMedia(req, res, rawUrlPath);
 });
 
 function formatDateTimeForMySQL(date) {
@@ -2515,6 +2680,7 @@ app.post('/api/produtos', authenticateToken, upload.single('imagem'), async (req
   }
 
   const imagem = req.file ? (req.file.tenantRelPath || `uploads/empresa_${req.auth.empresaId}/produtos/${req.file.filename}`) : null;
+  const imagemBase64 = req.file ? fileToDataUri(req.file.path, req.file.mimetype) : null;
 
   try {
     const empId = req.auth.empresaId;
@@ -2530,9 +2696,9 @@ app.post('/api/produtos', authenticateToken, upload.single('imagem'), async (req
     }
 
     await req.tenantDb.run(
-      `INSERT INTO Material (empresa_id, MaterialReferencia, MaterialDescricao, MaterialUnidade, MaterialValorUnitario, GrupoSigla, ProdutoGrupo, MaterialTipo, MaterialImagem, MaterialTempo, ExibirNaProposta)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [empId, codigo, nome, normUn, parseFloat(preco) || 0.0, null, grupoVal, normTipo, imagem, tempoVal, normExibir]
+      `INSERT INTO Material (empresa_id, MaterialReferencia, MaterialDescricao, MaterialUnidade, MaterialValorUnitario, GrupoSigla, ProdutoGrupo, MaterialTipo, MaterialImagem, MaterialImagemBase64, MaterialTempo, ExibirNaProposta)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [empId, codigo, nome, normUn, parseFloat(preco) || 0.0, null, grupoVal, normTipo, imagem, imagemBase64, tempoVal, normExibir]
     );
 
     const newProduct = {
@@ -2558,32 +2724,37 @@ app.post('/api/produtos', authenticateToken, upload.single('imagem'), async (req
   }
 });
 
-app.put('/api/produtos/:id', authenticateToken, upload.single('imagem'), async (req, res) => {
-  const { id } = req.params; // MaterialReferencia
+app.put(['/api/produtos/:id', '/api/produtos/*'], authenticateToken, upload.single('imagem'), async (req, res) => {
+  const rawParamId = req.params.id || req.params[0] || req.body?.codigo || '';
+  let id = rawParamId;
+  try {
+    id = decodeURIComponent(rawParamId);
+  } catch (_) {}
   const { nome, preco, unidade, tipo, tempo, ExibirNaProposta, ProdutoGrupo, produtoGrupo } = req.body;
 
   try {
     const empId = req.auth.empresaId;
-    const product = await req.tenantDb.get(
+    let product = await req.tenantDb.get(
       'SELECT * FROM Material WHERE empresa_id = ? AND MaterialReferencia = ?',
       [empId, id]
     );
-    if (!product) {
-      if (req.file && fs.existsSync(req.file.path)) {
-        fs.unlinkSync(req.file.path);
-      }
-      return res.status(404).json({ error: 'Produto não encontrado.' });
+    if (!product && req.body?.codigo && req.body.codigo !== id) {
+      product = await req.tenantDb.get(
+        'SELECT * FROM Material WHERE empresa_id = ? AND MaterialReferencia = ?',
+        [empId, req.body.codigo]
+      );
+      if (product) id = req.body.codigo;
     }
 
-    let normUn = normalizeMaterialUnit(unidade, product.MaterialUnidade || 'UNI');
+    let normUn = normalizeMaterialUnit(unidade, product?.MaterialUnidade || 'UNI');
 
-    let normTipo = (tipo || product.MaterialTipo || 'Produto').trim();
+    let normTipo = (tipo || product?.MaterialTipo || 'Produto').trim();
     if (normTipo !== 'Serviço') normTipo = 'Produto';
 
     const tempoVal = normTipo === 'Serviço' ? (parseInt(tempo, 10) || 0) : 0;
     const normExibir = ExibirNaProposta !== undefined 
       ? ((ExibirNaProposta === 'Sim' || ExibirNaProposta === true || ExibirNaProposta === 'true' || ExibirNaProposta === '1') ? 'Sim' : 'Nao')
-      : (product.ExibirNaProposta || 'Nao');
+      : (product?.ExibirNaProposta || 'Nao');
 
     const rawGrupo = ProdutoGrupo !== undefined ? ProdutoGrupo : produtoGrupo;
     let grupoVal;
@@ -2591,13 +2762,15 @@ app.put('/api/produtos/:id', authenticateToken, upload.single('imagem'), async (
       const parsed = parseInt(rawGrupo, 10);
       grupoVal = (!isNaN(parsed) && parsed >= 1 && parsed <= 8) ? parsed : 8;
     } else {
-      grupoVal = product.ProdutoGrupo || 8;
+      grupoVal = product?.ProdutoGrupo || 8;
     }
 
-    let imagem = product.MaterialImagem;
+    let imagem = product?.MaterialImagem || null;
+    let imagemBase64 = product?.MaterialImagemBase64 || null;
     if (req.file) {
       imagem = req.file.tenantRelPath || `uploads/empresa_${empId}/produtos/${req.file.filename}`;
-      if (product.MaterialImagem) {
+      imagemBase64 = fileToDataUri(req.file.path, req.file.mimetype);
+      if (product?.MaterialImagem) {
         const oldPath = getUploadPhysicalPath(product.MaterialImagem);
         if (oldPath && fs.existsSync(oldPath)) {
           fs.unlinkSync(oldPath);
@@ -2605,12 +2778,28 @@ app.put('/api/produtos/:id', authenticateToken, upload.single('imagem'), async (
       }
     }
 
-    await req.tenantDb.run(
-      `UPDATE Material 
-       SET MaterialDescricao = ?, MaterialUnidade = ?, MaterialValorUnitario = ?, MaterialTipo = ?, MaterialImagem = ?, MaterialTempo = ?, ExibirNaProposta = ?, ProdutoGrupo = ?
-       WHERE empresa_id = ? AND MaterialReferencia = ?`,
-      [nome, normUn, parseFloat(preco) || 0.0, normTipo, imagem, tempoVal, normExibir, grupoVal, empId, id]
-    );
+    if (!product) {
+      const refCode = (req.body?.codigo || id || '').trim();
+      if (!refCode) {
+        if (req.file && fs.existsSync(req.file.path)) {
+          fs.unlinkSync(req.file.path);
+        }
+        return res.status(404).json({ error: 'Produto não encontrado.' });
+      }
+      id = refCode;
+      await req.tenantDb.run(
+        `INSERT INTO Material (empresa_id, MaterialReferencia, MaterialDescricao, MaterialUnidade, MaterialValorUnitario, GrupoSigla, ProdutoGrupo, MaterialTipo, MaterialImagem, MaterialImagemBase64, MaterialTempo, ExibirNaProposta)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [empId, id, nome || id, normUn, parseFloat(preco) || 0.0, null, grupoVal, normTipo, imagem, imagemBase64, tempoVal, normExibir]
+      );
+    } else {
+      await req.tenantDb.run(
+        `UPDATE Material 
+         SET MaterialDescricao = ?, MaterialUnidade = ?, MaterialValorUnitario = ?, MaterialTipo = ?, MaterialImagem = ?, MaterialImagemBase64 = ?, MaterialTempo = ?, ExibirNaProposta = ?, ProdutoGrupo = ?
+         WHERE empresa_id = ? AND MaterialReferencia = ?`,
+        [nome, normUn, parseFloat(preco) || 0.0, normTipo, imagem, imagemBase64, tempoVal, normExibir, grupoVal, empId, id]
+      );
+    }
 
     const updatedProduct = {
       id,
@@ -2618,7 +2807,7 @@ app.put('/api/produtos/:id', authenticateToken, upload.single('imagem'), async (
       nome,
       unidade: normUn,
       preco: parseFloat(preco) || 0.0,
-      grupoSigla: product.GrupoSigla,
+      grupoSigla: product?.GrupoSigla || null,
       ProdutoGrupo: grupoVal,
       produtoGrupo: grupoVal,
       tipo: normTipo,
@@ -3009,7 +3198,7 @@ async function handleGetRevisaoTecnica(req, res) {
 
       itens = await enrichProjectItemsWithServicoSequencia(rawItens, empId);
       anexos = await req.tenantDb.all(
-        'SELECT * FROM projeto_anexos WHERE empresa_id = ? AND projeto_id = ? ORDER BY criado_em DESC',
+        'SELECT id, empresa_id, projeto_id, nome_original, nome_arquivo, caminho, tipo_mime, tamanho, exibir_na_proposta, criado_por_nome, criado_em FROM projeto_anexos WHERE empresa_id = ? AND projeto_id = ? ORDER BY criado_em DESC',
         [empId, matchedProject.id]
       );
     }
@@ -4221,7 +4410,10 @@ app.get('/api/projetos/:id/anexos', authenticateToken, async (req, res) => {
       return res.status(404).json({ error: 'Projeto não encontrado.' });
     }
     const list = await db.all(
-      `SELECT * FROM projeto_anexos WHERE empresa_id = ? AND projeto_id = ? ORDER BY criado_em DESC, id DESC`,
+      `SELECT id, empresa_id, projeto_id, nome_original, nome_arquivo, caminho, tipo_mime, tamanho, exibir_na_proposta, criado_por_nome, criado_em
+       FROM projeto_anexos
+       WHERE empresa_id = ? AND projeto_id = ?
+       ORDER BY criado_em DESC, id DESC`,
       [empresaId, id]
     );
     res.json(list);
@@ -4256,13 +4448,19 @@ app.post('/api/projetos/:id/anexos', authenticateToken, uploadAnexos.array('arqu
       } catch (e) {}
 
       const relativePath = `uploads/empresa_${empresaId}/anexos/${file.filename}`;
+      const conteudoBase64 = fileToDataUri(file.path, file.mimetype);
       const result = await db.run(
-        `INSERT INTO projeto_anexos (empresa_id, projeto_id, nome_original, nome_arquivo, caminho, tipo_mime, tamanho, exibir_na_proposta, criado_por_nome)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [empresaId, id, originalName, file.filename, relativePath, file.mimetype, file.size, exibirNaProposta, userName]
+        `INSERT INTO projeto_anexos (empresa_id, projeto_id, nome_original, nome_arquivo, caminho, tipo_mime, tamanho, exibir_na_proposta, criado_por_nome, conteudo_base64)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [empresaId, id, originalName, file.filename, relativePath, file.mimetype, file.size, exibirNaProposta, userName, conteudoBase64]
       );
 
-      const item = await db.get('SELECT * FROM projeto_anexos WHERE empresa_id = ? AND id = ?', [empresaId, result.lastID]);
+      const item = await db.get(
+        `SELECT id, empresa_id, projeto_id, nome_original, nome_arquivo, caminho, tipo_mime, tamanho, exibir_na_proposta, criado_por_nome, criado_em
+         FROM projeto_anexos
+         WHERE empresa_id = ? AND id = ?`,
+        [empresaId, result.lastID]
+      );
       if (item) inserted.push(item);
     }
 
@@ -4279,7 +4477,11 @@ app.put('/api/projetos/anexos/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
   const { exibir_na_proposta, nome_original } = req.body;
   try {
-    const anexo = await db.get('SELECT * FROM projeto_anexos WHERE empresa_id = ? AND id = ?', [empresaId, id]);
+    const anexo = await db.get(
+      `SELECT id, empresa_id, projeto_id, nome_original, nome_arquivo, caminho, tipo_mime, tamanho, exibir_na_proposta, criado_por_nome, criado_em
+       FROM projeto_anexos WHERE empresa_id = ? AND id = ?`,
+      [empresaId, id]
+    );
     if (!anexo) {
       return res.status(404).json({ error: 'Anexo não encontrado.' });
     }
@@ -4292,7 +4494,11 @@ app.put('/api/projetos/anexos/:id', authenticateToken, async (req, res) => {
       [newExibir, newNome, empresaId, id]
     );
 
-    const updated = await db.get('SELECT * FROM projeto_anexos WHERE empresa_id = ? AND id = ?', [empresaId, id]);
+    const updated = await db.get(
+      `SELECT id, empresa_id, projeto_id, nome_original, nome_arquivo, caminho, tipo_mime, tamanho, exibir_na_proposta, criado_por_nome, criado_em
+       FROM projeto_anexos WHERE empresa_id = ? AND id = ?`,
+      [empresaId, id]
+    );
     res.json(updated);
   } catch (error) {
     console.error('UPDATE ANEXO ERROR:', error);
@@ -4311,11 +4517,23 @@ app.get('/api/projetos/anexos/download/:id', authenticateToken, async (req, res)
     }
 
     const fullPath = getUploadPhysicalPath(anexo.caminho) || path.resolve(anexo.caminho);
-    if (!fs.existsSync(fullPath)) {
-      return res.status(404).json({ error: 'Arquivo físico não encontrado.' });
+    if (fullPath && fs.existsSync(fullPath)) {
+      return res.download(fullPath, anexo.nome_original);
     }
 
-    res.download(fullPath, anexo.nome_original);
+    if (anexo.conteudo_base64) {
+      const match = String(anexo.conteudo_base64).match(/^data:([^;]+);base64,(.+)$/s);
+      const mimeType = match ? match[1] : (anexo.tipo_mime || 'application/octet-stream');
+      const b64Data = match ? match[2] : String(anexo.conteudo_base64);
+      const buf = Buffer.from(b64Data, 'base64');
+      const safeName = String(anexo.nome_original || anexo.nome_arquivo || 'anexo').replace(/["\r\n]/g, '');
+      res.setHeader('Content-Type', mimeType);
+      res.setHeader('Content-Disposition', `attachment; filename="${safeName}"`);
+      res.setHeader('Content-Length', buf.length);
+      return res.status(200).end(buf);
+    }
+
+    return res.status(404).json({ error: 'Arquivo físico não encontrado.' });
   } catch (error) {
     console.error('DOWNLOAD ANEXO ERROR:', error);
     res.status(500).json({ error: 'Erro ao baixar anexo.' });
@@ -7100,7 +7318,10 @@ app.post('/api/orcamentos/:numero/propostas', authenticateToken, async (req, res
       }
       itensPorProjeto[p.id] = itens || [];
 
-      const anexos = await db.all('SELECT * FROM projeto_anexos WHERE empresa_id = ? AND projeto_id = ? ORDER BY id ASC', [empresaId, p.id]);
+      const anexos = await db.all(
+        'SELECT id, empresa_id, projeto_id, nome_original, nome_arquivo, caminho, tipo_mime, tamanho, exibir_na_proposta, criado_por_nome, criado_em FROM projeto_anexos WHERE empresa_id = ? AND projeto_id = ? ORDER BY id ASC',
+        [empresaId, p.id]
+      );
       anexosPorProjeto[p.id] = anexos || [];
     }
 
@@ -7614,7 +7835,7 @@ app.get('/api/public/propostas/:token', async (req, res) => {
     const anexosPorProjeto = {};
     for (const p of projetos) {
       const anexos = await db.all(
-        `SELECT * FROM projeto_anexos WHERE empresa_id = ? AND projeto_id = ? AND COALESCE(exibir_na_proposta, 'Sim') = 'Sim' ORDER BY id ASC`,
+        `SELECT id, empresa_id, projeto_id, nome_original, nome_arquivo, caminho, tipo_mime, tamanho, exibir_na_proposta, criado_por_nome, criado_em FROM projeto_anexos WHERE empresa_id = ? AND projeto_id = ? AND COALESCE(exibir_na_proposta, 'Sim') = 'Sim' ORDER BY id ASC`,
         [empresaId, p.id]
       );
       anexosPorProjeto[p.id] = anexos || [];
@@ -7970,9 +8191,9 @@ const parametrosStorage = multer.diskStorage({
     }
   },
   filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+    const uniqueSuffix = Date.now().toString(36) + '-' + Math.round(Math.random() * 1e6).toString(36);
     const ext = path.extname(sanitizeSafeFilename(file.originalname || '')).slice(0, 10);
-    cb(null, 'param-' + uniqueSuffix + ext);
+    cb(null, 'p-' + uniqueSuffix + ext);
   }
 });
 const uploadParametros = multer({ storage: parametrosStorage });
@@ -8000,7 +8221,7 @@ app.post('/api/parametros-empresa/upload-imagem', authenticateToken, uploadParam
 app.get('/api/parametros-empresa', authenticateToken, async (req, res) => {
   const empresaId = req.auth.empresaId;
   try {
-    const list = await db.all('SELECT * FROM parametros_empresa WHERE empresa_id = ? ORDER BY chave ASC', [empresaId]);
+    const list = await db.all('SELECT id, empresa_id, chave, tipo, conteudo, descricao, created_at, updated_at FROM parametros_empresa WHERE empresa_id = ? ORDER BY chave ASC', [empresaId]);
     res.json(list);
   } catch (err) {
     console.error('Erro ao listar parametros_empresa:', err);
@@ -8015,9 +8236,9 @@ app.get('/api/parametros-empresa/:id', authenticateToken, async (req, res) => {
   try {
     let param;
     if (isNaN(id)) {
-      param = await db.get('SELECT * FROM parametros_empresa WHERE empresa_id = ? AND chave = ?', [empresaId, id.toUpperCase()]);
+      param = await db.get('SELECT id, empresa_id, chave, tipo, conteudo, descricao, created_at, updated_at FROM parametros_empresa WHERE empresa_id = ? AND chave = ?', [empresaId, id.toUpperCase()]);
     } else {
-      param = await db.get('SELECT * FROM parametros_empresa WHERE empresa_id = ? AND (id = ? OR chave = ?)', [empresaId, id, id.toUpperCase()]);
+      param = await db.get('SELECT id, empresa_id, chave, tipo, conteudo, descricao, created_at, updated_at FROM parametros_empresa WHERE empresa_id = ? AND (id = ? OR chave = ?)', [empresaId, id, id.toUpperCase()]);
     }
     if (!param) {
       return res.status(404).json({ error: 'Parâmetro não encontrado.' });
@@ -8048,8 +8269,9 @@ app.post('/api/parametros-empresa', authenticateToken, async (req, res) => {
     }
 
     const conteudoStr = typeof conteudo === 'string' ? conteudo.trim() : (conteudo !== undefined && conteudo !== null ? String(conteudo) : '');
-    if (conteudoStr.length > 60) {
-      return res.status(400).json({ error: 'O Conteúdo deve ter no máximo 60 caracteres.' });
+    const maxConteudoLen = tipoNum === 7 ? 500 : 60;
+    if (conteudoStr.length > maxConteudoLen) {
+      return res.status(400).json({ error: `O Conteúdo deve ter no máximo ${maxConteudoLen} caracteres.` });
     }
 
     // Verificar unicidade da Chave dentro da empresa
@@ -8058,12 +8280,18 @@ app.post('/api/parametros-empresa', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: `Já existe um parâmetro com a chave "${chaveFormatada}".` });
     }
 
+    let conteudoBase64 = null;
+    if (tipoNum === 7 && conteudoStr) {
+      const phys = findUploadPhysicalPath(conteudoStr);
+      if (phys) conteudoBase64 = fileToDataUri(phys);
+    }
+
     const result = await db.run(
-      `INSERT INTO parametros_empresa (empresa_id, chave, tipo, conteudo, descricao) VALUES (?, ?, ?, ?, ?)`,
-      [empresaId, chaveFormatada, tipoNum, conteudoStr, descricao ? descricao.trim() : null]
+      `INSERT INTO parametros_empresa (empresa_id, chave, tipo, conteudo, conteudo_base64, descricao) VALUES (?, ?, ?, ?, ?, ?)`,
+      [empresaId, chaveFormatada, tipoNum, conteudoStr, conteudoBase64, descricao ? descricao.trim() : null]
     );
 
-    const newParam = await db.get('SELECT * FROM parametros_empresa WHERE empresa_id = ? AND id = ?', [empresaId, result.lastID]);
+    const newParam = await db.get('SELECT id, empresa_id, chave, tipo, conteudo, descricao, created_at, updated_at FROM parametros_empresa WHERE empresa_id = ? AND id = ?', [empresaId, result.lastID]);
     res.status(201).json(newParam);
   } catch (err) {
     console.error('Erro ao criar parâmetro:', err);
@@ -8108,8 +8336,18 @@ app.put('/api/parametros-empresa/:id', authenticateToken, async (req, res) => {
     let conteudoStr = current.conteudo;
     if (conteudo !== undefined) {
       conteudoStr = typeof conteudo === 'string' ? conteudo.trim() : (conteudo !== null ? String(conteudo) : '');
-      if (conteudoStr.length > 60) {
-        return res.status(400).json({ error: 'O Conteúdo deve ter no máximo 60 caracteres.' });
+      const maxConteudoLen = tipoNum === 7 ? 500 : 60;
+      if (conteudoStr.length > maxConteudoLen) {
+        return res.status(400).json({ error: `O Conteúdo deve ter no máximo ${maxConteudoLen} caracteres.` });
+      }
+    }
+
+    let conteudoBase64 = current.conteudo_base64 || null;
+    if (tipoNum === 7 && conteudoStr) {
+      const phys = findUploadPhysicalPath(conteudoStr);
+      if (phys) {
+        const b64 = fileToDataUri(phys);
+        if (b64) conteudoBase64 = b64;
       }
     }
 
@@ -8117,12 +8355,12 @@ app.put('/api/parametros-empresa/:id', authenticateToken, async (req, res) => {
 
     await db.run(
       `UPDATE parametros_empresa 
-       SET chave = ?, tipo = ?, conteudo = ?, descricao = ?, updated_at = CURRENT_TIMESTAMP 
+       SET chave = ?, tipo = ?, conteudo = ?, conteudo_base64 = ?, descricao = ?, updated_at = CURRENT_TIMESTAMP 
        WHERE empresa_id = ? AND id = ?`,
-      [chaveFormatada, tipoNum, conteudoStr, descStr, empresaId, id]
+      [chaveFormatada, tipoNum, conteudoStr, conteudoBase64, descStr, empresaId, id]
     );
 
-    const updated = await db.get('SELECT * FROM parametros_empresa WHERE empresa_id = ? AND id = ?', [empresaId, id]);
+    const updated = await db.get('SELECT id, empresa_id, chave, tipo, conteudo, descricao, created_at, updated_at FROM parametros_empresa WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     res.json(updated);
   } catch (err) {
     console.error('Erro ao atualizar parâmetro:', err);

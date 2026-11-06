@@ -394,14 +394,13 @@ export const getMediaUrl = (imgPath) => {
     clean = `uploads/${clean}`;
   }
 
-  // Na Hostinger, o servidor Web (LiteSpeed/Apache) repassa rotas sob /api para o Node.js.
-  // Por isso, todo acesso a arquivos e imagens protegidos deve ser resolvido como /api/uploads/...
+  // Na Hostinger, o LiteSpeed intercepta URLs cujo caminho termina em extensão de imagem (.jpg, .png, etc.)
+  // procurando arquivo estático em public_html. Para garantir que a requisição sempre chegue ao Node.js,
+  // roteamos pelo endpoint /api/midia?path=... (sem extensão no path da URL).
   const apiRoot = (import.meta.env.VITE_API_URL || '/api').replace(/\/+$/, '');
-  const baseUrl = apiRoot.endsWith('/api')
-    ? `${apiRoot}/${clean}`
-    : `${apiRoot}/api/${clean}`;
+  const apiPrefix = apiRoot.endsWith('/api') ? apiRoot : `${apiRoot}/api`;
+  const baseUrl = `${apiPrefix}/midia?path=${encodeURIComponent(clean)}`;
 
-  const sep = baseUrl.includes('?') ? '&' : '?';
   const pathname = typeof window !== 'undefined' ? (window.location?.pathname || '') : '';
   const search = typeof window !== 'undefined' ? (window.location?.search || '') : '';
 
@@ -412,11 +411,11 @@ export const getMediaUrl = (imgPath) => {
     shareToken = pubMatch[1];
   } else if (search) {
     const params = new URLSearchParams(search);
-    shareToken = params.get('share_token') || params.get('token');
+    shareToken = params.get('share_token') || (pathname.includes('/proposta') ? params.get('token') : null);
   }
 
   if (shareToken) {
-    return `${baseUrl}${sep}share_token=${encodeURIComponent(shareToken)}`;
+    return `${baseUrl}&share_token=${encodeURIComponent(shareToken)}`;
   }
 
   // 2) Token JWT autenticado da sessão
@@ -424,7 +423,7 @@ export const getMediaUrl = (imgPath) => {
     ? (localStorage.getItem('erp_token') || localStorage.getItem('token'))
     : null;
   if (jwtToken) {
-    return `${baseUrl}${sep}token=${encodeURIComponent(jwtToken)}`;
+    return `${baseUrl}&token=${encodeURIComponent(jwtToken)}`;
   }
 
   return baseUrl;
@@ -9031,7 +9030,7 @@ function Produtos() {
 
     try {
       if (editMode) {
-        await api.put(`/produtos/${productIdToEdit}`, formData, {
+        await api.put(`/produtos/${encodeURIComponent(productIdToEdit)}`, formData, {
           headers: { 'Content-Type': 'multipart/form-data' }
         });
       } else {
@@ -13322,7 +13321,7 @@ function MateriaisCrudModal({ isOpen, onClose, onMaterialsUpdated }) {
 
     try {
       if (editMode) {
-        await api.put(`/produtos/${productIdToEdit}`, formData, {
+        await api.put(`/produtos/${encodeURIComponent(productIdToEdit)}`, formData, {
           headers: { 'Content-Type': 'multipart/form-data' }
         });
       } else {
@@ -20544,7 +20543,7 @@ function Orcamentos() {
     }
     
     try {
-      await api.put(`/produtos/${editingMaterial.id}`, formData, {
+      await api.put(`/produtos/${encodeURIComponent(editingMaterial.id)}`, formData, {
         headers: { 'Content-Type': 'multipart/form-data' }
       });
       setShowEditMaterialModal(false);
@@ -25009,7 +25008,7 @@ function Projetos() {
     }
     
     try {
-      await api.put(`/produtos/${editingMaterial.id}`, formData, {
+      await api.put(`/produtos/${encodeURIComponent(editingMaterial.id)}`, formData, {
         headers: { 'Content-Type': 'multipart/form-data' }
       });
       setShowEditMaterialModal(false);
@@ -28069,7 +28068,7 @@ function ParametrosEmpresa({ isEmbedded = false }) {
         headers: { 'Content-Type': 'multipart/form-data' }
       });
       if (res.data?.url) {
-        setFormData(prev => ({ ...prev, conteudo: res.data.url.slice(0, 60) }));
+        setFormData(prev => ({ ...prev, conteudo: res.data.url }));
       }
     } catch (err) {
       console.error('Erro no upload de imagem:', err);
@@ -28091,8 +28090,9 @@ function ParametrosEmpresa({ isEmbedded = false }) {
       setFormError('A Chave deve ter no máximo 10 caracteres.');
       return;
     }
-    if (formData.conteudo.length > 60) {
-      setFormError('O Conteúdo deve ter no máximo 60 caracteres.');
+    const maxLen = Number(formData.tipo) === 7 ? 500 : 60;
+    if (formData.conteudo.length > maxLen) {
+      setFormError(`O Conteúdo deve ter no máximo ${maxLen} caracteres.`);
       return;
     }
 
