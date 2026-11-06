@@ -3162,10 +3162,11 @@ app.put('/api/ordem-servico/:numero/:projetoId/situacao', authenticateToken, han
 
 // Helper for parsing chapas PDF text
 function parsePdfText(textPages) {
-  const chapasMap = new Map(); // Key: Cliente-Projeto-Chapa, Value: ChapaObj
+  const chapasMap = new Map(); // Key: Cliente|Projeto|Chapa|Acabamento|DescChapa, Value: ChapaObj
+  if (!Array.isArray(textPages)) return [];
   
   for (const page of textPages) {
-    if (!page.text || !page.text.includes("Lista de Cortes")) {
+    if (!page || !page.text || !/lista\s+de\s+cortes/i.test(page.text)) {
       continue;
     }
     
@@ -3182,14 +3183,25 @@ function parsePdfText(textPages) {
     // Parse header fields first
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
-      if (line.startsWith("Cliente:")) {
-        cliente = line.replace("Cliente:", "").trim();
-      } else if (line.startsWith("Projeto:")) {
-        projeto = line.replace("Projeto:", "").trim();
+      if (/^cliente:/i.test(line)) {
+        cliente = line.replace(/^cliente:\s*/i, "").trim();
+      } else if (/^projeto:/i.test(line)) {
+        projeto = line.replace(/^projeto:\s*/i, "").trim();
       } else if (/^descri[cç][aã]o:/i.test(line)) {
-        descChapa = line.replace(/^descri[cç][aã]o:\s*/i, "").trim();
-      } else if (line.startsWith("Chapa") && line.includes("Acabamento:")) {
-        const chapaMatch = line.match(/Chapa\s+(\d+)\s+Acabamento:\s*(.*?)\s+Peças:/i);
+        const descParts = [line.replace(/^descri[cç][aã]o:\s*/i, "").trim()];
+        while (i + 1 < lines.length) {
+          const nextLine = lines[i + 1];
+          if (
+            /^(dimens[aã]o:|configura[cç][oõ]es|chapa\s+\d+|cliente:|projeto:|item\b)/i.test(nextLine)
+          ) {
+            break;
+          }
+          descParts.push(nextLine);
+          i++;
+        }
+        descChapa = descParts.filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+      } else if (/^chapa\s+\d+/i.test(line) && /acabamento:/i.test(line)) {
+        const chapaMatch = line.match(/Chapa\s+(\d+)\s+Acabamento:\s*(.*?)\s+Pe[cç]as:/i);
         if (chapaMatch) {
           chapaNumStr = "Chapa " + chapaMatch[1];
           acabamento = chapaMatch[2].trim();
@@ -3200,7 +3212,7 @@ function parsePdfText(textPages) {
             acabamento = chapaMatch2[2].trim();
           }
         }
-      } else if (line.startsWith("Item") && line.includes("Descrição") && line.includes("Dimensão")) {
+      } else if (/^item\b/i.test(line) && /descri[cç][aã]o/i.test(line) && /dimens[aã]o/i.test(line)) {
         tableHeaderIndex = i;
         headerParsed = true;
         break;
@@ -3211,7 +3223,7 @@ function parsePdfText(textPages) {
       continue;
     }
     
-    const chapaKey = `${cliente}|${projeto}|${chapaNumStr}`;
+    const chapaKey = `${cliente}|${projeto}|${chapaNumStr}|${acabamento}|${descChapa}`;
     if (!chapasMap.has(chapaKey)) {
       chapasMap.set(chapaKey, {
         cliente,
@@ -3432,9 +3444,11 @@ async function CarregarMateriais(file, finalProjectId, empresaId = 1) {
       // Limpa materiais anteriores desse projeto para evitar duplicatas
       await db.run('DELETE FROM Projeto_Materiais WHERE empresa_id = ? AND projeto_id = ?', [empresaId, finalProjectId]);
       
-      // Converte chapas de MDF de M2 para CHP se necessário e limpa descrições de MDF
+      // Converte chapas de MDF/MDP de M2 para CHP se necessário e limpa descrições de MDF
       for (const m of materials) {
-        if (m.referencia && m.referencia.toUpperCase().startsWith('MDF')) {
+        const isMdf = (m.referencia && /^(MDF|MDP)/i.test(m.referencia.trim())) ||
+                      (m.descricao && /^(chapa\s+mdf|chapa\s+mdp|mdf|mdp)\b/i.test(m.descricao.trim()));
+        if (isMdf) {
           // Trata a descrição do MDF
           m.descricao = cleanMdfDescription(m.descricao);
           
@@ -3461,29 +3475,61 @@ async function CarregarMateriais(file, finalProjectId, empresaId = 1) {
         );
       }
 
-      // Calcular a soma de todas as chapas de MDF do projeto
+      // Calcular a soma de todas as chapas de MDF/MDP do projeto
       let totalChapasMDF = 0;
       for (const m of materials) {
-        if (m.referencia && m.referencia.toUpperCase().startsWith('MDF') && m.un && m.un.toUpperCase() === 'CHP') {
-          totalChapasMDF += m.qtd;
+        const isMdf = (m.referencia && /^(MDF|MDP)/i.test(m.referencia.trim())) ||
+                      (m.descricao && /^(chapa\s+mdf|chapa\s+mdp|mdf|mdp)\b/i.test(m.descricao.trim()));
+        if (isMdf && m.un && m.un.toUpperCase() === 'CHP') {
+          totalChapasMDF += (parseFloat(m.qtd) || 0);
         }
       }
+
+      // Se já houver plano de corte carregado em Projeto_Chapa para este projeto, preserva o total acumulado de chapas do plano de corte
+      const existingChapasRow = await db.get(
+        `SELECT COUNT(DISTINCT CONCAT(COALESCE(chapa, ''), '|', COALESCE(acabamento, ''), '|', COALESCE(DescChapa, ''))) as totalChapas
+         FROM Projeto_Chapa WHERE empresa_id = ? AND projeto_id = ?`,
+        [empresaId, finalProjectId]
+      );
+      const chapasNoPlano = existingChapasRow ? (parseInt(existingChapasRow.totalChapas, 10) || 0) : 0;
+      const qtdUsinagemChapas = chapasNoPlano > 0 ? chapasNoPlano : totalChapasMDF;
+
+      // Se já houver módulos carregados em Projeto_Modulo para este projeto, preserva as quantidades de montagem/especial/embalagem
+      const existingModules = await db.all(
+        'SELECT modulo FROM Projeto_Modulo WHERE empresa_id = ? AND projeto_id = ?',
+        [empresaId, finalProjectId]
+      );
+      let validModuloCount = 0;
+      let especialModuloCount = 0;
+      if (existingModules && existingModules.length > 0) {
+        const especialKeywords = ['vidro', 'espelho', 'perfil', 'provençal', 'provencal', 'ripado'];
+        for (const modRow of existingModules) {
+          const moduloName = (modRow.modulo || '').toLowerCase();
+          const isEspecial = especialKeywords.some(keyword => moduloName.includes(keyword));
+          if (isEspecial) {
+            especialModuloCount++;
+          } else if (!moduloName.includes('tamponamento') && !moduloName.includes('painel')) {
+            validModuloCount++;
+          }
+        }
+      }
+      const totalEmbalagem = validModuloCount + especialModuloCount;
 
       // Calcular a soma de todas as fitas (referência começa com 'FT')
       let totalFita = 0;
       for (const m of materials) {
         if (m.referencia && m.referencia.toUpperCase().startsWith('FT')) {
-          totalFita += m.qtd;
+          totalFita += (parseFloat(m.qtd) || 0);
         }
       }
 
       // 2. Inserir os registros extras de fabricação na tabela Projeto_Materiais
       const extraItems = [
-        { referencia: 'FAB.USI.CHP', descricao: 'Usinagem de chapas', qtd: totalChapasMDF, un: 'CHP' },
+        { referencia: 'FAB.USI.CHP', descricao: 'Usinagem de chapas', qtd: qtdUsinagemChapas, un: 'CHP' },
         { referencia: 'FAB.FIT.PCA', descricao: 'Fitagem', qtd: totalFita, un: 'M' },
-        { referencia: 'FAB.MON.CXA', descricao: 'Montagem caixa', qtd: 0, un: 'UND' },
-        { referencia: 'FAB.ESP.PCA', descricao: 'Item especial', qtd: 0, un: 'UND' },
-        { referencia: 'FAB.EMB.UND', descricao: 'Embalagem', qtd: 0, un: 'UND' },
+        { referencia: 'FAB.MON.CXA', descricao: 'Montagem caixa', qtd: validModuloCount, un: 'UND' },
+        { referencia: 'FAB.ESP.PCA', descricao: 'Item especial', qtd: especialModuloCount, un: 'UND' },
+        { referencia: 'FAB.EMB.UND', descricao: 'Embalagem', qtd: totalEmbalagem, un: 'UND' },
         { referencia: 'FAB.MON.CLI', descricao: 'Montagem cliente', qtd: 0, un: 'DIA' }
       ];
 
@@ -3795,7 +3841,7 @@ app.post('/api/arquivos-importados', authenticateToken, uploadLayouts.array('arq
       if (lowerName.includes('relatorio_para_compra_de_materiais') || lowerName.includes('compra de materiais') || lowerName.includes('compra_de_materiais')) {
         return 1;
       }
-      if (lowerName.includes('cuttingplan')) {
+      if (lowerName.includes('cuttingplan') || lowerName.includes('cutting plan') || lowerName.includes('cutting_plan') || lowerName.includes('plano de corte') || lowerName.includes('plano_de_corte') || lowerName.includes('planocorte')) {
         return 2;
       }
       if (lowerName.includes('assembly modelo') || lowerName.includes('assembly')) {
@@ -3811,6 +3857,44 @@ app.post('/api/arquivos-importados', authenticateToken, uploadLayouts.array('arq
 
     await db.run('BEGIN TRANSACTION');
     const insertedIds = [];
+    let hasMateriaisInBatch = false;
+    let planoCorteClearedInBatch = false;
+    let totalChapasPlanoCorteBatch = 0;
+    let totalPecasPlanoCorteBatch = 0;
+    let moduloClearedInBatch = false;
+    let totalValidModulosBatch = 0;
+    let totalEspecialModulosBatch = 0;
+
+    const upsertFabMaterialInProject = async (ref, desc, qtd, un) => {
+      const existingPm = await db.get(
+        'SELECT id FROM Projeto_Materiais WHERE empresa_id = ? AND projeto_id = ? AND referencia = ?',
+        [empresaId, finalProjectId, ref]
+      );
+      if (existingPm) {
+        await db.run(
+          'UPDATE Projeto_Materiais SET qtd = ? WHERE empresa_id = ? AND projeto_id = ? AND referencia = ?',
+          [qtd, empresaId, finalProjectId, ref]
+        );
+      } else {
+        await db.run(
+          'INSERT INTO Projeto_Materiais (empresa_id, projeto_id, referencia, descricao, qtd, un) VALUES (?, ?, ?, ?, ?, ?)',
+          [empresaId, finalProjectId, ref, desc, qtd, un]
+        );
+      }
+
+      const existingMat = await db.get(
+        'SELECT MaterialReferencia FROM Material WHERE empresa_id = ? AND MaterialReferencia = ?',
+        [empresaId, ref]
+      );
+      if (!existingMat) {
+        const normUn = normalizeMaterialUnit(un, 'UNI');
+        await db.run(
+          `INSERT INTO Material (empresa_id, MaterialReferencia, MaterialDescricao, MaterialUnidade, MaterialValorUnitario, GrupoSigla, ProdutoGrupo, MaterialTipo, MaterialTempo)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [empresaId, ref, desc, normUn, 0.0, null, 8, 'Serviço', 0]
+        );
+      }
+    };
 
     for (const file of req.files) {
       let originalName = file.originalname || '';
@@ -3845,7 +3929,7 @@ app.post('/api/arquivos-importados', authenticateToken, uploadLayouts.array('arq
       const lowerName = normalizedName.toLowerCase();
       let resolvedLayout = 'Outro';
 
-      if (lowerName.includes('cuttingplan')) {
+      if (lowerName.includes('cuttingplan') || lowerName.includes('cutting plan') || lowerName.includes('cutting_plan') || lowerName.includes('plano de corte') || lowerName.includes('plano_de_corte') || lowerName.includes('planocorte')) {
         resolvedLayout = 'PlanoCorte';
       } else if (lowerName.includes('etiqueta') || lowerName.includes('etiquetas')) {
         resolvedLayout = 'Etiqueta';
@@ -3865,6 +3949,7 @@ app.post('/api/arquivos-importados', authenticateToken, uploadLayouts.array('arq
 
       if (resolvedLayout === 'Materiais') {
         try {
+          hasMateriaisInBatch = true;
           await CarregarMateriais(file, finalProjectId, empresaId);
         } catch (parseErr) {
           console.error('Erro no upload ao invocar rotina CarregarMateriais:', parseErr);
@@ -3887,7 +3972,10 @@ app.post('/api/arquivos-importados', authenticateToken, uploadLayouts.array('arq
           
           const modules = parseModulesFromText(text);
           if (modules.length > 0 && finalProjectId) {
-            await db.run('DELETE FROM Projeto_Modulo WHERE empresa_id = ? AND projeto_id = ?', [empresaId, finalProjectId]);
+            if (!moduloClearedInBatch) {
+              await db.run('DELETE FROM Projeto_Modulo WHERE empresa_id = ? AND projeto_id = ?', [empresaId, finalProjectId]);
+              moduloClearedInBatch = true;
+            }
             
             for (let idx = 0; idx < modules.length; idx++) {
               const m = modules[idx];
@@ -3915,19 +4003,13 @@ app.post('/api/arquivos-importados', authenticateToken, uploadLayouts.array('arq
               }
             }
 
-            await db.run(
-              "UPDATE Projeto_Materiais SET qtd = ? WHERE empresa_id = ? AND projeto_id = ? AND referencia = 'FAB.MON.CXA'",
-              [validModuloCount, empresaId, finalProjectId]
-            );
-            await db.run(
-              "UPDATE Projeto_Materiais SET qtd = ? WHERE empresa_id = ? AND projeto_id = ? AND referencia = 'FAB.ESP.PCA'",
-              [especialModuloCount, empresaId, finalProjectId]
-            );
-            const totalEmbalagem = validModuloCount + especialModuloCount;
-            await db.run(
-              "UPDATE Projeto_Materiais SET qtd = ? WHERE empresa_id = ? AND projeto_id = ? AND referencia = 'FAB.EMB.UND'",
-              [totalEmbalagem, empresaId, finalProjectId]
-            );
+            totalValidModulosBatch += validModuloCount;
+            totalEspecialModulosBatch += especialModuloCount;
+            const totalEmbalagem = totalValidModulosBatch + totalEspecialModulosBatch;
+
+            await upsertFabMaterialInProject('FAB.MON.CXA', 'Montagem caixa', totalValidModulosBatch, 'UND');
+            await upsertFabMaterialInProject('FAB.ESP.PCA', 'Item especial', totalEspecialModulosBatch, 'UND');
+            await upsertFabMaterialInProject('FAB.EMB.UND', 'Embalagem', totalEmbalagem, 'UND');
           }
         } catch (parseErr) {
           console.error('Erro ao fazer parse ou salvar módulos do PDF:', parseErr);
@@ -3941,10 +4023,16 @@ app.post('/api/arquivos-importados', authenticateToken, uploadLayouts.array('arq
           const instance = new pdf.PDFParse(new Uint8Array(fileBuffer));
           if (instance.load) await instance.load();
           const pdfData = await instance.getText();
+          const pagesToParse = (pdfData.pages && pdfData.pages.length > 0)
+            ? pdfData.pages
+            : (pdfData.text ? pdfData.text.split(/--\s*\d+\s+of\s+\d+\s*--/i).map(t => ({ text: t })) : []);
           
-          const chapas = parsePdfText(pdfData.pages);
+          const chapas = parsePdfText(pagesToParse);
           if (chapas.length > 0 && finalProjectId) {
-            await db.run('DELETE FROM Projeto_Chapa WHERE empresa_id = ? AND projeto_id = ?', [empresaId, finalProjectId]);
+            if (!planoCorteClearedInBatch) {
+              await db.run('DELETE FROM Projeto_Chapa WHERE empresa_id = ? AND projeto_id = ?', [empresaId, finalProjectId]);
+              planoCorteClearedInBatch = true;
+            }
             
             for (const c of chapas) {
               let updatedAcabamento = c.acabamento || '';
@@ -3970,17 +4058,17 @@ app.post('/api/arquivos-importados', authenticateToken, uploadLayouts.array('arq
                 );
               }
             }
-            console.log(`[Cuts] Gravados ${chapas.reduce((acc, c) => acc + c.pecas.length, 0)} cortes para o projeto ID ${finalProjectId}`);
-            
-            await db.run(
-              "UPDATE Projeto_Materiais SET qtd = ? WHERE empresa_id = ? AND projeto_id = ? AND referencia = 'FAB.USI.CHP'",
-              [chapas.length, empresaId, finalProjectId]
-            );
+            const filePecasCount = chapas.reduce((acc, c) => acc + c.pecas.length, 0);
+            totalChapasPlanoCorteBatch += chapas.length;
+            totalPecasPlanoCorteBatch += filePecasCount;
 
-            const totalPecas = chapas.reduce((acc, c) => acc + c.pecas.length, 0);
+            console.log(`[Cuts] Gravados ${filePecasCount} cortes (${chapas.length} chapas; acumulado no lote: ${totalChapasPlanoCorteBatch} chapas) para o projeto ID ${finalProjectId}`);
+            
+            await upsertFabMaterialInProject('FAB.USI.CHP', 'Usinagem de chapas', totalChapasPlanoCorteBatch, 'CHP');
+
             await db.run(
               'UPDATE projetos SET ProjetoQtdPecas = ? WHERE empresa_id = ? AND id = ?',
-              [totalPecas, empresaId, finalProjectId]
+              [totalPecasPlanoCorteBatch, empresaId, finalProjectId]
             );
           }
         } catch (parseErr) {
@@ -3995,6 +4083,54 @@ app.post('/api/arquivos-importados', authenticateToken, uploadLayouts.array('arq
           console.error('Erro no upload ao invocar rotina CarregarPecas:', parseErr);
         }
       }
+    }
+
+    // Ao final do processamento de todos os arquivos do lote, sincroniza ProjetoItem com Projeto_Materiais e recalcula os custos/durações
+    if (finalProjectId) {
+      if (hasMateriaisInBatch) {
+        await db.run('DELETE FROM ProjetoItem WHERE empresa_id = ? AND ProjetoID = ?', [empresaId, finalProjectId]);
+        await ensureProjetoItemsPopulated(finalProjectId, empresaId);
+      } else {
+        await ensureProjetoItemsPopulated(finalProjectId, empresaId);
+        const fabItems = await db.all(
+          "SELECT * FROM Projeto_Materiais WHERE empresa_id = ? AND projeto_id = ? AND referencia LIKE 'FAB.%'",
+          [empresaId, finalProjectId]
+        );
+        for (const fab of fabItems) {
+          const existingPi = await db.get(
+            'SELECT * FROM ProjetoItem WHERE empresa_id = ? AND ProjetoID = ? AND MaterialReferencia = ?',
+            [empresaId, finalProjectId, fab.referencia]
+          );
+          const globalMat = await db.get(
+            'SELECT * FROM Material WHERE empresa_id = ? AND MaterialReferencia = ?',
+            [empresaId, fab.referencia]
+          );
+          const vlrUnit = existingPi ? (parseFloat(existingPi.ProjetoItemVlrUnit) || (globalMat?.MaterialValorUnitario || 0.0)) : (globalMat?.MaterialValorUnitario || 0.0);
+          const tempo = existingPi && existingPi.ProjetoItemTempo !== null && existingPi.ProjetoItemTempo !== undefined
+            ? (parseInt(existingPi.ProjetoItemTempo, 10) || 0)
+            : (parseInt(globalMat?.MaterialTempo, 10) || 0);
+          const qtd = parseFloat(fab.qtd) || 0.0;
+          const total = vlrUnit * qtd;
+          const duracao = Math.round(tempo * qtd);
+
+          if (existingPi) {
+            await db.run(
+              'UPDATE ProjetoItem SET ProjetoItemQtd = ?, ProjetoItemTotal = ?, ProjetoItemTempo = ?, ProjetoItemDuracao = ? WHERE empresa_id = ? AND ProjetoID = ? AND ProjetoItemID = ?',
+              [qtd, total, tempo, duracao, empresaId, finalProjectId, existingPi.ProjetoItemID]
+            );
+          } else {
+            const seqRow = await db.get('SELECT MAX(ProjetoItemID) as maxSeq FROM ProjetoItem WHERE empresa_id = ? AND ProjetoID = ?', [empresaId, finalProjectId]);
+            const nextSeq = seqRow && seqRow.maxSeq ? seqRow.maxSeq + 1 : 1;
+            const unidade = (globalMat?.MaterialUnidade || fab.un || 'UNI').substring(0, 3);
+            await db.run(
+              `INSERT INTO ProjetoItem (empresa_id, ProjetoID, ProjetoItemID, MaterialReferencia, ProjetoItemVlrUnit, ProjetoItemUnidade, ProjetoItemQtd, ProjetoItemTotal, ProjetoItemTempo, ProjetoItemDuracao)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              [empresaId, finalProjectId, nextSeq, fab.referencia, vlrUnit, unidade, qtd, total, tempo, duracao]
+            );
+          }
+        }
+      }
+      await recalculateProjectCosts(finalProjectId, empresaId);
     }
 
     await db.run('COMMIT');
@@ -4936,6 +5072,31 @@ async function ensureProjetoItemsPopulated(projectId, empresaId = null) {
       const qtdEspPca = espItem ? (parseFloat(espItem.qtd) || 0.0) : 0.0;
       const qtdEmbUnd = qtdMonCxa + qtdEspPca;
 
+      // Calcula a quantidade acumulada de chapas (FAB.USI.CHP) considerando Projeto_Chapa ou a soma das chapas de MDF/MDP
+      const chapasRow = await db.get(
+        `SELECT COUNT(DISTINCT CONCAT(COALESCE(chapa, ''), '|', COALESCE(acabamento, ''), '|', COALESCE(DescChapa, ''))) as totalChapas
+         FROM Projeto_Chapa WHERE empresa_id = ? AND projeto_id = ?`,
+        [resolvedEmpresaId, projectId]
+      );
+      const chapasNoPlano = chapasRow ? (parseInt(chapasRow.totalChapas, 10) || 0) : 0;
+      let totalChapasMdf = 0.0;
+      for (const matItem of materials) {
+        const isMdf = (matItem.referencia && /^(MDF|MDP)/i.test(matItem.referencia.trim())) ||
+                      (matItem.descricao && /^(chapa\s+mdf|chapa\s+mdp|mdf|mdp)\b/i.test(matItem.descricao.trim()));
+        if (isMdf && matItem.un && matItem.un.toUpperCase() === 'CHP') {
+          totalChapasMdf += (parseFloat(matItem.qtd) || 0.0);
+        }
+      }
+      const usiItem = materials.find(m => m.referencia === 'FAB.USI.CHP');
+      const currentUsiQtd = usiItem ? (parseFloat(usiItem.qtd) || 0.0) : 0.0;
+      const qtdUsiChp = chapasNoPlano > 0 ? chapasNoPlano : (currentUsiQtd > 0 ? currentUsiQtd : totalChapasMdf);
+      if (usiItem && qtdUsiChp !== currentUsiQtd) {
+        await db.run(
+          "UPDATE Projeto_Materiais SET qtd = ? WHERE empresa_id = ? AND projeto_id = ? AND referencia = 'FAB.USI.CHP'",
+          [qtdUsiChp, resolvedEmpresaId, projectId]
+        );
+      }
+
       for (const m of materials) {
         if (m.referencia === 'FAB.QTD.PCA') continue;
         let globalMat = await db.get('SELECT * FROM Material WHERE empresa_id = ? AND MaterialReferencia = ?', [resolvedEmpresaId, m.referencia]);
@@ -4964,6 +5125,8 @@ async function ensureProjetoItemsPopulated(projectId, empresaId = null) {
         let qtd = parseFloat(m.qtd) || 0.0;
         if (m.referencia === 'FAB.EMB.UND') {
           qtd = qtdEmbUnd;
+        } else if (m.referencia === 'FAB.USI.CHP') {
+          qtd = qtdUsiChp;
         }
         const total = vlrUnit * qtd;
         const tempo = parseInt(globalMat.MaterialTempo, 10) || 0;
@@ -6191,6 +6354,31 @@ app.post('/api/projetos/:id/gerar-orcamento', authenticateToken, async (req, res
     const qtdEspPca = espItem ? (parseFloat(espItem.qtd) || 0.0) : 0.0;
     const qtdEmbUnd = qtdMonCxa + qtdEspPca;
 
+    // Calcula a quantidade acumulada de chapas (FAB.USI.CHP) considerando Projeto_Chapa ou a soma das chapas de MDF/MDP
+    const chapasRow = await db.get(
+      `SELECT COUNT(DISTINCT CONCAT(COALESCE(chapa, ''), '|', COALESCE(acabamento, ''), '|', COALESCE(DescChapa, ''))) as totalChapas
+       FROM Projeto_Chapa WHERE empresa_id = ? AND projeto_id = ?`,
+      [empresaId, id]
+    );
+    const chapasNoPlano = chapasRow ? (parseInt(chapasRow.totalChapas, 10) || 0) : 0;
+    let totalChapasMdf = 0.0;
+    for (const matItem of materials) {
+      const isMdf = (matItem.referencia && /^(MDF|MDP)/i.test(matItem.referencia.trim())) ||
+                    (matItem.descricao && /^(chapa\s+mdf|chapa\s+mdp|mdf|mdp)\b/i.test(matItem.descricao.trim()));
+      if (isMdf && matItem.un && matItem.un.toUpperCase() === 'CHP') {
+        totalChapasMdf += (parseFloat(matItem.qtd) || 0.0);
+      }
+    }
+    const usiItem = materials.find(m => m.referencia === 'FAB.USI.CHP');
+    const currentUsiQtd = usiItem ? (parseFloat(usiItem.qtd) || 0.0) : 0.0;
+    const qtdUsiChp = chapasNoPlano > 0 ? chapasNoPlano : (currentUsiQtd > 0 ? currentUsiQtd : totalChapasMdf);
+    if (usiItem && qtdUsiChp !== currentUsiQtd) {
+      await db.run(
+        "UPDATE Projeto_Materiais SET qtd = ? WHERE empresa_id = ? AND projeto_id = ? AND referencia = 'FAB.USI.CHP'",
+        [qtdUsiChp, empresaId, id]
+      );
+    }
+
     for (const m of materials) {
       if (m.referencia === 'FAB.QTD.PCA') continue;
 
@@ -6221,6 +6409,8 @@ app.post('/api/projetos/:id/gerar-orcamento', authenticateToken, async (req, res
       let qtd = parseFloat(m.qtd) || 0.0;
       if (m.referencia === 'FAB.EMB.UND') {
         qtd = qtdEmbUnd;
+      } else if (m.referencia === 'FAB.USI.CHP') {
+        qtd = qtdUsiChp;
       }
       const total = vlrUnit * qtd;
       const tempo = parseInt(globalMat.MaterialTempo, 10) || 0;
