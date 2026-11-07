@@ -5837,13 +5837,7 @@ async function buildProjectDescriptionFromDB(projectId, empresaId = null) {
       LEFT JOIN Material m ON pi.MaterialReferencia = m.MaterialReferencia AND pi.empresa_id = m.empresa_id
       WHERE pi.empresa_id = ? AND pi.ProjetoID = ? 
         AND pi.ProjetoItemQtd > 0
-        AND (
-          COALESCE(m.ProdutoGrupo, 8) = 1 
-          OR m.MaterialDescricao LIKE 'MDF%' 
-          OR m.MaterialDescricao LIKE 'MDP%' 
-          OR m.MaterialDescricao LIKE 'Chapa MDF%'
-          OR COALESCE(m.ExibirNaProposta, 'Nao') = 'Sim'
-        )
+        AND COALESCE(m.ExibirNaProposta, 'Nao') = 'Sim'
       ORDER BY pi.ProjetoItemID ASC
     `, [resolvedEmpresaId, projectId]);
 
@@ -5860,13 +5854,7 @@ async function buildProjectDescriptionFromDB(projectId, empresaId = null) {
         LEFT JOIN Material m ON pm.referencia = m.MaterialReferencia AND pm.empresa_id = m.empresa_id
         WHERE pm.empresa_id = ? AND pm.projeto_id = ?
           AND pm.qtd > 0
-          AND (
-            COALESCE(m.ProdutoGrupo, 8) = 1 
-            OR pm.descricao LIKE 'MDF%' 
-            OR pm.descricao LIKE 'MDP%' 
-            OR pm.descricao LIKE 'Chapa MDF%'
-            OR COALESCE(m.ExibirNaProposta, 'Nao') = 'Sim'
-          )
+          AND COALESCE(m.ExibirNaProposta, 'Nao') = 'Sim'
         ORDER BY pm.id ASC
       `, [resolvedEmpresaId, projectId]);
     }
@@ -5898,16 +5886,10 @@ async function buildProjectDescriptionFromDB(projectId, empresaId = null) {
 
     const mdfItems = items.filter(i => 
       (i.ProdutoGrupo === 1 || /^(mdf|mdp|chapa\s+mdf)/i.test(i.MaterialDescricao || '')) && 
-      i.MaterialTipo !== 'Serviço'
+      i.MaterialTipo !== 'Serviço' &&
+      i.ExibirNaProposta === 'Sim'
     );
     let mdfNames = mdfItems.map(i => cleanMdfName(i.MaterialDescricao)).filter(Boolean);
-
-    if (chapas.length > 0) {
-      chapas.forEach(c => {
-        const name = cleanMdfName(c.acabamento || c.DescChapa || c.chapa);
-        if (name) mdfNames.push(name);
-      });
-    }
     
     const uniqueMdfs = [];
     const seenMdfLower = new Set();

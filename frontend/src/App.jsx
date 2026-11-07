@@ -3070,14 +3070,7 @@ const handleGerarOrcamentoImpresso = async (orc, projs = [], versaoInfo = null) 
   const projetosRows = (effectiveProjs || []).map((p, idx) => {
     const rawImages = (projectItemsMap[p.id] || []).filter(item => {
       if (!item.MaterialImagem) return false;
-      const isMdf = (
-        parseInt(item.ProdutoGrupo || item.produtoGrupo, 10) === 1 ||
-        (item.MaterialTipo || '').trim().toLowerCase() === 'mdf' ||
-        (item.MaterialTipo || '').trim().toLowerCase() === 'chapa' ||
-        /^(mdf|mdp|chapa\s+mdf|chapa\s+mdp)/i.test((item.MaterialDescricao || '').trim()) ||
-        /\bmdf\b|\bmdp\b/i.test((item.MaterialDescricao || '').trim())
-      );
-      return isMdf || item.ExibirNaProposta === 'Sim' || item.ExibirNaProposta === true;
+      return item.ExibirNaProposta === 'Sim' || item.ExibirNaProposta === true;
     });
     const seenRefs = new Set();
     const propImages = rawImages.filter(item => {
@@ -17856,10 +17849,7 @@ function ModalMinutaContrato({ isOpen, onClose, orcamento, cliente, projetos = [
     const itens = itensPorProjeto[projId] || [];
     return itens.filter(item => {
       if (!item.MaterialImagem) return false;
-      const isMdf = item.ProdutoGrupo === 1 || /^(mdf|mdp|chapa\s+mdf)/i.test(item.MaterialDescricao || '') || /mdf/i.test(item.MaterialReferencia || '');
-      const isFerragem = item.ProdutoGrupo === 4 || item.ProdutoGrupo === 5 || /corredi|dobradi|puxador|trilho|pisto|articul|fechadura|amortec/i.test(item.MaterialDescricao || '');
-      const isExibir = item.ExibirNaProposta === 'Sim';
-      return isMdf || isFerragem || isExibir;
+      return item.ExibirNaProposta === 'Sim' || item.ExibirNaProposta === true;
     });
   };
 
@@ -30233,14 +30223,7 @@ function PropostaPublica() {
                 const itensProj = itensPorProjeto[p.id] || [];
                 const rawImages = itensProj.filter(item => {
                   if (!item.MaterialImagem) return false;
-                  const isMdf = (
-                    parseInt(item.ProdutoGrupo || item.produtoGrupo, 10) === 1 ||
-                    (item.MaterialTipo || '').trim().toLowerCase() === 'mdf' ||
-                    (item.MaterialTipo || '').trim().toLowerCase() === 'chapa' ||
-                    /^(mdf|mdp|chapa\s+mdf|chapa\s+mdp)/i.test((item.MaterialDescricao || '').trim()) ||
-                    /\bmdf\b|\bmdp\b/i.test((item.MaterialDescricao || '').trim())
-                  );
-                  return isMdf || item.ExibirNaProposta === 'Sim' || item.ExibirNaProposta === true;
+                  return item.ExibirNaProposta === 'Sim' || item.ExibirNaProposta === true;
                 });
                 const seenRefs = new Set();
                 const propImages = rawImages.filter(item => {
