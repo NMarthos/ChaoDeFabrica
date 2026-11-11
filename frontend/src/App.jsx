@@ -16202,294 +16202,7 @@ function ModalConclusaoProposta({ isOpen, onClose, orcamento, projetos = [], par
                   )}
                 </div>
 
-                {/* BLOCO 1: As 2 Caixas de Informação no Cabeçalho */}
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: '12px' }}>
-                  
-                  {/* Caixa 1: Negociação & Valores (Descontos, Valor Aprovado, Datas e Piso) */}
-                  <div style={{ 
-                    background: 'rgba(255, 255, 255, 0.03)', 
-                    border: '1px solid var(--glass-border)', 
-                    borderRadius: '8px', 
-                    padding: '12px 14px',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: '6px'
-                  }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.74rem', fontWeight: 700, color: 'var(--accent-cyan)', textTransform: 'uppercase' }}>
-                        <CreditCard size={14} /> Negociação & Valores
-                      </div>
-                      <button
-                        type="button"
-                        onClick={handleRestaurarPrecoBase}
-                        className="btn btn-secondary"
-                        style={{
-                          padding: '2px 6px',
-                          fontSize: '0.68rem',
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: '3px',
-                          background: 'rgba(255, 255, 255, 0.05)',
-                          borderColor: 'rgba(255, 255, 255, 0.15)',
-                          color: 'var(--accent-cyan)'
-                        }}
-                        title={`Restaurar para o Preço Base: R$ ${formatDecimalPtBr(precoBaseOriginal)}`}
-                      >
-                        <RefreshCw size={10} /> Restaurar Base
-                      </button>
-                    </div>
-
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.78rem', color: 'var(--text-muted)' }}>
-                      <span>Preço Base Original:</span>
-                      <strong style={{ color: 'var(--text-main)' }}>R$ {formatDecimalPtBr(precoBaseOriginal)}</strong>
-                    </div>
-
-                    {/* Inputs de Desconto R$, Desconto % e Valor Aprovado */}
-                    <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr 1.3fr', gap: '6px', alignItems: 'flex-start', marginTop: '2px' }}>
-                      {/* Desconto (R$) - Editável */}
-                      <div className="form-group" style={{ margin: 0 }}>
-                        <label style={{ fontSize: '0.7rem', color: 'var(--accent-cyan)', fontWeight: 700, display: 'block', marginBottom: '2px' }}>
-                          Desconto (R$)
-                        </label>
-                        <div style={{ position: 'relative' }}>
-                          <input 
-                            type="text" 
-                            value={descontoValor} 
-                            onChange={(e) => handleDescontoValorChange(e.target.value)}
-                            className="form-control"
-                            style={{ 
-                              paddingLeft: '24px', 
-                              fontSize: '0.88rem', 
-                              fontWeight: 800,
-                              height: '32px',
-                              borderColor: isAbaixoDoPiso ? '#EF4444' : 'var(--accent-cyan)',
-                              background: isAbaixoDoPiso ? 'rgba(239, 68, 68, 0.05)' : 'rgba(6, 182, 212, 0.05)',
-                              color: parseFloat(descontoValor || 0) > 0 ? '#F87171' : 'var(--text-main)'
-                            }}
-                          />
-                          <span style={{ position: 'absolute', left: '6px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)', fontWeight: 600, fontSize: '0.75rem' }}>R$</span>
-                        </div>
-                      </div>
-
-                      {/* Desconto (%) - Editável */}
-                      <div className="form-group" style={{ margin: 0 }}>
-                        <label style={{ fontSize: '0.7rem', color: 'var(--accent-cyan)', fontWeight: 700, display: 'block', marginBottom: '2px' }}>
-                          Desconto (%)
-                        </label>
-                        <div style={{ position: 'relative' }}>
-                          <input 
-                            type="text" 
-                            value={descontoPerc} 
-                            onChange={(e) => handleDescontoPercChange(e.target.value)}
-                            className="form-control"
-                            style={{ 
-                              paddingRight: '18px', 
-                              fontWeight: 800, 
-                              fontSize: '0.88rem',
-                              height: '32px',
-                              borderColor: isAbaixoDoPiso ? '#EF4444' : 'var(--accent-cyan)',
-                              background: isAbaixoDoPiso ? 'rgba(239, 68, 68, 0.05)' : 'rgba(6, 182, 212, 0.05)',
-                              color: parseFloat(descontoPerc || 0) > 0 ? '#F87171' : 'var(--text-main)'
-                            }}
-                          />
-                          <span style={{ position: 'absolute', right: '6px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)', fontWeight: 600, fontSize: '0.75rem' }}>%</span>
-                        </div>
-                      </div>
-
-                      {/* Valor Aprovado (R$) - Somente Leitura / Calculado */}
-                      <div className="form-group" style={{ margin: 0 }}>
-                        <label style={{ fontSize: '0.7rem', color: 'var(--text-muted)', display: 'block', marginBottom: '2px' }}>
-                          Valor Aprovado (R$)
-                        </label>
-                        <div style={{ position: 'relative' }}>
-                          <input 
-                            type="text" 
-                            value={precoFinal} 
-                            readOnly
-                            disabled
-                            className="form-control"
-                            style={{ 
-                              paddingLeft: '24px', 
-                              fontSize: '0.88rem', 
-                              fontWeight: 800,
-                              height: '32px',
-                              borderColor: isAbaixoDoPiso ? '#EF4444' : 'rgba(255, 255, 255, 0.1)',
-                              background: isAbaixoDoPiso ? 'rgba(239, 68, 68, 0.05)' : 'rgba(255, 255, 255, 0.03)',
-                              color: isAbaixoDoPiso ? '#F87171' : 'var(--accent-cyan)',
-                              cursor: 'not-allowed'
-                            }}
-                          />
-                          <span style={{ position: 'absolute', left: '6px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)', fontWeight: 600, fontSize: '0.75rem' }}>R$</span>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Datas: Data de Aprovação e Data Entrada (Abaixo dos campos de Desconto) */}
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px', marginTop: '4px' }}>
-                      <div>
-                        <label style={{ fontSize: '0.7rem', color: isDataInvalida ? '#EF4444' : 'var(--text-muted)', display: 'block', marginBottom: '2px', fontWeight: 600 }}>
-                          Data de Aprovação {isDataInvalida && '⚠️'}
-                        </label>
-                        <input 
-                          type="date"
-                          value={dataAprovacao}
-                          onChange={(e) => {
-                            setDataAprovacao(e.target.value);
-                            setError('');
-                          }}
-                          className="form-control"
-                          style={{ 
-                            fontSize: '0.76rem', 
-                            height: '28px', 
-                            padding: '2px 4px',
-                            borderColor: isDataInvalida ? '#EF4444' : 'rgba(255, 255, 255, 0.15)',
-                            background: isDataInvalida ? 'rgba(239, 68, 68, 0.1)' : 'rgba(255, 255, 255, 0.05)',
-                            color: isDataInvalida ? '#F87171' : 'var(--text-main)'
-                          }}
-                        />
-                      </div>
-                      <div>
-                        <label style={{ fontSize: '0.7rem', color: 'var(--text-muted)', display: 'block', marginBottom: '2px', fontWeight: 600 }}>
-                          Data Entrada
-                        </label>
-                        <input 
-                          type="date"
-                          value={dataEntrada}
-                          onChange={(e) => handleDataEntradaChange(e.target.value)}
-                          className="form-control"
-                          style={{ 
-                            fontSize: '0.76rem', 
-                            height: '28px', 
-                            padding: '2px 4px'
-                          }}
-                        />
-                      </div>
-                    </div>
-                    {isDataInvalida && (
-                      <div style={{ fontSize: '0.67rem', color: '#F87171', fontWeight: 700 }}>
-                        ⚠️ A data de aprovação não pode ser maior que a data da entrada.
-                      </div>
-                    )}
-
-                    {/* Status do Piso de Alerta */}
-                    {isAbaixoDoPiso ? (
-                      <div style={{ background: 'rgba(239, 68, 68, 0.12)', border: '1px solid #EF4444', borderRadius: '4px', padding: '4px 6px', display: 'flex', gap: '6px', alignItems: 'center' }}>
-                        <AlertTriangle size={13} style={{ color: '#EF4444', flexShrink: 0 }} />
-                        <div style={{ fontSize: '0.68rem', color: '#FCA5A5', lineHeight: '1.2' }}>
-                          <strong>Piso Ultrapassado!</strong> Margem ({currentMargemLiquidaPerc.toFixed(1)}%) &lt; Piso ({pisoAlertaPerc.toFixed(1)}%).
-                        </div>
-                      </div>
-                    ) : (
-                      <div style={{ background: 'rgba(16, 185, 129, 0.08)', border: '1px solid rgba(16, 185, 129, 0.3)', borderRadius: '4px', padding: '3px 6px', display: 'flex', gap: '4px', alignItems: 'center' }}>
-                        <CheckCircle2 size={13} style={{ color: 'var(--color-success)', flexShrink: 0 }} />
-                        <span style={{ fontSize: '0.68rem', color: '#6EE7B7' }}>
-                          Margem OK: <strong>{currentMargemLiquidaPerc.toFixed(1)}%</strong> (Piso: {pisoAlertaPerc.toFixed(1)}%).
-                        </span>
-                      </div>
-                    )}
-
-                    {/* PARTE INFERIOR: Anotação do Fechamento e Situação */}
-                    <div style={{ 
-                      borderTop: '1px solid var(--glass-border)', 
-                      paddingTop: '6px', 
-                      marginTop: '4px',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      gap: '4px'
-                    }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                          <Edit2 size={12} style={{ color: 'var(--accent-cyan)' }} />
-                          <span style={{ fontSize: '0.7rem', fontWeight: 700, color: 'var(--accent-cyan)', textTransform: 'uppercase' }}>
-                            Anotação do Fechamento
-                          </span>
-                        </div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
-                          <label style={{ fontSize: '0.68rem', color: 'var(--text-muted)', fontWeight: 600, margin: 0 }}>
-                            Situação:
-                          </label>
-                          <select 
-                            value={situacao} 
-                            onChange={(e) => setSituacao(e.target.value)}
-                            className="form-control"
-                            style={{ fontSize: '0.74rem', fontWeight: 600, padding: '1px 5px', height: '24px', minWidth: '130px' }}
-                          >
-                            <option value="Em Aberto">Em Aberto</option>
-                            <option value="Em Negociação">Em Negociação</option>
-                            <option value="Aprovado">Aprovado (Fechado)</option>
-                            <option value="Recusado">Recusado</option>
-                            <option value="Cancelado">Cancelado</option>
-                          </select>
-                        </div>
-                      </div>
-                      <textarea 
-                        rows={2}
-                        value={anotacoesConclusao}
-                        onChange={(e) => setAnotacoesConclusao(e.target.value)}
-                        placeholder="Ex: Negociado desconto especial para pagamento à vista com entrega prevista em 30 dias..."
-                        className="form-control"
-                        style={{ fontSize: '0.76rem', resize: 'vertical', minHeight: '44px' }}
-                      />
-                    </div>
-                  </div>
-
-                  {/* Caixa 2: Indicadores de Rentabilidade (DRE) */}
-                  <div style={{ 
-                    background: 'rgba(255, 255, 255, 0.03)', 
-                    border: '1px solid var(--glass-border)', 
-                    borderRadius: '8px', 
-                    padding: '12px 14px',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: '6px'
-                  }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.74rem', fontWeight: 700, color: 'var(--accent-cyan)', textTransform: 'uppercase' }}>
-                      <TrendingUp size={14} /> Demonstrativo DRE
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.78rem', color: 'var(--text-muted)' }}>
-                      <span>Custos Diretos (CPV):</span>
-                      <span style={{ color: '#F87171', fontWeight: 600 }}>- R$ {formatDecimalPtBr(custoTotal)}</span>
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.78rem', color: 'var(--text-muted)' }}>
-                      <span>Deduções ({percDeducoesTotal.toFixed(1)}%):</span>
-                      <span style={{ color: '#FBBF24', fontWeight: 600 }}>- R$ {formatDecimalPtBr(currentDeducoes)}</span>
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.82rem', borderTop: '1px solid var(--glass-border)', paddingTop: '5px', marginTop: '2px' }}>
-                      <span style={{ fontWeight: 700, color: 'var(--text-main)' }}>Lucro Líquido Previsto:</span>
-                      <span style={{ fontWeight: 800, color: isLucroPositivo ? '#34D399' : '#EF4444' }}>
-                        R$ {formatDecimalPtBr(currentLucroLiquido)}
-                      </span>
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.78rem', color: 'var(--text-muted)' }}>
-                      <span>Margem Líquida Prevista:</span>
-                      <span style={{ fontWeight: 800, color: isAbaixoDoPiso ? '#EF4444' : '#34D399' }}>
-                        {currentMargemLiquidaPerc.toFixed(1)}%
-                      </span>
-                    </div>
-
-                    {orcamento.anotacoes_cliente && (
-                      <div style={{ 
-                        marginTop: 'auto',
-                        background: 'rgba(139, 92, 246, 0.05)', 
-                        border: '1px solid rgba(139, 92, 246, 0.25)', 
-                        borderRadius: '6px', 
-                        padding: '6px 10px' 
-                      }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '4px', marginBottom: '2px' }}>
-                          <FileText size={12} style={{ color: '#C084FC' }} />
-                          <span style={{ fontSize: '0.7rem', fontWeight: 700, color: '#C084FC', textTransform: 'uppercase' }}>
-                            Anotações do Cliente
-                          </span>
-                        </div>
-                        <div style={{ fontSize: '0.75rem', color: 'var(--text-main)', fontStyle: 'italic', whiteSpace: 'pre-wrap', maxHeight: '55px', overflowY: 'auto' }}>
-                          {orcamento.anotacoes_cliente}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                {/* BLOCO 2 & 3: TAB FOLDER (Formas & Condições / Fluxo de Vencimento) */}
+                {/* BLOCO FORMA DE PAGAMENTO & FLUXO FINANCEIRO (Abaixo da identificação do cliente) */}
                 <div style={{ 
                   background: 'rgba(255, 255, 255, 0.02)', 
                   border: '1px solid var(--glass-border)', 
@@ -16795,6 +16508,293 @@ function ModalConclusaoProposta({ isOpen, onClose, orcamento, projetos = [], par
                   </div>
                 </div>
 
+                {/* BLOCO NEGOCIAÇÃO & VALORES / DEMONSTRATIVO DRE */}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: '12px' }}>
+                  
+                  {/* Caixa 1: Negociação & Valores (Descontos, Valor Aprovado, Datas e Piso) */}
+                  <div style={{ 
+                    background: 'rgba(255, 255, 255, 0.03)', 
+                    border: '1px solid var(--glass-border)', 
+                    borderRadius: '8px', 
+                    padding: '12px 14px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '6px'
+                  }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.74rem', fontWeight: 700, color: 'var(--accent-cyan)', textTransform: 'uppercase' }}>
+                        <CreditCard size={14} /> Negociação & Valores
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleRestaurarPrecoBase}
+                        className="btn btn-secondary"
+                        style={{
+                          padding: '2px 6px',
+                          fontSize: '0.68rem',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '3px',
+                          background: 'rgba(255, 255, 255, 0.05)',
+                          borderColor: 'rgba(255, 255, 255, 0.15)',
+                          color: 'var(--accent-cyan)'
+                        }}
+                        title={`Restaurar para o Preço Base: R$ ${formatDecimalPtBr(precoBaseOriginal)}`}
+                      >
+                        <RefreshCw size={10} /> Restaurar Base
+                      </button>
+                    </div>
+
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+                      <span>Preço Base Original:</span>
+                      <strong style={{ color: 'var(--text-main)' }}>R$ {formatDecimalPtBr(precoBaseOriginal)}</strong>
+                    </div>
+
+                    {/* Inputs de Desconto R$, Desconto % e Valor Aprovado */}
+                    <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr 1.3fr', gap: '6px', alignItems: 'flex-start', marginTop: '2px' }}>
+                      {/* Desconto (R$) - Editável */}
+                      <div className="form-group" style={{ margin: 0 }}>
+                        <label style={{ fontSize: '0.7rem', color: 'var(--accent-cyan)', fontWeight: 700, display: 'block', marginBottom: '2px' }}>
+                          Desconto (R$)
+                        </label>
+                        <div style={{ position: 'relative' }}>
+                          <input 
+                            type="text" 
+                            value={descontoValor} 
+                            onChange={(e) => handleDescontoValorChange(e.target.value)}
+                            className="form-control"
+                            style={{ 
+                              paddingLeft: '24px', 
+                              fontSize: '0.88rem', 
+                              fontWeight: 800,
+                              height: '32px',
+                              borderColor: isAbaixoDoPiso ? '#EF4444' : 'var(--accent-cyan)',
+                              background: isAbaixoDoPiso ? 'rgba(239, 68, 68, 0.05)' : 'rgba(6, 182, 212, 0.05)',
+                              color: parseFloat(descontoValor || 0) > 0 ? '#F87171' : 'var(--text-main)'
+                            }}
+                          />
+                          <span style={{ position: 'absolute', left: '6px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)', fontWeight: 600, fontSize: '0.75rem' }}>R$</span>
+                        </div>
+                      </div>
+
+                      {/* Desconto (%) - Editável */}
+                      <div className="form-group" style={{ margin: 0 }}>
+                        <label style={{ fontSize: '0.7rem', color: 'var(--accent-cyan)', fontWeight: 700, display: 'block', marginBottom: '2px' }}>
+                          Desconto (%)
+                        </label>
+                        <div style={{ position: 'relative' }}>
+                          <input 
+                            type="text" 
+                            value={descontoPerc} 
+                            onChange={(e) => handleDescontoPercChange(e.target.value)}
+                            className="form-control"
+                            style={{ 
+                              paddingRight: '18px', 
+                              fontWeight: 800, 
+                              fontSize: '0.88rem',
+                              height: '32px',
+                              borderColor: isAbaixoDoPiso ? '#EF4444' : 'var(--accent-cyan)',
+                              background: isAbaixoDoPiso ? 'rgba(239, 68, 68, 0.05)' : 'rgba(6, 182, 212, 0.05)',
+                              color: parseFloat(descontoPerc || 0) > 0 ? '#F87171' : 'var(--text-main)'
+                            }}
+                          />
+                          <span style={{ position: 'absolute', right: '6px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)', fontWeight: 600, fontSize: '0.75rem' }}>%</span>
+                        </div>
+                      </div>
+
+                      {/* Valor Aprovado (R$) - Somente Leitura / Calculado */}
+                      <div className="form-group" style={{ margin: 0 }}>
+                        <label style={{ fontSize: '0.7rem', color: 'var(--text-muted)', display: 'block', marginBottom: '2px' }}>
+                          Valor Aprovado (R$)
+                        </label>
+                        <div style={{ position: 'relative' }}>
+                          <input 
+                            type="text" 
+                            value={precoFinal} 
+                            readOnly
+                            disabled
+                            className="form-control"
+                            style={{ 
+                              paddingLeft: '24px', 
+                              fontSize: '0.88rem', 
+                              fontWeight: 800,
+                              height: '32px',
+                              borderColor: isAbaixoDoPiso ? '#EF4444' : 'rgba(255, 255, 255, 0.1)',
+                              background: isAbaixoDoPiso ? 'rgba(239, 68, 68, 0.05)' : 'rgba(255, 255, 255, 0.03)',
+                              color: isAbaixoDoPiso ? '#F87171' : 'var(--accent-cyan)',
+                              cursor: 'not-allowed'
+                            }}
+                          />
+                          <span style={{ position: 'absolute', left: '6px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)', fontWeight: 600, fontSize: '0.75rem' }}>R$</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Datas: Data de Aprovação e Data Entrada (Abaixo dos campos de Desconto) */}
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px', marginTop: '4px' }}>
+                      <div>
+                        <label style={{ fontSize: '0.7rem', color: isDataInvalida ? '#EF4444' : 'var(--text-muted)', display: 'block', marginBottom: '2px', fontWeight: 600 }}>
+                          Data de Aprovação {isDataInvalida && '⚠️'}
+                        </label>
+                        <input 
+                          type="date"
+                          value={dataAprovacao}
+                          onChange={(e) => {
+                            setDataAprovacao(e.target.value);
+                            setError('');
+                          }}
+                          className="form-control"
+                          style={{ 
+                            fontSize: '0.76rem', 
+                            height: '28px', 
+                            padding: '2px 4px',
+                            borderColor: isDataInvalida ? '#EF4444' : 'rgba(255, 255, 255, 0.15)',
+                            background: isDataInvalida ? 'rgba(239, 68, 68, 0.1)' : 'rgba(255, 255, 255, 0.05)',
+                            color: isDataInvalida ? '#F87171' : 'var(--text-main)'
+                          }}
+                        />
+                      </div>
+                      <div>
+                        <label style={{ fontSize: '0.7rem', color: 'var(--text-muted)', display: 'block', marginBottom: '2px', fontWeight: 600 }}>
+                          Data Entrada
+                        </label>
+                        <input 
+                          type="date"
+                          value={dataEntrada}
+                          onChange={(e) => handleDataEntradaChange(e.target.value)}
+                          className="form-control"
+                          style={{ 
+                            fontSize: '0.76rem', 
+                            height: '28px', 
+                            padding: '2px 4px'
+                          }}
+                        />
+                      </div>
+                    </div>
+                    {isDataInvalida && (
+                      <div style={{ fontSize: '0.67rem', color: '#F87171', fontWeight: 700 }}>
+                        ⚠️ A data de aprovação não pode ser maior que a data da entrada.
+                      </div>
+                    )}
+
+                    {/* Status do Piso de Alerta */}
+                    {isAbaixoDoPiso ? (
+                      <div style={{ background: 'rgba(239, 68, 68, 0.12)', border: '1px solid #EF4444', borderRadius: '4px', padding: '4px 6px', display: 'flex', gap: '6px', alignItems: 'center' }}>
+                        <AlertTriangle size={13} style={{ color: '#EF4444', flexShrink: 0 }} />
+                        <div style={{ fontSize: '0.68rem', color: '#FCA5A5', lineHeight: '1.2' }}>
+                          <strong>Piso Ultrapassado!</strong> Margem ({currentMargemLiquidaPerc.toFixed(1)}%) &lt; Piso ({pisoAlertaPerc.toFixed(1)}%).
+                        </div>
+                      </div>
+                    ) : (
+                      <div style={{ background: 'rgba(16, 185, 129, 0.08)', border: '1px solid rgba(16, 185, 129, 0.3)', borderRadius: '4px', padding: '3px 6px', display: 'flex', gap: '4px', alignItems: 'center' }}>
+                        <CheckCircle2 size={13} style={{ color: 'var(--color-success)', flexShrink: 0 }} />
+                        <span style={{ fontSize: '0.68rem', color: '#6EE7B7' }}>
+                          Margem OK: <strong>{currentMargemLiquidaPerc.toFixed(1)}%</strong> (Piso: {pisoAlertaPerc.toFixed(1)}%).
+                        </span>
+                      </div>
+                    )}
+
+                    {/* PARTE INFERIOR: Anotação do Fechamento e Situação */}
+                    <div style={{ 
+                      borderTop: '1px solid var(--glass-border)', 
+                      paddingTop: '6px', 
+                      marginTop: '4px',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '4px'
+                    }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                          <Edit2 size={12} style={{ color: 'var(--accent-cyan)' }} />
+                          <span style={{ fontSize: '0.7rem', fontWeight: 700, color: 'var(--accent-cyan)', textTransform: 'uppercase' }}>
+                            Anotação do Fechamento
+                          </span>
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+                          <label style={{ fontSize: '0.68rem', color: 'var(--text-muted)', fontWeight: 600, margin: 0 }}>
+                            Situação:
+                          </label>
+                          <select 
+                            value={situacao} 
+                            onChange={(e) => setSituacao(e.target.value)}
+                            className="form-control"
+                            style={{ fontSize: '0.74rem', fontWeight: 600, padding: '1px 5px', height: '24px', minWidth: '130px' }}
+                          >
+                            <option value="Em Aberto">Em Aberto</option>
+                            <option value="Em Negociação">Em Negociação</option>
+                            <option value="Aprovado">Aprovado (Fechado)</option>
+                            <option value="Recusado">Recusado</option>
+                            <option value="Cancelado">Cancelado</option>
+                          </select>
+                        </div>
+                      </div>
+                      <textarea 
+                        rows={2}
+                        value={anotacoesConclusao}
+                        onChange={(e) => setAnotacoesConclusao(e.target.value)}
+                        placeholder="Ex: Negociado desconto especial para pagamento à vista com entrega prevista em 30 dias..."
+                        className="form-control"
+                        style={{ fontSize: '0.76rem', resize: 'vertical', minHeight: '44px' }}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Caixa 2: Indicadores de Rentabilidade (DRE) */}
+                  <div style={{ 
+                    background: 'rgba(255, 255, 255, 0.03)', 
+                    border: '1px solid var(--glass-border)', 
+                    borderRadius: '8px', 
+                    padding: '12px 14px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '6px'
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.74rem', fontWeight: 700, color: 'var(--accent-cyan)', textTransform: 'uppercase' }}>
+                      <TrendingUp size={14} /> Demonstrativo DRE
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+                      <span>Custos Diretos (CPV):</span>
+                      <span style={{ color: '#F87171', fontWeight: 600 }}>- R$ {formatDecimalPtBr(custoTotal)}</span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+                      <span>Deduções ({percDeducoesTotal.toFixed(1)}%):</span>
+                      <span style={{ color: '#FBBF24', fontWeight: 600 }}>- R$ {formatDecimalPtBr(currentDeducoes)}</span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.82rem', borderTop: '1px solid var(--glass-border)', paddingTop: '5px', marginTop: '2px' }}>
+                      <span style={{ fontWeight: 700, color: 'var(--text-main)' }}>Lucro Líquido Previsto:</span>
+                      <span style={{ fontWeight: 800, color: isLucroPositivo ? '#34D399' : '#EF4444' }}>
+                        R$ {formatDecimalPtBr(currentLucroLiquido)}
+                      </span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+                      <span>Margem Líquida Prevista:</span>
+                      <span style={{ fontWeight: 800, color: isAbaixoDoPiso ? '#EF4444' : '#34D399' }}>
+                        {currentMargemLiquidaPerc.toFixed(1)}%
+                      </span>
+                    </div>
+
+                    {orcamento.anotacoes_cliente && (
+                      <div style={{ 
+                        marginTop: 'auto',
+                        background: 'rgba(139, 92, 246, 0.05)', 
+                        border: '1px solid rgba(139, 92, 246, 0.25)', 
+                        borderRadius: '6px', 
+                        padding: '6px 10px' 
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '4px', marginBottom: '2px' }}>
+                          <FileText size={12} style={{ color: '#C084FC' }} />
+                          <span style={{ fontSize: '0.7rem', fontWeight: 700, color: '#C084FC', textTransform: 'uppercase' }}>
+                            Anotações do Cliente
+                          </span>
+                        </div>
+                        <div style={{ fontSize: '0.75rem', color: 'var(--text-main)', fontStyle: 'italic', whiteSpace: 'pre-wrap', maxHeight: '55px', overflowY: 'auto' }}>
+                          {orcamento.anotacoes_cliente}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
               </div>
 
               {/* Footer Modal Action Buttons */}
@@ -16844,10 +16844,10 @@ function ModalConclusaoProposta({ isOpen, onClose, orcamento, projetos = [], par
                       alignItems: 'center',
                       gap: '6px'
                     }}
-                    title={!isEmAberto ? 'Não permitido: Orçamento não está Em Aberto' : (salvando ? 'Salvando...' : 'Salvar proposta')}
+                    title={!isEmAberto ? 'Não permitido: Orçamento não está Em Aberto' : (salvando ? 'Salvando...' : 'Concluir')}
                   >
                     <Save size={16} />
-                    <span>{salvando ? 'Salvando...' : 'Salvar proposta'}</span>
+                    <span>{salvando ? 'Salvando...' : 'Concluir'}</span>
                   </button>
                 </div>
               </div>
@@ -17251,7 +17251,7 @@ function ModalConclusaoProposta({ isOpen, onClose, orcamento, projetos = [], par
                 >
                   Fechar
                 </button>
-                {/* Botão Salvar Proposta */}
+                {/* Botão Concluir */}
                 <button 
                   onClick={handleSalvar} 
                   type="button" 
@@ -17269,10 +17269,10 @@ function ModalConclusaoProposta({ isOpen, onClose, orcamento, projetos = [], par
                     opacity: (salvando || !formaPagamento || isAbaixoDoPiso || isDataInvalida || !isEmAberto) ? 0.5 : 1,
                     cursor: (salvando || !formaPagamento || isAbaixoDoPiso || isDataInvalida || !isEmAberto) ? 'not-allowed' : 'pointer'
                   }}
-                  title={!isEmAberto ? 'Não permitido: Orçamento não está Em Aberto' : (salvando ? 'Salvando...' : 'Salvar proposta')}
+                  title={!isEmAberto ? 'Não permitido: Orçamento não está Em Aberto' : (salvando ? 'Salvando...' : 'Concluir')}
                 >
                   <Save size={16} />
-                  <span>{salvando ? 'Salvando...' : 'Salvar proposta'}</span>
+                  <span>{salvando ? 'Salvando...' : 'Concluir'}</span>
                 </button>
               </div>
             </div>
@@ -21748,10 +21748,10 @@ function Orcamentos() {
                       border: '1px solid rgba(16, 185, 129, 0.4)',
                       color: '#34D399'
                     }} 
-                    title="Conclusão da Proposta: Descontos, Preço Final, Pagamento e Anotações"
+                    title="Aprovação e Conclusão da Proposta: Descontos, Preço Final, Pagamento e Anotações"
                   >
                     <CheckCircle2 size={16} />
-                    <span>Conclusão</span>
+                    <span>Aprovar</span>
                   </button>
                 </div>
 
@@ -25543,10 +25543,10 @@ function Projetos() {
                 border: '1px solid rgba(16, 185, 129, 0.4)',
                 color: '#34D399'
               }} 
-              title="Conclusão da Proposta: Descontos, Preço Final, Pagamento e Anotações"
+              title="Aprovação e Conclusão da Proposta: Descontos, Preço Final, Pagamento e Anotações"
             >
               <CheckCircle2 size={16} />
-              <span>Conclusão</span>
+              <span>Aprovar</span>
             </button>
           </div>
 
