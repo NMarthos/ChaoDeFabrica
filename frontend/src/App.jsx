@@ -9569,6 +9569,213 @@ function OrdemControle() {
   const [modalHistoricoOC, setModalHistoricoOC] = useState(false);
   const [ordensCompraSalvas, setOrdensCompraSalvas] = useState([]);
   const [loadingHistoricoOC, setLoadingHistoricoOC] = useState(false);
+  const [salvandoOC, setSalvandoOC] = useState(false);
+  const [ocEditDirty, setOcEditDirty] = useState(false);
+  const [catalogoMateriais, setCatalogoMateriais] = useState([]);
+  const [mostrarFormNovoItemOC, setMostrarFormNovoItemOC] = useState(false);
+  const [novoMaterialOC, setNovoMaterialOC] = useState({
+    referencia: '',
+    nome: '',
+    unidade: 'UNI',
+    qtd: '1',
+    foto: '',
+    os: ''
+  });
+
+  const reordenarERenumerarItensOC = (listaItens) => {
+    return [...(listaItens || [])]
+      .sort((a, b) => (a.nome || '').localeCompare(b.nome || '', 'pt-BR', { sensitivity: 'base', numeric: true }))
+      .map((it, idx) => ({
+        ...it,
+        seq: idx + 1
+      }));
+  };
+
+  const carregarCatalogoMateriais = async () => {
+    if (catalogoMateriais.length > 0) return;
+    try {
+      const res = await api.get('/produtos');
+      const apenasProdutos = (res.data || []).filter(
+        p => p.tipo !== 'Serviço' && !String(p.codigo || '').toUpperCase().startsWith('FAB.')
+      );
+      setCatalogoMateriais(apenasProdutos);
+    } catch (err) {
+      console.error('Erro ao carregar catálogo de materiais:', err);
+    }
+  };
+
+  const abrirOrdemCompraModal = (oc, abrirInclusao = false) => {
+    setOrdemCompraAtual({
+      ...oc,
+      itens: reordenarERenumerarItensOC(oc?.itens || [])
+    });
+    setOcEditDirty(false);
+    setMostrarFormNovoItemOC(abrirInclusao);
+    setNovoMaterialOC({
+      referencia: '',
+      nome: '',
+      unidade: 'UNI',
+      qtd: '1',
+      foto: '',
+      os: oc?.ordens_servico_resumo || ''
+    });
+    carregarCatalogoMateriais();
+  };
+
+  const handleAlterarQtdItemOC = (index, novoValor) => {
+    if (!ordemCompraAtual) return;
+    const novosItens = [...(ordemCompraAtual.itens || [])];
+    novosItens[index] = {
+      ...novosItens[index],
+      qtd: novoValor
+    };
+    setOrdemCompraAtual(prev => ({
+      ...prev,
+      itens: novosItens
+    }));
+    setOcEditDirty(true);
+  };
+
+  const handleExcluirItemOC = (index) => {
+    if (!ordemCompraAtual) return;
+    const itemAlvo = (ordemCompraAtual.itens || [])[index];
+    if (!itemAlvo) return;
+    if (!window.confirm(`Deseja remover o material "${itemAlvo.nome}" desta Ordem de Compra?`)) return;
+
+    const filtrados = (ordemCompraAtual.itens || []).filter((_, idx) => idx !== index);
+    const reordenados = reordenarERenumerarItensOC(filtrados);
+    setOrdemCompraAtual(prev => ({
+      ...prev,
+      itens: reordenados
+    }));
+    setOcEditDirty(true);
+  };
+
+  const handleSelecionarMaterialCatalogoOC = (codigoRef) => {
+    if (!codigoRef) {
+      setNovoMaterialOC(prev => ({ ...prev, referencia: '' }));
+      return;
+    }
+    const mat = catalogoMateriais.find(m => String(m.codigo) === String(codigoRef));
+    if (mat) {
+      setNovoMaterialOC(prev => ({
+        ...prev,
+        referencia: mat.codigo || '',
+        nome: mat.nome || mat.codigo || '',
+        unidade: (mat.unidade || 'UNI').toUpperCase(),
+        foto: mat.imagem || ''
+      }));
+    }
+  };
+
+  const handleIncluirMaterialOC = (e) => {
+    if (e && e.preventDefault) e.preventDefault();
+    if (!ordemCompraAtual) return;
+
+    const nomeLimpo = String(novoMaterialOC.nome || '').trim();
+    const unidadeLimpa = String(novoMaterialOC.unidade || 'UNI').trim().toUpperCase() || 'UNI';
+    const qtdVal = parseFloat(String(novoMaterialOC.qtd || '0').replace(',', '.'));
+    const osTexto = String(novoMaterialOC.os || ordemCompraAtual.ordens_servico_resumo || '-').trim();
+
+    if (!nomeLimpo) {
+      alert('Informe o nome do material para incluir na Ordem de Compra.');
+      return;
+    }
+    if (isNaN(qtdVal) || qtdVal <= 0) {
+      alert('Informe uma quantidade válida maior que zero.');
+      return;
+    }
+
+    const itensAtuais = [...(ordemCompraAtual.itens || [])];
+    const idxExistente = itensAtuais.findIndex(
+      it =>
+        String(it.nome || '').trim().toLowerCase() === nomeLimpo.toLowerCase() &&
+        String(it.unidade || 'UNI').trim().toUpperCase() === unidadeLimpa
+    );
+
+    if (idxExistente >= 0) {
+      const existente = itensAtuais[idxExistente];
+      const qtdAtual = parseFloat(String(existente.qtd || 0).replace(',', '.')) || 0;
+      const novaQtdSoma = Math.round((qtdAtual + qtdVal) * 10000) / 10000;
+      const osExistentes = String(existente.os || '')
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean);
+      if (osTexto && osTexto !== '-' && !osExistentes.includes(osTexto)) {
+        osExistentes.push(osTexto);
+      }
+      itensAtuais[idxExistente] = {
+        ...existente,
+        qtd: novaQtdSoma,
+        foto: existente.foto || novoMaterialOC.foto || null,
+        referencia: existente.referencia || novoMaterialOC.referencia || null,
+        os: osExistentes.length > 0 ? osExistentes.join(', ') : (existente.os || osTexto || '-')
+      };
+    } else {
+      itensAtuais.push({
+        seq: itensAtuais.length + 1,
+        referencia: novoMaterialOC.referencia || null,
+        foto: novoMaterialOC.foto || null,
+        nome: nomeLimpo,
+        unidade: unidadeLimpa,
+        qtd: Math.round(qtdVal * 10000) / 10000,
+        os: osTexto || '-'
+      });
+    }
+
+    const reordenados = reordenarERenumerarItensOC(itensAtuais);
+    setOrdemCompraAtual(prev => ({
+      ...prev,
+      itens: reordenados
+    }));
+    setOcEditDirty(true);
+    setNovoMaterialOC({
+      referencia: '',
+      nome: '',
+      unidade: 'UNI',
+      qtd: '1',
+      foto: '',
+      os: ordemCompraAtual.ordens_servico_resumo || ''
+    });
+  };
+
+  const handleSalvarEdicaoOrdemCompra = async () => {
+    if (!ordemCompraAtual || !ordemCompraAtual.id) return;
+    const itensParaSalvar = (ordemCompraAtual.itens || []).map(it => ({
+      ...it,
+      qtd: parseFloat(String(it.qtd ?? 0).replace(',', '.'))
+    }));
+
+    if (itensParaSalvar.length === 0) {
+      alert('A Ordem de Compra precisa ter pelo menos 1 material para ser salva.');
+      return;
+    }
+    if (itensParaSalvar.some(it => isNaN(it.qtd) || it.qtd <= 0)) {
+      alert('Todos os materiais da Ordem de Compra devem possuir quantidade maior que zero.');
+      return;
+    }
+
+    try {
+      setSalvandoOC(true);
+      const res = await api.put(`/ordens-compra/${ordemCompraAtual.id}`, {
+        itens: itensParaSalvar,
+        observacoes: ordemCompraAtual.observacoes || null
+      });
+      const ocAtualizada = res.data;
+      setOrdemCompraAtual(ocAtualizada);
+      setOcEditDirty(false);
+      setOrdensCompraSalvas(prev =>
+        prev.map(item => (item.id === ocAtualizada.id ? ocAtualizada : item))
+      );
+      setSuccess(`Ordem de Compra #${ocAtualizada.numero} atualizada e gravada com sucesso!`);
+      setTimeout(() => setSuccess(''), 4000);
+    } catch (err) {
+      console.error('Erro ao salvar alterações da Ordem de Compra:', err);
+      alert(err.response?.data?.error || 'Erro ao salvar alterações da Ordem de Compra.');
+    } finally {
+      setSalvandoOC(false);
+    }
+  };
 
   const getOsKey = (item) => `${item.Numero}-${item.ProjetoID || 1}`;
 
@@ -9620,7 +9827,7 @@ function OrdemControle() {
       setError('');
       const res = await api.post('/ordens-compra/gerar', { ordens: ordensPayload });
       const ocGravada = res.data;
-      setOrdemCompraAtual(ocGravada);
+      abrirOrdemCompraModal(ocGravada, false);
       setSuccess(`Ordem de Compra #${ocGravada.numero} gerada e gravada com sucesso (${ocGravada.itens?.length || 0} materiais consolidados)!`);
       setTimeout(() => setSuccess(''), 4500);
     } catch (err) {
@@ -10620,17 +10827,17 @@ function OrdemControle() {
         </div>
       )}
 
-      {/* MODAL DE VISUALIZAÇÃO DA ORDEM DE COMPRA GRAVADA */}
+      {/* MODAL DE VISUALIZAÇÃO E EDIÇÃO DA ORDEM DE COMPRA GRAVADA */}
       {ordemCompraAtual && (
         <div className="modal-overlay" style={{ zIndex: 1300 }}>
-          <div className="glass-card modal-content" style={{ maxWidth: '1020px', width: '95%', maxHeight: '90vh', display: 'flex', flexDirection: 'column' }}>
+          <div className="glass-card modal-content" style={{ maxWidth: '1080px', width: '95%', maxHeight: '92vh', display: 'flex', flexDirection: 'column' }}>
             <div className="modal-header" style={{ borderBottom: '1px solid var(--glass-border)', paddingBottom: '12px' }}>
               <div>
-                <h3 className="modal-title" style={{ display: 'flex', alignItems: 'center', gap: '8px', margin: 0 }}>
+                <h3 className="modal-title" style={{ display: 'flex', alignItems: 'center', gap: '8px', margin: 0, flexWrap: 'wrap' }}>
                   <Package size={20} color="#10b981" />
                   Ordem de Compra #{ordemCompraAtual.numero}
-                  <span style={{ fontSize: '0.75rem', background: 'rgba(16, 185, 129, 0.15)', color: '#34d399', border: '1px solid rgba(16, 185, 129, 0.35)', padding: '2px 8px', borderRadius: '999px', fontWeight: 700 }}>
-                    GRAVADA
+                  <span style={{ fontSize: '0.75rem', background: ocEditDirty ? 'rgba(245, 158, 11, 0.15)' : 'rgba(16, 185, 129, 0.15)', color: ocEditDirty ? '#fbbf24' : '#34d399', border: ocEditDirty ? '1px solid rgba(245, 158, 11, 0.4)' : '1px solid rgba(16, 185, 129, 0.35)', padding: '2px 8px', borderRadius: '999px', fontWeight: 700 }}>
+                    {ocEditDirty ? 'ALTERAÇÕES PENDENTES DE SALVAR' : 'GRAVADA'}
                   </span>
                 </h3>
                 <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)', marginTop: '4px' }}>
@@ -10640,41 +10847,169 @@ function OrdemControle() {
                   )}
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={() => setOrdemCompraAtual(null)}
-                className="close-btn"
-              >
-                &times;
-              </button>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <button
+                  type="button"
+                  onClick={() => setMostrarFormNovoItemOC(prev => !prev)}
+                  className="btn btn-secondary"
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    fontSize: '0.82rem',
+                    fontWeight: 700,
+                    color: '#10b981',
+                    borderColor: 'rgba(16, 185, 129, 0.4)',
+                    background: mostrarFormNovoItemOC ? 'rgba(16, 185, 129, 0.18)' : 'rgba(16, 185, 129, 0.08)'
+                  }}
+                >
+                  <Plus size={15} />
+                  <span>{mostrarFormNovoItemOC ? 'Ocultar Inclusão' : 'Incluir Material'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setOrdemCompraAtual(null)}
+                  className="close-btn"
+                >
+                  &times;
+                </button>
+              </div>
             </div>
+
+            {/* Painel para Incluir Novo Material na Ordem de Compra */}
+            {mostrarFormNovoItemOC && (
+              <form
+                onSubmit={handleIncluirMaterialOC}
+                style={{
+                  marginTop: '12px',
+                  padding: '14px 16px',
+                  borderRadius: '10px',
+                  background: 'rgba(15, 23, 42, 0.65)',
+                  border: '1px solid rgba(16, 185, 129, 0.35)'
+                }}
+              >
+                <div style={{ fontSize: '0.82rem', fontWeight: 700, color: '#34d399', marginBottom: '10px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <PlusCircle size={15} />
+                  <span>Incluir Novo Material na Ordem de Compra (será ordenado alfabeticamente e agrupado caso já exista)</span>
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '10px', alignItems: 'flex-end' }}>
+                  <div>
+                    <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-muted)', marginBottom: '4px' }}>
+                      Buscar do Cadastro (Opcional)
+                    </label>
+                    <select
+                      value={novoMaterialOC.referencia}
+                      onChange={e => handleSelecionarMaterialCatalogoOC(e.target.value)}
+                      className="form-control"
+                      style={{ width: '100%', fontSize: '0.84rem' }}
+                    >
+                      <option value="">-- Selecionar material cadastrado --</option>
+                      {catalogoMateriais.map(m => (
+                        <option key={m.codigo} value={m.codigo}>
+                          {m.nome} ({m.unidade || 'UNI'})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div style={{ gridColumn: 'span 2', minWidth: '220px' }}>
+                    <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-muted)', marginBottom: '4px' }}>
+                      Nome do Material *
+                    </label>
+                    <input
+                      type="text"
+                      value={novoMaterialOC.nome}
+                      onChange={e => setNovoMaterialOC(prev => ({ ...prev, nome: e.target.value }))}
+                      placeholder="Ex: Chapa MDF Branco Tx 15mm..."
+                      className="form-control"
+                      style={{ width: '100%', fontSize: '0.85rem' }}
+                      required
+                    />
+                  </div>
+
+                  <div style={{ maxWidth: '110px' }}>
+                    <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-muted)', marginBottom: '4px' }}>
+                      Unidade *
+                    </label>
+                    <input
+                      type="text"
+                      value={novoMaterialOC.unidade}
+                      onChange={e => setNovoMaterialOC(prev => ({ ...prev, unidade: e.target.value.toUpperCase() }))}
+                      placeholder="UNI"
+                      className="form-control"
+                      style={{ width: '100%', fontSize: '0.85rem', textAlign: 'center' }}
+                      required
+                    />
+                  </div>
+
+                  <div style={{ maxWidth: '120px' }}>
+                    <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-muted)', marginBottom: '4px' }}>
+                      Qtd *
+                    </label>
+                    <input
+                      type="number"
+                      step="any"
+                      min="0.0001"
+                      value={novoMaterialOC.qtd}
+                      onChange={e => setNovoMaterialOC(prev => ({ ...prev, qtd: e.target.value }))}
+                      className="form-control"
+                      style={{ width: '100%', fontSize: '0.85rem', textAlign: 'right', fontWeight: 700 }}
+                      required
+                    />
+                  </div>
+
+                  <div>
+                    <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-muted)', marginBottom: '4px' }}>
+                      OS Referência
+                    </label>
+                    <input
+                      type="text"
+                      value={novoMaterialOC.os}
+                      onChange={e => setNovoMaterialOC(prev => ({ ...prev, os: e.target.value }))}
+                      placeholder="#1005/001"
+                      className="form-control"
+                      style={{ width: '100%', fontSize: '0.84rem' }}
+                    />
+                  </div>
+
+                  <div>
+                    <button
+                      type="submit"
+                      className="btn btn-primary"
+                      style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', fontWeight: 700, padding: '8px 14px', background: '#10b981', borderColor: '#10b981' }}
+                    >
+                      <Plus size={15} />
+                      <span>Adicionar</span>
+                    </button>
+                  </div>
+                </div>
+              </form>
+            )}
 
             <div style={{ overflowY: 'auto', flex: 1, marginTop: '14px' }}>
               <table className="data-table" style={{ margin: 0 }}>
                 <thead>
                   <tr>
-                    <th style={{ width: '65px', textAlign: 'center' }}>Seq</th>
-                    <th style={{ width: '75px', textAlign: 'center' }}>Foto</th>
+                    <th style={{ width: '60px', textAlign: 'center' }}>Seq</th>
+                    <th style={{ width: '72px', textAlign: 'center' }}>Foto</th>
                     <th>Nome</th>
-                    <th style={{ width: '95px', textAlign: 'center' }}>Unidade</th>
-                    <th style={{ width: '110px', textAlign: 'right' }}>Qtd</th>
-                    <th style={{ width: '220px' }}>OS</th>
+                    <th style={{ width: '90px', textAlign: 'center' }}>Unidade</th>
+                    <th style={{ width: '135px', textAlign: 'right' }}>Qtd</th>
+                    <th style={{ width: '200px' }}>OS</th>
+                    <th style={{ width: '75px', textAlign: 'center' }}>Ações</th>
                   </tr>
                 </thead>
                 <tbody>
                   {(ordemCompraAtual.itens || []).length === 0 ? (
                     <tr>
-                      <td colSpan="6" style={{ textAlign: 'center', padding: '30px', color: 'var(--text-muted)' }}>
-                        Nenhum material encontrado para as ordens selecionadas.
+                      <td colSpan="7" style={{ textAlign: 'center', padding: '30px', color: 'var(--text-muted)' }}>
+                        Nenhum material na Ordem de Compra. Utilize o botão "Incluir Material" acima para adicionar.
                       </td>
                     </tr>
                   ) : (
                     (ordemCompraAtual.itens || []).map((it, idx) => {
                       const imgUrl = it.foto ? getMediaUrl(it.foto) : '';
-                      const qtdNum = Number(it.qtd || 0);
-                      const qtdFmt = Number.isInteger(qtdNum)
-                        ? String(qtdNum)
-                        : qtdNum.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 3 });
                       return (
                         <tr key={it.id || `${it.seq || idx}-${it.nome}`}>
                           <td style={{ textAlign: 'center', fontWeight: 700, color: 'var(--text-muted)' }}>
@@ -10694,15 +11029,48 @@ function OrdemControle() {
                           </td>
                           <td style={{ fontWeight: 700, color: 'var(--text-main)' }}>
                             {it.nome}
+                            {it.referencia && (
+                              <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)', fontWeight: 500 }}>
+                                Ref: {it.referencia}
+                              </div>
+                            )}
                           </td>
                           <td style={{ textAlign: 'center', fontWeight: 600, color: 'var(--text-muted)' }}>
-                            {it.unidade || 'UN'}
+                            {it.unidade || 'UNI'}
                           </td>
-                          <td style={{ textAlign: 'right', fontWeight: 800, color: '#34d399', fontSize: '0.95rem' }}>
-                            {qtdFmt}
+                          <td style={{ textAlign: 'right' }}>
+                            <input
+                              type="number"
+                              step="any"
+                              min="0.0001"
+                              value={it.qtd ?? ''}
+                              onChange={(e) => handleAlterarQtdItemOC(idx, e.target.value)}
+                              className="form-control"
+                              style={{
+                                width: '105px',
+                                marginLeft: 'auto',
+                                textAlign: 'right',
+                                fontWeight: 800,
+                                color: '#34d399',
+                                fontSize: '0.92rem',
+                                padding: '4px 8px'
+                              }}
+                              title="Altere a quantidade deste material"
+                            />
                           </td>
                           <td style={{ fontSize: '0.83rem', color: 'var(--accent-cyan)', fontWeight: 600 }}>
                             {it.os || '-'}
+                          </td>
+                          <td style={{ textAlign: 'center' }}>
+                            <button
+                              type="button"
+                              onClick={() => handleExcluirItemOC(idx)}
+                              className="btn btn-danger"
+                              style={{ padding: '5px 8px', fontSize: '0.76rem' }}
+                              title="Excluir este material da Ordem de Compra"
+                            >
+                              <Trash2 size={13} />
+                            </button>
                           </td>
                         </tr>
                       );
@@ -10712,11 +11080,29 @@ function OrdemControle() {
               </table>
             </div>
 
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '16px', paddingTop: '12px', borderTop: '1px solid var(--glass-border)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '16px', paddingTop: '12px', borderTop: '1px solid var(--glass-border)', flexWrap: 'wrap', gap: '10px' }}>
               <div style={{ fontSize: '0.84rem', color: 'var(--text-muted)' }}>
                 Total de produtos consolidados (em ordem alfabética): <strong style={{ color: 'var(--text-main)' }}>{(ordemCompraAtual.itens || []).length}</strong>
               </div>
-              <div style={{ display: 'flex', gap: '10px' }}>
+              <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  onClick={handleSalvarEdicaoOrdemCompra}
+                  disabled={salvandoOC}
+                  className="btn btn-primary"
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    fontWeight: 700,
+                    background: ocEditDirty ? 'linear-gradient(135deg, #f59e0b, #d97706)' : 'linear-gradient(135deg, #10b981, #059669)',
+                    borderColor: ocEditDirty ? '#f59e0b' : '#10b981',
+                    color: '#fff'
+                  }}
+                >
+                  <Save size={16} />
+                  <span>{salvandoOC ? 'Salvando...' : 'Salvar Alterações'}</span>
+                </button>
                 <button
                   type="button"
                   onClick={() => handleImprimirOrdemCompra(ordemCompraAtual)}
@@ -10775,7 +11161,7 @@ function OrdemControle() {
                       <th style={{ width: '165px' }}>Data / Hora</th>
                       <th>Ordens de Serviço</th>
                       <th style={{ width: '100px', textAlign: 'center' }}>Produtos</th>
-                      <th style={{ width: '160px', textAlign: 'right' }}>Ações</th>
+                      <th style={{ width: '190px', textAlign: 'right' }}>Ações</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -10795,12 +11181,12 @@ function OrdemControle() {
                           <div style={{ display: 'inline-flex', gap: '6px' }}>
                             <button
                               type="button"
-                              onClick={() => setOrdemCompraAtual(oc)}
+                              onClick={() => abrirOrdemCompraModal(oc, false)}
                               className="btn btn-secondary"
                               style={{ padding: '5px 8px', fontSize: '0.78rem', color: 'var(--accent-cyan)' }}
-                              title="Visualizar Ordem de Compra"
+                              title="Visualizar / Editar Ordem de Compra"
                             >
-                              <Eye size={14} />
+                              <Edit2 size={14} />
                             </button>
                             <button
                               type="button"

@@ -3666,6 +3666,98 @@ async function handleGerarESalvarOrdemCompra(req, res) {
 app.post('/api/ordens-compra/gerar', authenticateToken, handleGerarESalvarOrdemCompra);
 app.post('/api/ordens-compra', authenticateToken, handleGerarESalvarOrdemCompra);
 
+app.put('/api/ordens-compra/:id', authenticateToken, async (req, res) => {
+  try {
+    const empId = req.auth.empresaId;
+    const { id } = req.params;
+    await ensureOrdensCompraTables(db);
+
+    const existing = await req.tenantDb.get(
+      'SELECT * FROM ordens_compra WHERE empresa_id = ? AND id = ?',
+      [empId, id]
+    );
+    if (!existing) {
+      return res.status(404).json({ error: 'Ordem de compra não encontrada.' });
+    }
+
+    const rawItens = Array.isArray(req.body?.itens) ? req.body.itens : [];
+    const observacoes = req.body?.observacoes !== undefined
+      ? (req.body.observacoes ? String(req.body.observacoes).trim() : null)
+      : existing.observacoes;
+
+    const normalizedItems = [];
+    for (const item of rawItens) {
+      const nomeLimpo = String(item.nome || item.referencia || '').trim();
+      if (!nomeLimpo) continue;
+      const qtdVal = parseFloat(String(item.qtd ?? 0).replace(',', '.'));
+      if (isNaN(qtdVal) || qtdVal <= 0) continue;
+
+      const unidadeLimpa = String(item.unidade || 'UNI').trim().toUpperCase() || 'UNI';
+      normalizedItems.push({
+        referencia: item.referencia ? String(item.referencia).trim() : null,
+        foto: item.foto || null,
+        nome: nomeLimpo,
+        unidade: unidadeLimpa,
+        qtd: Math.round(qtdVal * 10000) / 10000,
+        os: item.os ? String(item.os).trim() : (existing.ordens_servico_resumo || '-')
+      });
+    }
+
+    if (normalizedItems.length === 0) {
+      return res.status(400).json({ error: 'A Ordem de Compra deve conter pelo menos 1 material com quantidade maior que zero.' });
+    }
+
+    const sortedItems = normalizedItems
+      .sort((a, b) => (a.nome || '').localeCompare(b.nome || '', 'pt-BR', { sensitivity: 'base', numeric: true }))
+      .map((item, idx) => ({
+        seq: idx + 1,
+        referencia: item.referencia,
+        foto: item.foto,
+        nome: item.nome,
+        unidade: item.unidade,
+        qtd: item.qtd,
+        os: item.os
+      }));
+
+    await req.tenantDb.run(
+      `UPDATE ordens_compra
+       SET itens_json = ?, total_itens = ?, observacoes = ?
+       WHERE empresa_id = ? AND id = ?`,
+      [JSON.stringify(sortedItems), sortedItems.length, observacoes, empId, id]
+    );
+
+    await req.tenantDb.run(
+      'DELETE FROM ordem_compra_itens WHERE empresa_id = ? AND ordem_compra_id = ?',
+      [empId, id]
+    );
+
+    for (const it of sortedItems) {
+      await req.tenantDb.run(
+        `INSERT INTO ordem_compra_itens (empresa_id, ordem_compra_id, seq, material_referencia, foto, nome, unidade, qtd, os_referencia)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [empId, id, it.seq, it.referencia || null, it.foto || null, it.nome, it.unidade, it.qtd, it.os]
+      );
+    }
+
+    const updatedRow = await req.tenantDb.get(
+      'SELECT * FROM ordens_compra WHERE empresa_id = ? AND id = ?',
+      [empId, id]
+    );
+
+    let ordensServico = [];
+    try { ordensServico = JSON.parse(updatedRow.ordens_servico_json || '[]'); } catch (_) {}
+
+    res.json({
+      ...updatedRow,
+      ordens_servico: ordensServico,
+      itens: sortedItems
+    });
+  } catch (err) {
+    console.error('PUT ORDEM COMPRA ERROR:', err);
+    res.status(500).json({ error: 'Erro ao atualizar a Ordem de Compra.' });
+  }
+});
+
 app.delete('/api/ordens-compra/:id', authenticateToken, async (req, res) => {
   try {
     const empId = req.auth.empresaId;
