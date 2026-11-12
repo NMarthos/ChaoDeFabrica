@@ -3348,6 +3348,345 @@ app.put('/api/ordem-servico/:numero/:projetoId/checklist', authenticateToken, ha
 app.put('/api/ordem-servico/:numero/checklist', authenticateToken, handlePutRevisaoChecklist);
 app.put('/api/ordem-servico/:numero/:projetoId/situacao', authenticateToken, handlePutSituacaoOrdemServico);
 
+// ==========================================
+// ROTAS: Ordem de Compra (gerada a partir de 1 ou mais Ordens de Serviço)
+// ==========================================
+
+async function ensureOrdensCompraTables(database) {
+  await database.exec(`
+    CREATE TABLE IF NOT EXISTS ordens_compra (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      empresa_id INT NOT NULL DEFAULT 1,
+      numero INT NOT NULL,
+      ordens_servico_json LONGTEXT NOT NULL,
+      ordens_servico_resumo TEXT DEFAULT NULL,
+      itens_json LONGTEXT NOT NULL,
+      total_itens INT DEFAULT 0,
+      observacoes TEXT DEFAULT NULL,
+      criado_por INT DEFAULT NULL,
+      criado_por_nome VARCHAR(255) DEFAULT NULL,
+      criado_em DATETIME DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_oc_empresa_numero (empresa_id, numero),
+      INDEX idx_oc_empresa_data (empresa_id, criado_em)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+  `);
+
+  await database.exec(`
+    CREATE TABLE IF NOT EXISTS ordem_compra_itens (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      empresa_id INT NOT NULL DEFAULT 1,
+      ordem_compra_id INT NOT NULL,
+      seq INT NOT NULL,
+      material_referencia VARCHAR(100) DEFAULT NULL,
+      foto LONGTEXT DEFAULT NULL,
+      nome VARCHAR(255) NOT NULL,
+      unidade VARCHAR(20) NOT NULL,
+      qtd DECIMAL(15,4) NOT NULL DEFAULT 0,
+      os_referencia VARCHAR(500) DEFAULT NULL,
+      INDEX idx_oci_oc (empresa_id, ordem_compra_id),
+      FOREIGN KEY (ordem_compra_id) REFERENCES ordens_compra(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+  `);
+}
+
+app.get('/api/ordens-compra', authenticateToken, async (req, res) => {
+  try {
+    const empId = req.auth.empresaId;
+    await ensureOrdensCompraTables(db);
+    const rows = await req.tenantDb.all(
+      `SELECT id, empresa_id, numero, ordens_servico_json, ordens_servico_resumo, itens_json, total_itens, observacoes, criado_por, criado_por_nome, criado_em
+       FROM ordens_compra
+       WHERE empresa_id = ?
+       ORDER BY numero DESC, id DESC`,
+      [empId]
+    );
+    const list = (rows || []).map(r => {
+      let ordensServico = [];
+      let itens = [];
+      try { ordensServico = JSON.parse(r.ordens_servico_json || '[]'); } catch (_) {}
+      try { itens = JSON.parse(r.itens_json || '[]'); } catch (_) {}
+      return {
+        ...r,
+        ordens_servico: ordensServico,
+        itens
+      };
+    });
+    res.json(list);
+  } catch (err) {
+    console.error('GET ORDENS COMPRA ERROR:', err);
+    res.status(500).json({ error: 'Erro ao listar ordens de compra.' });
+  }
+});
+
+app.get('/api/ordens-compra/:id', authenticateToken, async (req, res) => {
+  try {
+    const empId = req.auth.empresaId;
+    const { id } = req.params;
+    await ensureOrdensCompraTables(db);
+    const row = await req.tenantDb.get(
+      `SELECT * FROM ordens_compra WHERE empresa_id = ? AND id = ?`,
+      [empId, id]
+    );
+    if (!row) {
+      return res.status(404).json({ error: 'Ordem de compra não encontrada.' });
+    }
+    let ordensServico = [];
+    let itens = [];
+    try { ordensServico = JSON.parse(row.ordens_servico_json || '[]'); } catch (_) {}
+    try { itens = JSON.parse(row.itens_json || '[]'); } catch (_) {}
+    if (!itens || itens.length === 0) {
+      const dbItens = await req.tenantDb.all(
+        `SELECT seq, material_referencia AS referencia, foto, nome, unidade, qtd, os_referencia AS os
+         FROM ordem_compra_itens
+         WHERE empresa_id = ? AND ordem_compra_id = ?
+         ORDER BY seq ASC`,
+        [empId, row.id]
+      );
+      itens = dbItens || [];
+    }
+    res.json({
+      ...row,
+      ordens_servico: ordensServico,
+      itens
+    });
+  } catch (err) {
+    console.error('GET ORDEM COMPRA BY ID ERROR:', err);
+    res.status(500).json({ error: 'Erro ao carregar ordem de compra.' });
+  }
+});
+
+async function handleGerarESalvarOrdemCompra(req, res) {
+  try {
+    const empId = req.auth.empresaId;
+    await ensureOrdensCompraTables(db);
+
+    const rawOrdens = Array.isArray(req.body?.ordens) ? req.body.ordens : [];
+    const observacoes = req.body?.observacoes ? String(req.body.observacoes).trim() : null;
+
+    if (rawOrdens.length === 0) {
+      return res.status(400).json({ error: 'Selecione pelo menos 1 Ordem de Serviço para gerar a Ordem de Compra.' });
+    }
+
+    const osValidas = [];
+    const seenOsKeys = new Set();
+
+    for (const o of rawOrdens) {
+      const num = parseInt(o.Numero ?? o.numero, 10);
+      const projId = parseInt(o.ProjetoID ?? o.projetoId ?? 1, 10) || 1;
+      if (!num || isNaN(num)) continue;
+      const key = `${num}-${projId}`;
+      if (seenOsKeys.has(key)) continue;
+      seenOsKeys.add(key);
+
+      const osRow = await req.tenantDb.get(
+        `SELECT os.Numero, os.ProjetoID, os.NomeProjeto, os.Situacao, c.nome AS cliente_nome
+         FROM Ordem_Servico os
+         LEFT JOIN orcamentos orc ON os.empresa_id = orc.empresa_id AND os.Numero = orc.numero
+         LEFT JOIN clientes c ON orc.empresa_id = c.empresa_id AND orc.cliente_id = c.id
+         WHERE os.empresa_id = ? AND os.Numero = ? AND os.ProjetoID = ?`,
+        [empId, num, projId]
+      );
+      if (osRow) {
+        osValidas.push(osRow);
+      }
+    }
+
+    if (osValidas.length === 0) {
+      return res.status(404).json({ error: 'Nenhuma das Ordens de Serviço selecionadas foi encontrada.' });
+    }
+
+    // Mapa para agrupar produtos iguais
+    const groupedMap = new Map();
+
+    for (const os of osValidas) {
+      const osLabel = `#${os.Numero}/${String(os.ProjetoID || 1).padStart(3, '0')}`;
+
+      const projetos = await req.tenantDb.all(
+        'SELECT * FROM projetos WHERE empresa_id = ? AND orcamento_numero = ? ORDER BY id ASC',
+        [empId, os.Numero]
+      );
+
+      let matchedProject = null;
+      if (projetos && projetos.length > 0) {
+        if (os.NomeProjeto) {
+          const osNomeNorm = os.NomeProjeto.trim().toLowerCase();
+          matchedProject = projetos.find(p => p.nome && p.nome.trim().toLowerCase() === osNomeNorm);
+        }
+        if (!matchedProject) {
+          const idx = (parseInt(os.ProjetoID, 10) || 1) - 1;
+          if (idx >= 0 && idx < projetos.length) {
+            matchedProject = projetos[idx];
+          }
+        }
+        if (!matchedProject && projetos.length === 1) {
+          matchedProject = projetos[0];
+        }
+      }
+
+      if (!matchedProject || !matchedProject.id) continue;
+
+      await ensureProjetoItemsPopulated(matchedProject.id, empId);
+
+      let rawItens = await req.tenantDb.all(`
+        SELECT 
+          pi.MaterialReferencia AS referencia,
+          COALESCE(NULLIF(TRIM(m.MaterialDescricao), ''), pi.MaterialReferencia) AS nome,
+          COALESCE(m.MaterialTipo, 'Produto') AS tipo,
+          pi.ProjetoItemQtd AS qtd,
+          COALESCE(NULLIF(TRIM(pi.ProjetoItemUnidade), ''), m.MaterialUnidade, 'UNI') AS unidade,
+          m.MaterialImagem AS foto
+        FROM ProjetoItem pi
+        LEFT JOIN Material m ON pi.empresa_id = m.empresa_id AND pi.MaterialReferencia = m.MaterialReferencia
+        WHERE pi.empresa_id = ? AND pi.ProjetoID = ? AND pi.ProjetoItemQtd > 0
+        ORDER BY pi.ProjetoItemID ASC
+      `, [empId, matchedProject.id]);
+
+      if (!rawItens || rawItens.length === 0) {
+        rawItens = await req.tenantDb.all(`
+          SELECT 
+            pm.referencia AS referencia,
+            COALESCE(NULLIF(TRIM(m.MaterialDescricao), ''), NULLIF(TRIM(pm.descricao), ''), pm.referencia) AS nome,
+            COALESCE(m.MaterialTipo, 'Produto') AS tipo,
+            pm.qtd AS qtd,
+            COALESCE(NULLIF(TRIM(pm.un), ''), m.MaterialUnidade, 'UNI') AS unidade,
+            m.MaterialImagem AS foto
+          FROM Projeto_Materiais pm
+          LEFT JOIN Material m ON pm.empresa_id = m.empresa_id AND pm.referencia = m.MaterialReferencia
+          WHERE pm.empresa_id = ? AND pm.projeto_id = ? AND pm.qtd > 0
+          ORDER BY pm.id ASC
+        `, [empId, matchedProject.id]);
+      }
+
+      for (const item of (rawItens || [])) {
+        const ref = String(item.referencia || '').trim();
+        const tipo = String(item.tipo || 'Produto').trim();
+        if (tipo === 'Serviço' || ref.toUpperCase().startsWith('FAB.')) {
+          continue;
+        }
+
+        const qtdVal = parseFloat(item.qtd) || 0;
+        if (qtdVal <= 0) continue;
+
+        const nomeLimpo = String(item.nome || ref || 'Material').trim();
+        const unidadeLimpa = String(item.unidade || 'UNI').trim().toUpperCase();
+        // Agrupa produtos iguais pelo nome normalizado + unidade (ou referência quando idêntico)
+        const groupKey = `${nomeLimpo.toLowerCase()}||${unidadeLimpa}`;
+
+        if (!groupedMap.has(groupKey)) {
+          groupedMap.set(groupKey, {
+            referencia: ref,
+            foto: item.foto || null,
+            nome: nomeLimpo,
+            unidade: unidadeLimpa,
+            qtd: qtdVal,
+            osSet: new Set([osLabel])
+          });
+        } else {
+          const existing = groupedMap.get(groupKey);
+          existing.qtd = Math.round((existing.qtd + qtdVal) * 10000) / 10000;
+          if (!existing.foto && item.foto) {
+            existing.foto = item.foto;
+          }
+          existing.osSet.add(osLabel);
+        }
+      }
+    }
+
+    // Ordenar alfabeticamente pelo Nome e atribuir Seq (1, 2, 3...)
+    const sortedItems = Array.from(groupedMap.values())
+      .sort((a, b) => (a.nome || '').localeCompare(b.nome || '', 'pt-BR', { sensitivity: 'base', numeric: true }))
+      .map((item, idx) => ({
+        seq: idx + 1,
+        referencia: item.referencia,
+        foto: item.foto || null,
+        nome: item.nome,
+        unidade: item.unidade,
+        qtd: item.qtd,
+        os: Array.from(item.osSet).join(', ')
+      }));
+
+    if (sortedItems.length === 0) {
+      return res.status(400).json({
+        error: 'As Ordens de Serviço selecionadas não possuem materiais/produtos cadastrados para compra.'
+      });
+    }
+
+    const nextNumRow = await req.tenantDb.get(
+      'SELECT COALESCE(MAX(numero), 0) + 1 AS nextNum FROM ordens_compra WHERE empresa_id = ?',
+      [empId]
+    );
+    const numeroOC = nextNumRow && nextNumRow.nextNum ? Number(nextNumRow.nextNum) : 1;
+
+    const osResumoList = osValidas.map(o => `#${o.Numero}/${String(o.ProjetoID || 1).padStart(3, '0')}`);
+    const osResumoStr = osResumoList.join(', ');
+    const userId = req.auth.userId || req.user?.id || null;
+    const userName = req.auth.nome || req.user?.nome || req.user?.login || 'Usuário';
+
+    const insertRes = await req.tenantDb.run(
+      `INSERT INTO ordens_compra (empresa_id, numero, ordens_servico_json, ordens_servico_resumo, itens_json, total_itens, observacoes, criado_por, criado_por_nome)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        empId,
+        numeroOC,
+        JSON.stringify(osValidas),
+        osResumoStr,
+        JSON.stringify(sortedItems),
+        sortedItems.length,
+        observacoes,
+        userId,
+        userName
+      ]
+    );
+
+    const ordemCompraId = insertRes.lastID;
+    for (const it of sortedItems) {
+      await req.tenantDb.run(
+        `INSERT INTO ordem_compra_itens (empresa_id, ordem_compra_id, seq, material_referencia, foto, nome, unidade, qtd, os_referencia)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [empId, ordemCompraId, it.seq, it.referencia || null, it.foto || null, it.nome, it.unidade, it.qtd, it.os]
+      );
+    }
+
+    const savedRow = await req.tenantDb.get(
+      'SELECT * FROM ordens_compra WHERE empresa_id = ? AND id = ?',
+      [empId, ordemCompraId]
+    );
+
+    res.status(201).json({
+      ...savedRow,
+      ordens_servico: osValidas,
+      itens: sortedItems
+    });
+  } catch (err) {
+    console.error('GERAR ORDEM COMPRA ERROR:', err);
+    res.status(500).json({ error: 'Erro ao gerar e gravar a Ordem de Compra.' });
+  }
+}
+
+app.post('/api/ordens-compra/gerar', authenticateToken, handleGerarESalvarOrdemCompra);
+app.post('/api/ordens-compra', authenticateToken, handleGerarESalvarOrdemCompra);
+
+app.delete('/api/ordens-compra/:id', authenticateToken, async (req, res) => {
+  try {
+    const empId = req.auth.empresaId;
+    const { id } = req.params;
+    await ensureOrdensCompraTables(db);
+    const existing = await req.tenantDb.get(
+      'SELECT id FROM ordens_compra WHERE empresa_id = ? AND id = ?',
+      [empId, id]
+    );
+    if (!existing) {
+      return res.status(404).json({ error: 'Ordem de compra não encontrada.' });
+    }
+    await req.tenantDb.run('DELETE FROM ordem_compra_itens WHERE empresa_id = ? AND ordem_compra_id = ?', [empId, id]);
+    await req.tenantDb.run('DELETE FROM ordens_compra WHERE empresa_id = ? AND id = ?', [empId, id]);
+    res.json({ message: 'Ordem de compra excluída com sucesso.' });
+  } catch (err) {
+    console.error('DELETE ORDEM COMPRA ERROR:', err);
+    res.status(500).json({ error: 'Erro ao excluir ordem de compra.' });
+  }
+});
+
 
 // Helper for parsing chapas PDF text
 function parsePdfText(textPages) {

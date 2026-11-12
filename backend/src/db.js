@@ -663,6 +663,43 @@ export async function initDb(options = {}) {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
   `);
 
+  // Tabela: ordens_compra (Ordens de Compra geradas a partir de 1 ou mais Ordens de Serviço)
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS ordens_compra (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      empresa_id INT NOT NULL DEFAULT 1,
+      numero INT NOT NULL,
+      ordens_servico_json LONGTEXT NOT NULL,
+      ordens_servico_resumo TEXT DEFAULT NULL,
+      itens_json LONGTEXT NOT NULL,
+      total_itens INT DEFAULT 0,
+      observacoes TEXT DEFAULT NULL,
+      criado_por INT DEFAULT NULL,
+      criado_por_nome VARCHAR(255) DEFAULT NULL,
+      criado_em DATETIME DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_oc_empresa_numero (empresa_id, numero),
+      INDEX idx_oc_empresa_data (empresa_id, criado_em)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+  `);
+
+  // Tabela: ordem_compra_itens (Itens consolidados da Ordem de Compra)
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS ordem_compra_itens (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      empresa_id INT NOT NULL DEFAULT 1,
+      ordem_compra_id INT NOT NULL,
+      seq INT NOT NULL,
+      material_referencia VARCHAR(100) DEFAULT NULL,
+      foto LONGTEXT DEFAULT NULL,
+      nome VARCHAR(255) NOT NULL,
+      unidade VARCHAR(20) NOT NULL,
+      qtd DECIMAL(15,4) NOT NULL DEFAULT 0,
+      os_referencia VARCHAR(500) DEFAULT NULL,
+      INDEX idx_oci_oc (empresa_id, ordem_compra_id),
+      FOREIGN KEY (ordem_compra_id) REFERENCES ordens_compra(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+  `);
+
   // Tabela: ConfigEmpresa
   await db.exec(`
     CREATE TABLE IF NOT EXISTS ConfigEmpresa (

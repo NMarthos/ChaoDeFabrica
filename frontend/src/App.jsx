@@ -9562,6 +9562,202 @@ function OrdemControle() {
 
   const [salvando, setSalvando] = useState(false);
 
+  // Seleção de 1 ou mais Ordens de Serviço e estado da Ordem de Compra
+  const [selectedOsKeys, setSelectedOsKeys] = useState([]);
+  const [gerandoOC, setGerandoOC] = useState(false);
+  const [ordemCompraAtual, setOrdemCompraAtual] = useState(null);
+  const [modalHistoricoOC, setModalHistoricoOC] = useState(false);
+  const [ordensCompraSalvas, setOrdensCompraSalvas] = useState([]);
+  const [loadingHistoricoOC, setLoadingHistoricoOC] = useState(false);
+
+  const getOsKey = (item) => `${item.Numero}-${item.ProjetoID || 1}`;
+
+  const toggleSelectOs = (item) => {
+    const key = getOsKey(item);
+    setSelectedOsKeys(prev =>
+      prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key]
+    );
+  };
+
+  const isAllVisibleSelected = ordens.length > 0 && ordens.every(o => selectedOsKeys.includes(getOsKey(o)));
+
+  const toggleSelectAllVisible = () => {
+    if (isAllVisibleSelected) {
+      const visibleSet = new Set(ordens.map(o => getOsKey(o)));
+      setSelectedOsKeys(prev => prev.filter(k => !visibleSet.has(k)));
+    } else {
+      const next = new Set(selectedOsKeys);
+      ordens.forEach(o => next.add(getOsKey(o)));
+      setSelectedOsKeys(Array.from(next));
+    }
+  };
+
+  const carregarHistoricoOrdensCompra = async () => {
+    try {
+      setLoadingHistoricoOC(true);
+      const res = await api.get('/ordens-compra');
+      setOrdensCompraSalvas(res.data || []);
+    } catch (err) {
+      console.error('Erro ao carregar ordens de compra:', err);
+    } finally {
+      setLoadingHistoricoOC(false);
+    }
+  };
+
+  const handleGerarOrdemCompra = async () => {
+    if (selectedOsKeys.length === 0) {
+      alert('Selecione pelo menos 1 Ordem de Serviço na tabela para gerar a Ordem de Compra.');
+      return;
+    }
+
+    const ordensPayload = selectedOsKeys.map(k => {
+      const [num, proj] = k.split('-');
+      return { Numero: parseInt(num, 10), ProjetoID: parseInt(proj, 10) || 1 };
+    });
+
+    try {
+      setGerandoOC(true);
+      setError('');
+      const res = await api.post('/ordens-compra/gerar', { ordens: ordensPayload });
+      const ocGravada = res.data;
+      setOrdemCompraAtual(ocGravada);
+      setSuccess(`Ordem de Compra #${ocGravada.numero} gerada e gravada com sucesso (${ocGravada.itens?.length || 0} materiais consolidados)!`);
+      setTimeout(() => setSuccess(''), 4500);
+    } catch (err) {
+      console.error('Erro ao gerar ordem de compra:', err);
+      setError(err.response?.data?.error || 'Erro ao gerar e gravar a Ordem de Compra.');
+    } finally {
+      setGerandoOC(false);
+    }
+  };
+
+  const handleExcluirOrdemCompra = async (oc) => {
+    if (!window.confirm(`Deseja realmente excluir a Ordem de Compra #${oc.numero}?`)) return;
+    try {
+      await api.delete(`/ordens-compra/${oc.id}`);
+      setOrdensCompraSalvas(prev => prev.filter(item => item.id !== oc.id));
+      if (ordemCompraAtual && ordemCompraAtual.id === oc.id) {
+        setOrdemCompraAtual(null);
+      }
+    } catch (err) {
+      alert(err.response?.data?.error || 'Erro ao excluir Ordem de Compra.');
+    }
+  };
+
+  const handleImprimirOrdemCompra = async (oc) => {
+    if (!oc) return;
+    const empresaParams = await getEmpresaParametros();
+    const logoUrl = getMediaUrl(empresaParams?.EMP_LOGO || empresaParams?.LOGO_EMP || '');
+    const razaoSocial = empresaParams?.RAZAO_SOC || empresaParams?.NOME_FANT || 'Ordem de Compra';
+
+    const printWindow = window.open('', '_blank', 'width=1000,height=850');
+    if (!printWindow) {
+      alert('Por favor, habilite pop-ups para visualizar/imprimir a Ordem de Compra.');
+      return;
+    }
+
+    const formatQtd = (val) => {
+      const num = parseFloat(val || 0);
+      return num.toLocaleString('pt-BR', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+    };
+
+    const dataEmissao = oc.criado_em
+      ? new Date(oc.criado_em).toLocaleString('pt-BR')
+      : new Date().toLocaleString('pt-BR');
+
+    const itensRowsHtml = (oc.itens || []).map((item, idx) => {
+      const seqNum = item.seq || (idx + 1);
+      const fotoSrc = item.foto ? getMediaUrl(item.foto) : '';
+      return `
+        <tr>
+          <td style="text-align: center; font-weight: 700; color: #334155;">${seqNum}</td>
+          <td style="text-align: center; vertical-align: middle;">
+            ${fotoSrc
+              ? `<img src="${fotoSrc}" alt="${(item.nome || '').replace(/"/g, '&quot;')}" style="width: 44px; height: 44px; object-fit: cover; border-radius: 6px; border: 1px solid #cbd5e1; background: #fff;" />`
+              : `<div style="width: 44px; height: 44px; border-radius: 6px; border: 1px dashed #cbd5e1; background: #f8fafc; display: inline-flex; align-items: center; justify-content: center; font-size: 9px; color: #94a3b8;">Sem foto</div>`
+            }
+          </td>
+          <td style="font-weight: 600; color: #0f172a;">
+            ${item.nome || '-'}
+            ${item.referencia ? `<div style="font-size: 10px; color: #64748b; font-weight: 400;">Ref: ${item.referencia}</div>` : ''}
+          </td>
+          <td style="text-align: center; font-weight: 600; color: #334155;">${item.unidade || 'UNI'}</td>
+          <td style="text-align: right; font-weight: 800; color: #0284c7; font-size: 13px;">${formatQtd(item.qtd)}</td>
+          <td style="text-align: center; font-weight: 600; color: #475569; font-size: 11px;">${item.os || oc.ordens_servico_resumo || '-'}</td>
+        </tr>
+      `;
+    }).join('');
+
+    printWindow.document.write(`
+      <!DOCTYPE html>
+      <html lang="pt-BR">
+      <head>
+        <meta charset="UTF-8" />
+        <title>Ordem de Compra #${oc.numero}</title>
+        <style>
+          body { font-family: 'Segoe UI', Arial, sans-serif; color: #1e293b; margin: 0; padding: 24px; background: #fff; }
+          .no-print-bar { background: #0f172a; color: #fff; padding: 12px 20px; display: flex; justify-content: space-between; align-items: center; border-radius: 8px; margin-bottom: 20px; }
+          .btn-print { background: #0284c7; color: #fff; border: none; padding: 8px 18px; font-size: 14px; font-weight: 700; border-radius: 6px; cursor: pointer; }
+          .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #0284c7; padding-bottom: 14px; margin-bottom: 16px; }
+          .info-box { background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; padding: 12px 16px; margin-bottom: 18px; font-size: 12.5px; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
+          table { width: 100%; border-collapse: collapse; font-size: 12px; }
+          th { background: #f1f5f9; color: #334155; font-weight: 700; text-transform: uppercase; padding: 9px 10px; border: 1px solid #cbd5e1; font-size: 11px; }
+          td { padding: 7px 10px; border: 1px solid #e2e8f0; vertical-align: middle; }
+          tr:nth-child(even) { background: #fafbfc; }
+          @media print {
+            body { padding: 0; }
+            .no-print-bar { display: none !important; }
+            tr { page-break-inside: avoid; }
+          }
+        </style>
+      </head>
+      <body>
+        <div class="no-print-bar">
+          <span>Ordem de Compra #${oc.numero} — Gravada em ${dataEmissao}</span>
+          <button class="btn-print" onclick="window.print()">Imprimir / Salvar PDF</button>
+        </div>
+
+        <div class="header">
+          <div style="display: flex; align-items: center; gap: 14px;">
+            ${logoUrl ? `<img src="${logoUrl}" alt="Logo" style="max-height: 55px; max-width: 150px; object-fit: contain;" />` : ''}
+            <div>
+              <h1 style="margin: 0; font-size: 20px; color: #0f172a;">ORDEM DE COMPRA #${oc.numero}</h1>
+              <div style="font-size: 12px; color: #64748b; margin-top: 2px;">${razaoSocial} — Relatório Consolidado de Materiais por Ordem Alfabética</div>
+            </div>
+          </div>
+          <div style="text-align: right; font-size: 12px; color: #475569;">
+            <div><strong>Data/Hora:</strong> ${dataEmissao}</div>
+            <div><strong>Emitido por:</strong> ${oc.criado_por_nome || 'Usuário'}</div>
+            <div><strong>Total de Produtos:</strong> ${(oc.itens || []).length}</div>
+          </div>
+        </div>
+
+        <div class="info-box">
+          <div><strong>Ordens de Serviço Selecionadas:</strong> ${oc.ordens_servico_resumo || '-'}</div>
+          <div><strong>Critério:</strong> Produtos iguais agrupados com quantidades acumuladas (Ordem Alfabética do Nome)</div>
+        </div>
+
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 50px; text-align: center;">Seq</th>
+              <th style="width: 64px; text-align: center;">Foto</th>
+              <th style="text-align: left;">Nome</th>
+              <th style="width: 75px; text-align: center;">Unidade</th>
+              <th style="width: 95px; text-align: right;">Qtd</th>
+              <th style="width: 160px; text-align: center;">OS</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${itensRowsHtml}
+          </tbody>
+        </table>
+      </body>
+      </html>
+    `);
+    printWindow.document.close();
+  };
+
   const carregarOrdens = async (overrideParams = {}) => {
     try {
       setLoading(true);
@@ -9748,7 +9944,43 @@ function OrdemControle() {
           </p>
         </div>
 
-        <div style={{ display: 'flex', gap: '10px' }}>
+        <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+          <button
+            type="button"
+            onClick={() => {
+              setModalHistoricoOC(true);
+              carregarHistoricoOrdensCompra();
+            }}
+            className="btn btn-secondary"
+            style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 600 }}
+            title="Visualizar ordens de compra gravadas anteriormente"
+          >
+            <History size={16} />
+            <span>Ordens de Compra Gravadas</span>
+          </button>
+          <button
+            type="button"
+            onClick={handleGerarOrdemCompra}
+            disabled={gerandoOC}
+            className="btn btn-primary"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              fontWeight: 700,
+              background: selectedOsKeys.length > 0 ? 'linear-gradient(135deg, #10b981, #059669)' : 'rgba(16, 185, 129, 0.2)',
+              borderColor: '#10b981',
+              color: '#ffffff'
+            }}
+            title="Selecione 1 ou mais Ordens de Serviço na tabela para gerar e gravar a Ordem de Compra"
+          >
+            <Package size={16} />
+            <span>
+              {gerandoOC
+                ? 'Gerando Ordem de Compra...'
+                : `Gerar Ordem de Compra${selectedOsKeys.length > 0 ? ` (${selectedOsKeys.length})` : ''}`}
+            </span>
+          </button>
           <button
             type="button"
             onClick={carregarOrdens}
@@ -9908,10 +10140,25 @@ function OrdemControle() {
 
       {/* Main Table */}
       <div className="glass-card" style={{ padding: 0, overflow: 'hidden' }}>
-        <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--glass-border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <h3 style={{ margin: 0, fontSize: '1.05rem', fontWeight: 700, color: 'var(--text-main)' }}>
-            Listagem de Ordens de Serviço
-          </h3>
+        <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--glass-border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+            <h3 style={{ margin: 0, fontSize: '1.05rem', fontWeight: 700, color: 'var(--text-main)' }}>
+              Listagem de Ordens de Serviço
+            </h3>
+            {selectedOsKeys.length > 0 && (
+              <span style={{ background: 'rgba(16, 185, 129, 0.15)', border: '1px solid rgba(16, 185, 129, 0.4)', color: '#34d399', padding: '3px 10px', borderRadius: '999px', fontSize: '0.78rem', fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
+                <span>{selectedOsKeys.length} selecionada(s)</span>
+                <button
+                  type="button"
+                  onClick={() => setSelectedOsKeys([])}
+                  style={{ background: 'transparent', border: 'none', color: '#34d399', cursor: 'pointer', fontWeight: 800, padding: 0, fontSize: '0.82rem' }}
+                  title="Limpar seleção"
+                >
+                  &times;
+                </button>
+              </span>
+            )}
+          </div>
           <span style={{ fontSize: '0.84rem', color: 'var(--text-muted)' }}>
             Exibindo <strong>{ordens.length}</strong> registro(s)
           </span>
@@ -9921,6 +10168,15 @@ function OrdemControle() {
           <table className="data-table" style={{ margin: 0 }}>
             <thead>
               <tr>
+                <th style={{ width: '44px', textAlign: 'center' }}>
+                  <input
+                    type="checkbox"
+                    checked={isAllVisibleSelected}
+                    onChange={toggleSelectAllVisible}
+                    style={{ width: '16px', height: '16px', cursor: 'pointer', accentColor: '#10b981' }}
+                    title="Selecionar/desmarcar todas as Ordens de Serviço visíveis"
+                  />
+                </th>
                 <th style={{ width: '150px' }}>Ordem / Item</th>
                 <th>Projeto / Ambiente</th>
                 <th style={{ width: '110px' }}>Tempo</th>
@@ -9934,14 +10190,14 @@ function OrdemControle() {
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan="8" style={{ textAlign: 'center', padding: '40px', color: 'var(--text-muted)' }}>
+                  <td colSpan="9" style={{ textAlign: 'center', padding: '40px', color: 'var(--text-muted)' }}>
                     <RefreshCw size={24} className="animate-spin" style={{ margin: '0 auto 10px auto' }} />
                     <div>Carregando ordens de serviço...</div>
                   </td>
                 </tr>
               ) : ordens.length === 0 ? (
                 <tr>
-                  <td colSpan="8" style={{ textAlign: 'center', padding: '40px 20px', color: 'var(--text-muted)' }}>
+                  <td colSpan="9" style={{ textAlign: 'center', padding: '40px 20px', color: 'var(--text-muted)' }}>
                     <Layers size={36} style={{ opacity: 0.3, marginBottom: '10px', display: 'block', margin: '0 auto 10px' }} />
                     <div style={{ fontSize: '1rem', fontWeight: 600, color: 'var(--text-main)', marginBottom: '4px' }}>
                       Nenhuma ordem de serviço encontrada
@@ -9954,8 +10210,23 @@ function OrdemControle() {
               ) : (
                 ordens.map((item) => {
                   const badge = getSituacaoBadgeStyle(item.Situacao);
+                  const isSelected = selectedOsKeys.includes(getOsKey(item));
                   return (
-                    <tr key={`${item.Numero}-${item.ProjetoID}`}>
+                    <tr
+                      key={`${item.Numero}-${item.ProjetoID}`}
+                      style={isSelected ? { background: 'rgba(16, 185, 129, 0.08)' } : undefined}
+                    >
+                      {/* Checkbox de seleção para Ordem de Compra */}
+                      <td style={{ textAlign: 'center' }}>
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={() => toggleSelectOs(item)}
+                          style={{ width: '16px', height: '16px', cursor: 'pointer', accentColor: '#10b981' }}
+                          title={`Selecionar OS #${item.Numero}/${String(item.ProjetoID || 1).padStart(3, '0')} para Ordem de Compra`}
+                        />
+                      </td>
+
                       {/* Número e Item */}
                       <td>
                         <span style={{ fontWeight: 800, fontSize: '0.95rem', color: 'var(--accent-cyan)' }}>
@@ -10345,6 +10616,228 @@ function OrdemControle() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL DE VISUALIZAÇÃO DA ORDEM DE COMPRA GRAVADA */}
+      {ordemCompraAtual && (
+        <div className="modal-overlay" style={{ zIndex: 1300 }}>
+          <div className="glass-card modal-content" style={{ maxWidth: '1020px', width: '95%', maxHeight: '90vh', display: 'flex', flexDirection: 'column' }}>
+            <div className="modal-header" style={{ borderBottom: '1px solid var(--glass-border)', paddingBottom: '12px' }}>
+              <div>
+                <h3 className="modal-title" style={{ display: 'flex', alignItems: 'center', gap: '8px', margin: 0 }}>
+                  <Package size={20} color="#10b981" />
+                  Ordem de Compra #{ordemCompraAtual.numero}
+                  <span style={{ fontSize: '0.75rem', background: 'rgba(16, 185, 129, 0.15)', color: '#34d399', border: '1px solid rgba(16, 185, 129, 0.35)', padding: '2px 8px', borderRadius: '999px', fontWeight: 700 }}>
+                    GRAVADA
+                  </span>
+                </h3>
+                <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)', marginTop: '4px' }}>
+                  Ordens de Serviço vinculadas: <strong style={{ color: 'var(--text-main)' }}>{ordemCompraAtual.ordens_servico_resumo || '-'}</strong>
+                  {ordemCompraAtual.criado_em && (
+                    <span> • Emitida em {new Date(ordemCompraAtual.criado_em).toLocaleString('pt-BR')}</span>
+                  )}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setOrdemCompraAtual(null)}
+                className="close-btn"
+              >
+                &times;
+              </button>
+            </div>
+
+            <div style={{ overflowY: 'auto', flex: 1, marginTop: '14px' }}>
+              <table className="data-table" style={{ margin: 0 }}>
+                <thead>
+                  <tr>
+                    <th style={{ width: '65px', textAlign: 'center' }}>Seq</th>
+                    <th style={{ width: '75px', textAlign: 'center' }}>Foto</th>
+                    <th>Nome</th>
+                    <th style={{ width: '95px', textAlign: 'center' }}>Unidade</th>
+                    <th style={{ width: '110px', textAlign: 'right' }}>Qtd</th>
+                    <th style={{ width: '220px' }}>OS</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(ordemCompraAtual.itens || []).length === 0 ? (
+                    <tr>
+                      <td colSpan="6" style={{ textAlign: 'center', padding: '30px', color: 'var(--text-muted)' }}>
+                        Nenhum material encontrado para as ordens selecionadas.
+                      </td>
+                    </tr>
+                  ) : (
+                    (ordemCompraAtual.itens || []).map((it, idx) => {
+                      const imgUrl = it.foto ? getMediaUrl(it.foto) : '';
+                      const qtdNum = Number(it.qtd || 0);
+                      const qtdFmt = Number.isInteger(qtdNum)
+                        ? String(qtdNum)
+                        : qtdNum.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 3 });
+                      return (
+                        <tr key={it.id || `${it.seq || idx}-${it.nome}`}>
+                          <td style={{ textAlign: 'center', fontWeight: 700, color: 'var(--text-muted)' }}>
+                            {it.seq || idx + 1}
+                          </td>
+                          <td style={{ textAlign: 'center' }}>
+                            {imgUrl ? (
+                              <img
+                                src={imgUrl}
+                                alt={it.nome}
+                                style={{ width: '44px', height: '44px', objectFit: 'cover', borderRadius: '6px', border: '1px solid var(--glass-border)', background: '#0f172a' }}
+                                onError={(e) => { e.currentTarget.style.display = 'none'; }}
+                              />
+                            ) : (
+                              <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>-</span>
+                            )}
+                          </td>
+                          <td style={{ fontWeight: 700, color: 'var(--text-main)' }}>
+                            {it.nome}
+                          </td>
+                          <td style={{ textAlign: 'center', fontWeight: 600, color: 'var(--text-muted)' }}>
+                            {it.unidade || 'UN'}
+                          </td>
+                          <td style={{ textAlign: 'right', fontWeight: 800, color: '#34d399', fontSize: '0.95rem' }}>
+                            {qtdFmt}
+                          </td>
+                          <td style={{ fontSize: '0.83rem', color: 'var(--accent-cyan)', fontWeight: 600 }}>
+                            {it.os || '-'}
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '16px', paddingTop: '12px', borderTop: '1px solid var(--glass-border)' }}>
+              <div style={{ fontSize: '0.84rem', color: 'var(--text-muted)' }}>
+                Total de produtos consolidados (em ordem alfabética): <strong style={{ color: 'var(--text-main)' }}>{(ordemCompraAtual.itens || []).length}</strong>
+              </div>
+              <div style={{ display: 'flex', gap: '10px' }}>
+                <button
+                  type="button"
+                  onClick={() => handleImprimirOrdemCompra(ordemCompraAtual)}
+                  className="btn btn-primary"
+                  style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 700 }}
+                >
+                  <Printer size={16} />
+                  <span>Imprimir / PDF</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setOrdemCompraAtual(null)}
+                  className="btn btn-secondary"
+                >
+                  Fechar
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL DE HISTÓRICO DE ORDENS DE COMPRA GRAVADAS */}
+      {modalHistoricoOC && (
+        <div className="modal-overlay" style={{ zIndex: 1250 }}>
+          <div className="glass-card modal-content" style={{ maxWidth: '860px', width: '95%', maxHeight: '85vh', display: 'flex', flexDirection: 'column' }}>
+            <div className="modal-header" style={{ borderBottom: '1px solid var(--glass-border)', paddingBottom: '12px' }}>
+              <h3 className="modal-title" style={{ display: 'flex', alignItems: 'center', gap: '8px', margin: 0 }}>
+                <History size={19} color="var(--accent-cyan)" />
+                Ordens de Compra Gravadas
+              </h3>
+              <button
+                type="button"
+                onClick={() => setModalHistoricoOC(false)}
+                className="close-btn"
+              >
+                &times;
+              </button>
+            </div>
+
+            <div style={{ overflowY: 'auto', flex: 1, marginTop: '14px' }}>
+              {loadingHistoricoOC ? (
+                <div style={{ textAlign: 'center', padding: '32px', color: 'var(--text-muted)' }}>
+                  <RefreshCw size={22} className="animate-spin" style={{ margin: '0 auto 8px auto' }} />
+                  <div>Carregando ordens de compra...</div>
+                </div>
+              ) : ordensCompraSalvas.length === 0 ? (
+                <div style={{ textAlign: 'center', padding: '32px', color: 'var(--text-muted)' }}>
+                  Nenhuma Ordem de Compra gravada até o momento.
+                </div>
+              ) : (
+                <table className="data-table" style={{ margin: 0 }}>
+                  <thead>
+                    <tr>
+                      <th style={{ width: '100px' }}>Nº OC</th>
+                      <th style={{ width: '165px' }}>Data / Hora</th>
+                      <th>Ordens de Serviço</th>
+                      <th style={{ width: '100px', textAlign: 'center' }}>Produtos</th>
+                      <th style={{ width: '160px', textAlign: 'right' }}>Ações</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {ordensCompraSalvas.map((oc) => (
+                      <tr key={oc.id}>
+                        <td style={{ fontWeight: 800, color: '#34d399' }}>#{oc.numero}</td>
+                        <td style={{ fontSize: '0.84rem', color: 'var(--text-main)' }}>
+                          {oc.criado_em ? new Date(oc.criado_em).toLocaleString('pt-BR') : '-'}
+                        </td>
+                        <td style={{ fontSize: '0.85rem', color: 'var(--accent-cyan)', fontWeight: 600 }}>
+                          {oc.ordens_servico_resumo || '-'}
+                        </td>
+                        <td style={{ textAlign: 'center', fontWeight: 700 }}>
+                          {(oc.itens || []).length}
+                        </td>
+                        <td style={{ textAlign: 'right' }}>
+                          <div style={{ display: 'inline-flex', gap: '6px' }}>
+                            <button
+                              type="button"
+                              onClick={() => setOrdemCompraAtual(oc)}
+                              className="btn btn-secondary"
+                              style={{ padding: '5px 8px', fontSize: '0.78rem', color: 'var(--accent-cyan)' }}
+                              title="Visualizar Ordem de Compra"
+                            >
+                              <Eye size={14} />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleImprimirOrdemCompra(oc)}
+                              className="btn btn-secondary"
+                              style={{ padding: '5px 8px', fontSize: '0.78rem', color: '#34d399' }}
+                              title="Imprimir / Salvar PDF"
+                            >
+                              <Printer size={14} />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleExcluirOrdemCompra(oc)}
+                              className="btn btn-danger"
+                              style={{ padding: '5px 8px', fontSize: '0.78rem' }}
+                              title="Excluir Ordem de Compra"
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '14px', paddingTop: '12px', borderTop: '1px solid var(--glass-border)' }}>
+              <button
+                type="button"
+                onClick={() => setModalHistoricoOC(false)}
+                className="btn btn-secondary"
+              >
+                Fechar
+              </button>
+            </div>
           </div>
         </div>
       )}
