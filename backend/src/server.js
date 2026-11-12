@@ -3389,6 +3389,111 @@ async function ensureOrdensCompraTables(database) {
   `);
 }
 
+async function sincronizarItensOrdemCompraComCadastro(tenantDb, empId, ocRow) {
+  let ordensServico = [];
+  let itens = [];
+  try { ordensServico = JSON.parse(ocRow.ordens_servico_json || '[]'); } catch (_) {}
+  try { itens = JSON.parse(ocRow.itens_json || '[]'); } catch (_) {}
+
+  if (!itens || itens.length === 0) {
+    const dbItens = await tenantDb.all(
+      `SELECT seq, material_referencia AS referencia, foto, nome, unidade, qtd, os_referencia AS os
+       FROM ordem_compra_itens
+       WHERE empresa_id = ? AND ordem_compra_id = ?
+       ORDER BY seq ASC`,
+      [empId, ocRow.id]
+    );
+    itens = dbItens || [];
+  }
+
+  if (itens.length > 0) {
+    const materiais = await tenantDb.all(
+      `SELECT MaterialReferencia, MaterialDescricao, MaterialUnidade, MaterialImagem
+       FROM Material
+       WHERE empresa_id = ?`,
+      [empId]
+    );
+
+    const byRef = new Map();
+    const byName = new Map();
+    for (const m of (materiais || [])) {
+      if (m.MaterialReferencia) {
+        byRef.set(String(m.MaterialReferencia).trim().toLowerCase(), m);
+      }
+      if (m.MaterialDescricao) {
+        byName.set(String(m.MaterialDescricao).trim().toLowerCase(), m);
+      }
+    }
+
+    let houveAlteracaoCadastro = false;
+    const itensAtualizados = itens.map(it => {
+      const refKey = String(it.referencia || '').trim().toLowerCase();
+      const nomeKey = String(it.nome || '').trim().toLowerCase();
+      const mat = (refKey && byRef.get(refKey)) || (nomeKey && byName.get(nomeKey)) || null;
+      if (!mat) return it;
+
+      const novoNome = String(mat.MaterialDescricao || it.nome || '').trim() || it.nome;
+      const novaUnidade = String(mat.MaterialUnidade || it.unidade || 'UNI').trim().toUpperCase();
+      const novaFoto = mat.MaterialImagem || it.foto || null;
+      const novaRef = mat.MaterialReferencia || it.referencia || null;
+
+      if (
+        novoNome !== it.nome ||
+        novaUnidade !== it.unidade ||
+        novaFoto !== (it.foto || null) ||
+        novaRef !== (it.referencia || null)
+      ) {
+        houveAlteracaoCadastro = true;
+      }
+
+      return {
+        ...it,
+        referencia: novaRef,
+        nome: novoNome,
+        unidade: novaUnidade,
+        foto: novaFoto
+      };
+    });
+
+    const sortedItems = itensAtualizados
+      .sort((a, b) => (a.nome || '').localeCompare(b.nome || '', 'pt-BR', { sensitivity: 'base', numeric: true }))
+      .map((item, idx) => ({
+        ...item,
+        seq: idx + 1
+      }));
+
+    if (houveAlteracaoCadastro) {
+      try {
+        await tenantDb.run(
+          `UPDATE ordens_compra SET itens_json = ?, total_itens = ? WHERE empresa_id = ? AND id = ?`,
+          [JSON.stringify(sortedItems), sortedItems.length, empId, ocRow.id]
+        );
+        await tenantDb.run(
+          `DELETE FROM ordem_compra_itens WHERE empresa_id = ? AND ordem_compra_id = ?`,
+          [empId, ocRow.id]
+        );
+        for (const it of sortedItems) {
+          await tenantDb.run(
+            `INSERT INTO ordem_compra_itens (empresa_id, ordem_compra_id, seq, material_referencia, foto, nome, unidade, qtd, os_referencia)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [empId, ocRow.id, it.seq, it.referencia || null, it.foto || null, it.nome, it.unidade, it.qtd, it.os || '-']
+          );
+        }
+      } catch (syncErr) {
+        console.error('Erro ao sincronizar itens da OC com cadastro de materiais:', syncErr);
+      }
+    }
+
+    itens = sortedItems;
+  }
+
+  return {
+    ...ocRow,
+    ordens_servico: ordensServico,
+    itens
+  };
+}
+
 app.get('/api/ordens-compra', authenticateToken, async (req, res) => {
   try {
     const empId = req.auth.empresaId;
@@ -3400,17 +3505,11 @@ app.get('/api/ordens-compra', authenticateToken, async (req, res) => {
        ORDER BY numero DESC, id DESC`,
       [empId]
     );
-    const list = (rows || []).map(r => {
-      let ordensServico = [];
-      let itens = [];
-      try { ordensServico = JSON.parse(r.ordens_servico_json || '[]'); } catch (_) {}
-      try { itens = JSON.parse(r.itens_json || '[]'); } catch (_) {}
-      return {
-        ...r,
-        ordens_servico: ordensServico,
-        itens
-      };
-    });
+    const list = [];
+    for (const r of (rows || [])) {
+      const synced = await sincronizarItensOrdemCompraComCadastro(req.tenantDb, empId, r);
+      list.push(synced);
+    }
     res.json(list);
   } catch (err) {
     console.error('GET ORDENS COMPRA ERROR:', err);
@@ -3430,25 +3529,8 @@ app.get('/api/ordens-compra/:id', authenticateToken, async (req, res) => {
     if (!row) {
       return res.status(404).json({ error: 'Ordem de compra não encontrada.' });
     }
-    let ordensServico = [];
-    let itens = [];
-    try { ordensServico = JSON.parse(row.ordens_servico_json || '[]'); } catch (_) {}
-    try { itens = JSON.parse(row.itens_json || '[]'); } catch (_) {}
-    if (!itens || itens.length === 0) {
-      const dbItens = await req.tenantDb.all(
-        `SELECT seq, material_referencia AS referencia, foto, nome, unidade, qtd, os_referencia AS os
-         FROM ordem_compra_itens
-         WHERE empresa_id = ? AND ordem_compra_id = ?
-         ORDER BY seq ASC`,
-        [empId, row.id]
-      );
-      itens = dbItens || [];
-    }
-    res.json({
-      ...row,
-      ordens_servico: ordensServico,
-      itens
-    });
+    const synced = await sincronizarItensOrdemCompraComCadastro(req.tenantDb, empId, row);
+    res.json(synced);
   } catch (err) {
     console.error('GET ORDEM COMPRA BY ID ERROR:', err);
     res.status(500).json({ error: 'Erro ao carregar ordem de compra.' });

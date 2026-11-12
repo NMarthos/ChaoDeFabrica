@@ -9570,6 +9570,7 @@ function OrdemControle() {
   const [ordensCompraSalvas, setOrdensCompraSalvas] = useState([]);
   const [loadingHistoricoOC, setLoadingHistoricoOC] = useState(false);
   const [salvandoOC, setSalvandoOC] = useState(false);
+  const [refreshingOC, setRefreshingOC] = useState(false);
   const [ocEditDirty, setOcEditDirty] = useState(false);
   const [catalogoMateriais, setCatalogoMateriais] = useState([]);
   const [mostrarFormNovoItemOC, setMostrarFormNovoItemOC] = useState(false);
@@ -9582,6 +9583,26 @@ function OrdemControle() {
     os: ''
   });
 
+  // Modal de edição do cadastro do Produto diretamente a partir da Ordem de Compra
+  const [modalEditarProdutoOC, setModalEditarProdutoOC] = useState({
+    isOpen: false,
+    isNovoCadastro: false,
+    idxItemOC: null,
+    codigo: '',
+    nome: '',
+    descricao: '',
+    preco: '',
+    unidade: 'UNI',
+    produtoGrupo: 8,
+    tipo: 'Produto',
+    tempo: '',
+    exibirNaProposta: 'Nao',
+    imagem: null,
+    imagemPreview: null,
+    salvando: false,
+    erro: ''
+  });
+
   const reordenarERenumerarItensOC = (listaItens) => {
     return [...(listaItens || [])]
       .sort((a, b) => (a.nome || '').localeCompare(b.nome || '', 'pt-BR', { sensitivity: 'base', numeric: true }))
@@ -9591,16 +9612,220 @@ function OrdemControle() {
       }));
   };
 
-  const carregarCatalogoMateriais = async () => {
-    if (catalogoMateriais.length > 0) return;
+  const carregarCatalogoMateriais = async (force = false) => {
+    if (!force && catalogoMateriais.length > 0) return catalogoMateriais;
     try {
       const res = await api.get('/produtos');
       const apenasProdutos = (res.data || []).filter(
         p => p.tipo !== 'Serviço' && !String(p.codigo || '').toUpperCase().startsWith('FAB.')
       );
       setCatalogoMateriais(apenasProdutos);
+      return apenasProdutos;
     } catch (err) {
       console.error('Erro ao carregar catálogo de materiais:', err);
+      return catalogoMateriais;
+    }
+  };
+
+  // Atualiza (refresh) a Ordem de Compra aberta buscando os dados sincronizados com o cadastro de produtos
+  const refreshOrdemCompraAtual = async (ocId = null) => {
+    const targetId = ocId || ordemCompraAtual?.id;
+    if (!targetId) return;
+    try {
+      setRefreshingOC(true);
+      const [resOC] = await Promise.all([
+        api.get(`/ordens-compra/${targetId}`),
+        carregarCatalogoMateriais(true)
+      ]);
+      const ocAtualizada = resOC.data;
+      if (ocAtualizada) {
+        setOrdemCompraAtual({
+          ...ocAtualizada,
+          itens: reordenarERenumerarItensOC(ocAtualizada.itens || [])
+        });
+        setOrdensCompraSalvas(prev =>
+          prev.map(item => (item.id === ocAtualizada.id ? ocAtualizada : item))
+        );
+      }
+    } catch (err) {
+      console.error('Erro ao atualizar dados da Ordem de Compra:', err);
+    } finally {
+      setRefreshingOC(false);
+    }
+  };
+
+  // Ao retornar o foco para a janela/aba enquanto a Ordem de Compra estiver aberta, faz refresh automático
+  useEffect(() => {
+    if (!ordemCompraAtual?.id || modalEditarProdutoOC.isOpen) return;
+    const onFocusWindow = () => {
+      if (!ocEditDirty) {
+        refreshOrdemCompraAtual(ordemCompraAtual.id);
+      } else {
+        carregarCatalogoMateriais(true);
+      }
+    };
+    window.addEventListener('focus', onFocusWindow);
+    return () => window.removeEventListener('focus', onFocusWindow);
+  }, [ordemCompraAtual?.id, modalEditarProdutoOC.isOpen, ocEditDirty]);
+
+  const handleAbrirEditarCadastroProdutoOC = async (itemOC, idx) => {
+    const listaCat = await carregarCatalogoMateriais(true);
+    const refBusca = String(itemOC.referencia || '').trim().toLowerCase();
+    const nomeBusca = String(itemOC.nome || '').trim().toLowerCase();
+
+    const prodEncontrado = (listaCat || []).find(
+      p =>
+        (refBusca && String(p.codigo || '').trim().toLowerCase() === refBusca) ||
+        (nomeBusca && String(p.nome || '').trim().toLowerCase() === nomeBusca)
+    );
+
+    if (prodEncontrado) {
+      setModalEditarProdutoOC({
+        isOpen: true,
+        isNovoCadastro: false,
+        idxItemOC: idx,
+        codigo: prodEncontrado.codigo || '',
+        nome: prodEncontrado.nome || itemOC.nome || '',
+        descricao: prodEncontrado.descricao || '',
+        preco: formatInitialPrice(prodEncontrado.preco),
+        unidade: (prodEncontrado.unidade || itemOC.unidade || 'UNI').toUpperCase(),
+        produtoGrupo: parseInt(prodEncontrado.ProdutoGrupo || prodEncontrado.produtoGrupo || 8, 10),
+        tipo: prodEncontrado.tipo || 'Produto',
+        tempo: prodEncontrado.tempo !== undefined && prodEncontrado.tempo !== null ? prodEncontrado.tempo : '',
+        exibirNaProposta: prodEncontrado.ExibirNaProposta || 'Nao',
+        imagem: null,
+        imagemPreview: prodEncontrado.imagem ? getMediaUrl(prodEncontrado.imagem) : (itemOC.foto ? getMediaUrl(itemOC.foto) : null),
+        salvando: false,
+        erro: ''
+      });
+    } else {
+      const codigoSugerido = itemOC.referencia || `MAT-${Date.now().toString().slice(-6)}`;
+      setModalEditarProdutoOC({
+        isOpen: true,
+        isNovoCadastro: !itemOC.referencia,
+        idxItemOC: idx,
+        codigo: codigoSugerido,
+        nome: itemOC.nome || '',
+        descricao: '',
+        preco: '0,00',
+        unidade: (itemOC.unidade || 'UNI').toUpperCase(),
+        produtoGrupo: 8,
+        tipo: 'Produto',
+        tempo: '',
+        exibirNaProposta: 'Nao',
+        imagem: null,
+        imagemPreview: itemOC.foto ? getMediaUrl(itemOC.foto) : null,
+        salvando: false,
+        erro: ''
+      });
+    }
+  };
+
+  const handleImageChangeProdutoOC = (e) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setModalEditarProdutoOC(prev => ({
+          ...prev,
+          imagem: file,
+          imagemPreview: reader.result
+        }));
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const handleSalvarCadastroProdutoOC = async (e) => {
+    e.preventDefault();
+    const {
+      codigo,
+      nome,
+      descricao,
+      preco,
+      unidade,
+      produtoGrupo,
+      tipo,
+      tempo,
+      exibirNaProposta,
+      imagem,
+      idxItemOC
+    } = modalEditarProdutoOC;
+
+    if (!String(codigo || '').trim() || !String(nome || '').trim() || !String(unidade || '').trim()) {
+      setModalEditarProdutoOC(prev => ({
+        ...prev,
+        erro: 'Código, nome e unidade são obrigatórios.'
+      }));
+      return;
+    }
+
+    try {
+      setModalEditarProdutoOC(prev => ({ ...prev, salvando: true, erro: '' }));
+      const valPreco = parsePtBrToFloat(preco);
+      const formData = new FormData();
+      formData.append('codigo', String(codigo).trim());
+      formData.append('nome', String(nome).trim());
+      formData.append('descricao', descricao || '');
+      formData.append('preco', valPreco);
+      formData.append('unidade', unidade);
+      formData.append('ProdutoGrupo', produtoGrupo);
+      formData.append('tipo', tipo || 'Produto');
+      formData.append('tempo', tipo === 'Serviço' ? (parseInt(tempo, 10) || 0) : 0);
+      formData.append('ExibirNaProposta', exibirNaProposta);
+      if (imagem) {
+        formData.append('imagem', imagem);
+      }
+
+      const resProd = await api.put(`/produtos/${encodeURIComponent(String(codigo).trim())}`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      });
+      const prodSalvo = resProd.data;
+
+      // Atualiza o item correspondente na Ordem de Compra atual e grava no banco
+      if (ordemCompraAtual) {
+        const novosItens = [...(ordemCompraAtual.itens || [])];
+        if (idxItemOC !== null && idxItemOC >= 0 && idxItemOC < novosItens.length) {
+          novosItens[idxItemOC] = {
+            ...novosItens[idxItemOC],
+            referencia: prodSalvo.codigo || codigo,
+            nome: prodSalvo.nome || nome,
+            unidade: (prodSalvo.unidade || unidade || 'UNI').toUpperCase(),
+            foto: prodSalvo.imagem || novosItens[idxItemOC].foto || null
+          };
+        }
+
+        const itensParaSalvar = reordenarERenumerarItensOC(novosItens).map(it => ({
+          ...it,
+          qtd: parseFloat(String(it.qtd ?? 1).replace(',', '.')) || 1
+        }));
+
+        if (ordemCompraAtual.id) {
+          await api.put(`/ordens-compra/${ordemCompraAtual.id}`, {
+            itens: itensParaSalvar,
+            observacoes: ordemCompraAtual.observacoes || null
+          });
+          // Faz refresh completo da Ordem de Compra e do catálogo ao retornar para a tela
+          await refreshOrdemCompraAtual(ordemCompraAtual.id);
+          setOcEditDirty(false);
+        } else {
+          setOrdemCompraAtual(prev => ({
+            ...prev,
+            itens: itensParaSalvar
+          }));
+        }
+      }
+
+      setModalEditarProdutoOC(prev => ({ ...prev, isOpen: false, salvando: false, erro: '' }));
+      setSuccess(`Cadastro do produto "${prodSalvo.nome || nome}" atualizado e Ordem de Compra sincronizada!`);
+      setTimeout(() => setSuccess(''), 4000);
+    } catch (err) {
+      console.error('Erro ao atualizar cadastro do produto:', err);
+      setModalEditarProdutoOC(prev => ({
+        ...prev,
+        salvando: false,
+        erro: err.response?.data?.error || 'Erro ao salvar cadastro do produto.'
+      }));
     }
   };
 
@@ -10847,7 +11072,24 @@ function OrdemControle() {
                   )}
                 </div>
               </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  onClick={() => refreshOrdemCompraAtual(ordemCompraAtual.id)}
+                  disabled={refreshingOC}
+                  className="btn btn-secondary"
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    fontSize: '0.82rem',
+                    fontWeight: 600
+                  }}
+                  title="Atualizar dados da Ordem de Compra com o cadastro de produtos"
+                >
+                  <RefreshCw size={15} className={refreshingOC ? 'animate-spin' : ''} />
+                  <span>{refreshingOC ? 'Atualizando...' : 'Atualizar'}</span>
+                </button>
                 <button
                   type="button"
                   onClick={() => setMostrarFormNovoItemOC(prev => !prev)}
@@ -10997,7 +11239,7 @@ function OrdemControle() {
                     <th style={{ width: '90px', textAlign: 'center' }}>Unidade</th>
                     <th style={{ width: '135px', textAlign: 'right' }}>Qtd</th>
                     <th style={{ width: '200px' }}>OS</th>
-                    <th style={{ width: '75px', textAlign: 'center' }}>Ações</th>
+                    <th style={{ width: '115px', textAlign: 'center' }}>Ações</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -11020,7 +11262,9 @@ function OrdemControle() {
                               <img
                                 src={imgUrl}
                                 alt={it.nome}
-                                style={{ width: '44px', height: '44px', objectFit: 'cover', borderRadius: '6px', border: '1px solid var(--glass-border)', background: '#0f172a' }}
+                                style={{ width: '44px', height: '44px', objectFit: 'cover', borderRadius: '6px', border: '1px solid var(--glass-border)', background: '#0f172a', cursor: 'pointer' }}
+                                title="Clique para editar o cadastro e foto deste produto"
+                                onClick={() => handleAbrirEditarCadastroProdutoOC(it, idx)}
                                 onError={(e) => { e.currentTarget.style.display = 'none'; }}
                               />
                             ) : (
@@ -11062,15 +11306,26 @@ function OrdemControle() {
                             {it.os || '-'}
                           </td>
                           <td style={{ textAlign: 'center' }}>
-                            <button
-                              type="button"
-                              onClick={() => handleExcluirItemOC(idx)}
-                              className="btn btn-danger"
-                              style={{ padding: '5px 8px', fontSize: '0.76rem' }}
-                              title="Excluir este material da Ordem de Compra"
-                            >
-                              <Trash2 size={13} />
-                            </button>
+                            <div style={{ display: 'inline-flex', gap: '6px', alignItems: 'center' }}>
+                              <button
+                                type="button"
+                                onClick={() => handleAbrirEditarCadastroProdutoOC(it, idx)}
+                                className="btn btn-secondary"
+                                style={{ padding: '5px 8px', fontSize: '0.76rem', color: 'var(--accent-cyan)' }}
+                                title="Editar cadastro do produto (nome, foto, unidade, grupo, preço)"
+                              >
+                                <Edit2 size={13} />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleExcluirItemOC(idx)}
+                                className="btn btn-danger"
+                                style={{ padding: '5px 8px', fontSize: '0.76rem' }}
+                                title="Excluir este material da Ordem de Compra"
+                              >
+                                <Trash2 size={13} />
+                              </button>
+                            </div>
                           </td>
                         </tr>
                       );
@@ -11121,6 +11376,301 @@ function OrdemControle() {
                 </button>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL DE EDIÇÃO DO CADASTRO DO PRODUTO A PARTIR DA ORDEM DE COMPRA */}
+      {modalEditarProdutoOC.isOpen && (
+        <div
+          className="modal-overlay"
+          style={{ zIndex: 1400 }}
+          onClick={() => {
+            setModalEditarProdutoOC(prev => ({ ...prev, isOpen: false }));
+            if (ordemCompraAtual?.id) refreshOrdemCompraAtual(ordemCompraAtual.id);
+          }}
+        >
+          <div
+            className="glass-card modal-content"
+            style={{ maxWidth: '880px', width: '95%', maxHeight: '90vh', overflowY: 'auto' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="modal-header">
+              <h3 className="modal-title" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <Edit2 size={18} color="var(--accent-cyan)" />
+                <span>Editar Cadastro do Produto</span>
+              </h3>
+              <button
+                type="button"
+                onClick={() => {
+                  setModalEditarProdutoOC(prev => ({ ...prev, isOpen: false }));
+                  if (ordemCompraAtual?.id) refreshOrdemCompraAtual(ordemCompraAtual.id);
+                }}
+                className="close-btn"
+              >
+                &times;
+              </button>
+            </div>
+
+            <form onSubmit={handleSalvarCadastroProdutoOC} style={{ marginTop: '16px' }}>
+              {modalEditarProdutoOC.erro && (
+                <div className="alert alert-danger" style={{ marginBottom: '16px' }}>
+                  {modalEditarProdutoOC.erro}
+                </div>
+              )}
+
+              <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.4fr) minmax(280px, 1fr)', gap: '24px', alignItems: 'start' }}>
+                {/* Coluna Esquerda: Dados Cadastrais */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                  <div className="form-group" style={{ margin: 0 }}>
+                    <label className="form-label">Código do Produto *</label>
+                    <input
+                      type="text"
+                      className="form-control"
+                      value={modalEditarProdutoOC.codigo}
+                      onChange={(e) => setModalEditarProdutoOC(prev => ({ ...prev, codigo: e.target.value }))}
+                      placeholder="Ex: PROD001"
+                      required
+                      disabled={!modalEditarProdutoOC.isNovoCadastro}
+                    />
+                  </div>
+
+                  <div className="form-group" style={{ margin: 0 }}>
+                    <label className="form-label">Nome do Produto *</label>
+                    <input
+                      type="text"
+                      className="form-control"
+                      value={modalEditarProdutoOC.nome}
+                      onChange={(e) => setModalEditarProdutoOC(prev => ({ ...prev, nome: e.target.value }))}
+                      placeholder="Nome do produto"
+                      required
+                    />
+                  </div>
+
+                  <div className="form-group" style={{ margin: 0 }}>
+                    <label className="form-label">Grupo do Produto *</label>
+                    <select
+                      className="form-control"
+                      value={modalEditarProdutoOC.produtoGrupo}
+                      onChange={(e) => setModalEditarProdutoOC(prev => ({ ...prev, produtoGrupo: parseInt(e.target.value, 10) }))}
+                      required
+                    >
+                      {PRODUTO_GRUPOS.map(g => (
+                        <option key={g.id} value={g.id}>{g.id} - {g.nome}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="form-group" style={{ margin: 0 }}>
+                    <label className="form-label">Descrição</label>
+                    <textarea
+                      className="form-control"
+                      value={modalEditarProdutoOC.descricao}
+                      onChange={(e) => setModalEditarProdutoOC(prev => ({ ...prev, descricao: e.target.value }))}
+                      placeholder="Descrição opcional..."
+                      rows={3}
+                      style={{ resize: 'none' }}
+                    />
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                    <div className="form-group" style={{ margin: 0 }}>
+                      <label className="form-label">Preço Unitário (R$)</label>
+                      <input
+                        type="text"
+                        className="form-control"
+                        value={modalEditarProdutoOC.preco}
+                        onChange={(e) => setModalEditarProdutoOC(prev => ({ ...prev, preco: formatPtBr(e.target.value) }))}
+                        placeholder="0,00"
+                      />
+                    </div>
+
+                    <div className="form-group" style={{ margin: 0 }}>
+                      <label className="form-label">Unidade *</label>
+                      <select
+                        className="form-control"
+                        value={modalEditarProdutoOC.unidade}
+                        onChange={(e) => setModalEditarProdutoOC(prev => ({ ...prev, unidade: e.target.value }))}
+                        required
+                      >
+                        {UNIDADES_MATERIAL.map(u => (
+                          <option key={u.sigla} value={u.sigla}>{u.label}</option>
+                        ))}
+                        {modalEditarProdutoOC.unidade && !UNIDADES_MATERIAL.some(u => u.sigla === modalEditarProdutoOC.unidade) && (
+                          <option value={modalEditarProdutoOC.unidade}>{modalEditarProdutoOC.unidade}</option>
+                        )}
+                      </select>
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                    <div className="form-group" style={{ margin: 0 }}>
+                      <label className="form-label">Tipo *</label>
+                      <select
+                        className="form-control"
+                        value={modalEditarProdutoOC.tipo}
+                        onChange={(e) => {
+                          const nvTipo = e.target.value;
+                          setModalEditarProdutoOC(prev => ({
+                            ...prev,
+                            tipo: nvTipo,
+                            tempo: nvTipo !== 'Serviço' ? '' : prev.tempo
+                          }));
+                        }}
+                        required
+                      >
+                        <option value="Produto">Produto</option>
+                        <option value="Serviço">Serviço</option>
+                      </select>
+                    </div>
+
+                    <div className="form-group" style={{ margin: 0 }}>
+                      <label className="form-label">Tempo (minutos)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="1"
+                        className="form-control"
+                        value={modalEditarProdutoOC.tipo === 'Serviço' ? modalEditarProdutoOC.tempo : ''}
+                        onChange={(e) => setModalEditarProdutoOC(prev => ({ ...prev, tempo: e.target.value }))}
+                        placeholder={modalEditarProdutoOC.tipo === 'Serviço' ? 'Tempo em minutos' : 'Apenas para Serviço'}
+                        disabled={modalEditarProdutoOC.tipo !== 'Serviço'}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="form-group" style={{ margin: 0, background: 'rgba(255,255,255,0.02)', padding: '12px', borderRadius: '8px', border: '1px solid var(--glass-border)' }}>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer', margin: 0 }}>
+                      <input
+                        type="checkbox"
+                        checked={modalEditarProdutoOC.exibirNaProposta === 'Sim'}
+                        onChange={(e) => setModalEditarProdutoOC(prev => ({ ...prev, exibirNaProposta: e.target.checked ? 'Sim' : 'Nao' }))}
+                        style={{ width: '18px', height: '18px', accentColor: 'var(--accent-cyan)', cursor: 'pointer' }}
+                      />
+                      <span style={{ fontWeight: 600, color: 'var(--text-main)', fontSize: '0.9rem' }}>Exibir imagem deste material na Proposta Comercial</span>
+                    </label>
+                    <small style={{ color: 'var(--text-muted)', fontSize: '0.75rem', display: 'block', marginTop: '4px', marginLeft: '28px' }}>
+                      Se marcado, a foto deste item aparecerá em destaque na proposta impressa.
+                    </small>
+                  </div>
+                </div>
+
+                {/* Coluna Direita: Imagem do Produto */}
+                <div style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '12px',
+                  background: 'rgba(255,255,255,0.02)',
+                  padding: '16px',
+                  borderRadius: '12px',
+                  border: '1px solid var(--glass-border)',
+                  boxSizing: 'border-box'
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <label className="form-label" style={{ margin: 0, fontWeight: 700, display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <Upload size={16} style={{ color: 'var(--accent-cyan)' }} />
+                      <span>Imagem do Material</span>
+                    </label>
+                    {modalEditarProdutoOC.imagemPreview && (
+                      <button
+                        type="button"
+                        onClick={() => setModalEditarProdutoOC(prev => ({ ...prev, imagem: null, imagemPreview: null }))}
+                        className="btn btn-secondary"
+                        style={{ padding: '4px 8px', fontSize: '0.75rem', color: '#f87171', borderColor: 'rgba(248,113,113,0.3)' }}
+                        title="Remover imagem selecionada"
+                      >
+                        <Trash2 size={12} style={{ marginRight: '4px' }} />
+                        Remover
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Preview Container */}
+                  <div style={{
+                    width: '100%',
+                    height: '240px',
+                    borderRadius: '8px',
+                    border: '2px dashed var(--glass-border)',
+                    background: 'rgba(0,0,0,0.2)',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    overflow: 'hidden',
+                    position: 'relative'
+                  }}>
+                    {modalEditarProdutoOC.imagemPreview ? (
+                      <img
+                        src={modalEditarProdutoOC.imagemPreview}
+                        alt="Preview do Material"
+                        style={{ width: '100%', height: '100%', objectFit: 'contain', padding: '8px', boxSizing: 'border-box' }}
+                      />
+                    ) : (
+                      <div style={{ textAlign: 'center', padding: '16px', color: 'var(--text-muted)' }}>
+                        <div style={{ fontSize: '2.5rem', marginBottom: '8px', opacity: 0.5 }}>📦</div>
+                        <div style={{ fontSize: '0.85rem', fontWeight: 600 }}>Nenhuma imagem anexada</div>
+                        <div style={{ fontSize: '0.75rem', opacity: 0.7, marginTop: '4px' }}>PNG, JPG, JPEG ou WEBP</div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* File Input */}
+                  <div className="form-group" style={{ margin: 0 }}>
+                    <label
+                      htmlFor="input-imagem-produto-oc"
+                      className="btn btn-secondary"
+                      style={{
+                        width: '100%',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: '8px',
+                        cursor: 'pointer',
+                        padding: '8px 12px',
+                        fontSize: '0.85rem',
+                        boxSizing: 'border-box'
+                      }}
+                    >
+                      <Upload size={16} />
+                      <span>{modalEditarProdutoOC.imagemPreview ? 'Trocar Imagem' : 'Selecionar Imagem'}</span>
+                    </label>
+                    <input
+                      id="input-imagem-produto-oc"
+                      type="file"
+                      accept="image/*"
+                      onChange={handleImageChangeProdutoOC}
+                      style={{ display: 'none' }}
+                    />
+                  </div>
+
+                  <small style={{ color: 'var(--text-muted)', fontSize: '0.75rem', textAlign: 'center' }}>
+                    Ao salvar, as alterações (nome, unidade, foto) serão refletidas imediatamente na Ordem de Compra.
+                  </small>
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', marginTop: '24px', borderTop: '1px solid var(--glass-border)', paddingTop: '16px' }}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setModalEditarProdutoOC(prev => ({ ...prev, isOpen: false }));
+                    if (ordemCompraAtual?.id) refreshOrdemCompraAtual(ordemCompraAtual.id);
+                  }}
+                  className="btn btn-secondary"
+                  disabled={modalEditarProdutoOC.salvando}
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  className="btn btn-primary"
+                  disabled={modalEditarProdutoOC.salvando}
+                  style={{ fontWeight: 700 }}
+                >
+                  {modalEditarProdutoOC.salvando ? 'Salvando Produto...' : 'Salvar Produto e Atualizar OC'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
