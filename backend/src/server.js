@@ -4498,6 +4498,180 @@ async function CarregarPecas(file, finalProjectId, empresaId = 1) {
   }
 }
 
+async function ensureProjetoListagemTable(database) {
+  await database.exec(`
+    CREATE TABLE IF NOT EXISTS Projeto_Listagem (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      empresa_id INT NOT NULL DEFAULT 1,
+      projeto_id INT NOT NULL,
+      categoria VARCHAR(255) DEFAULT NULL,
+      item INT NOT NULL,
+      rep INT NOT NULL DEFAULT 1,
+      qtd DECIMAL(15,4) NOT NULL DEFAULT 0,
+      unidade VARCHAR(20) DEFAULT NULL,
+      qtd_texto VARCHAR(50) DEFAULT NULL,
+      referencia VARCHAR(255) DEFAULT NULL,
+      descricao TEXT NOT NULL,
+      nivel INT NOT NULL DEFAULT 1,
+      item_pai INT DEFAULT NULL,
+      hierarquia VARCHAR(255) DEFAULT NULL,
+      dimensoes VARCHAR(255) DEFAULT NULL,
+      preco DECIMAL(15,2) DEFAULT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_proj_listagem_emp_proj (empresa_id, projeto_id),
+      INDEX idx_proj_listagem_item (empresa_id, projeto_id, item),
+      FOREIGN KEY (projeto_id) REFERENCES projetos(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+  `);
+}
+
+// Rotina de Carga de Orçamento / Listagem Hierárquica do Projeto (CarregarOrcamentoListagem)
+async function CarregarOrcamentoListagem(file, finalProjectId, empresaId = 1) {
+  try {
+    await ensureProjetoListagemTable(db);
+    const pdfjs = await getPdfJs();
+    const fileBytes = new Uint8Array(fs.readFileSync(file.path));
+    const loadingTask = pdfjs.getDocument({ data: fileBytes, disableFontFace: true });
+    const pdfDoc = await loadingTask.promise;
+
+    const rawRows = [];
+    let currentCategoria = '';
+
+    for (let p = 1; p <= pdfDoc.numPages; p++) {
+      const page = await pdfDoc.getPage(p);
+      const tc = await page.getTextContent();
+      const byY = {};
+
+      for (const it of tc.items) {
+        if (!it.str || !it.str.trim()) continue;
+        const yKey = (Math.round(it.transform[5] * 2) / 2).toFixed(1);
+        if (!byY[yKey]) byY[yKey] = [];
+        byY[yKey].push({
+          x: it.transform[4],
+          y: it.transform[5],
+          str: it.str
+        });
+      }
+
+      const sortedYs = Object.keys(byY).sort((a, b) => Number(b) - Number(a));
+      for (const yKey of sortedYs) {
+        const tokens = byY[yKey].sort((a, b) => a.x - b.x);
+        const fullLine = tokens.map(t => t.str.trim()).join(' ');
+
+        // Identifica título de categoria/seção (ex: "- Acessórios Fabricados", "- Componentes", "- Cozinhas")
+        if (tokens[0].x >= 52 && tokens[0].x <= 66 && tokens[0].str.trim().startsWith('-')) {
+          const catName = fullLine.replace(/^-\s*/, '').trim();
+          if (Number(yKey) < 156 || !currentCategoria) {
+            currentCategoria = catName;
+          }
+          continue;
+        }
+
+        // Identifica linha de tabela iniciando com o número inteiro da coluna Item
+        if (tokens[0].x < 85 && /^\d+$/.test(tokens[0].str.trim())) {
+          const itemNum = parseInt(tokens[0].str.trim(), 10);
+          const repToken = tokens.find(t => t.x >= 90 && t.x < 125 && /^\d+$/.test(t.str.trim()));
+          const qtdTokens = tokens.filter(t => t.x >= 125 && t.x < 180);
+          const refTokens = tokens.filter(t => t.x >= 180 && t.x < 375);
+          const descTokens = tokens.filter(t => t.x >= 375 && t.x < 630);
+          const dimTokens = tokens.filter(t => t.x >= 630 && t.x < 740);
+          const precoTokens = tokens.filter(t => t.x >= 740);
+
+          if (repToken && qtdTokens.length > 0 && descTokens.length > 0) {
+            const qtdTexto = qtdTokens.map(t => t.str.trim()).join(' ').replace(/\s+/g, ' ').trim();
+            const qtdMatch = qtdTexto.match(/^([\d.,]+)\s*(.*)$/);
+            let qtdNum = 0;
+            let unidadeStr = '';
+            if (qtdMatch) {
+              qtdNum = parseFloat(qtdMatch[1].replace(',', '.')) || 0;
+              unidadeStr = (qtdMatch[2] || '').trim().toUpperCase();
+            }
+
+            const precoStr = precoTokens.map(t => t.str.trim()).join('').replace(/R\$\s*/i, '').trim();
+            let precoVal = null;
+            if (precoStr && /^[\d.,]+$/.test(precoStr)) {
+              const parsedPreco = parseFloat(precoStr.replace(/\./g, '').replace(',', '.'));
+              if (!isNaN(parsedPreco)) {
+                precoVal = parsedPreco;
+              }
+            }
+
+            rawRows.push({
+              categoria: currentCategoria || null,
+              item: itemNum,
+              rep: parseInt(repToken.str.trim(), 10) || 1,
+              qtd: qtdNum,
+              unidade: unidadeStr || null,
+              qtd_texto: qtdTexto,
+              referencia: refTokens.map(t => t.str).join('').trim() || null,
+              descricao: descTokens.map(t => t.str).join('').replace(/\s+/g, ' ').trim(),
+              descX: descTokens[0].x,
+              dimensoes: dimTokens.map(t => t.str).join('').trim() || null,
+              preco: precoVal
+            });
+          }
+        }
+      }
+    }
+
+    if (rawRows.length > 0 && finalProjectId) {
+      // Calcula o nível de hierarquia de indentação da coluna Descrição (passo padrão no PDF = 6.75pt a partir da margem base ~385.28pt)
+      const minX = Math.min(...rawRows.map(r => r.descX));
+      const stepPts = 6.75;
+      const parentByLevel = {};
+
+      await db.run('DELETE FROM Projeto_Listagem WHERE empresa_id = ? AND projeto_id = ?', [empresaId, finalProjectId]);
+
+      for (const row of rawRows) {
+        const nivel = 1 + Math.max(0, Math.round((row.descX - minX) / stepPts));
+        parentByLevel[nivel] = row.item;
+        // Limpa níveis mais profundos anteriores
+        Object.keys(parentByLevel).forEach(k => {
+          if (Number(k) > nivel) delete parentByLevel[k];
+        });
+
+        const itemPai = nivel > 1 ? (parentByLevel[nivel - 1] || null) : null;
+        const pathParts = [];
+        for (let lvl = 1; lvl <= nivel; lvl++) {
+          if (parentByLevel[lvl] !== undefined) {
+            pathParts.push(parentByLevel[lvl]);
+          }
+        }
+        const hierarquiaStr = pathParts.join('.');
+
+        await db.run(
+          `INSERT INTO Projeto_Listagem (
+            empresa_id, projeto_id, categoria, item, rep, qtd, unidade, qtd_texto,
+            referencia, descricao, nivel, item_pai, hierarquia, dimensoes, preco
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            empresaId,
+            finalProjectId,
+            row.categoria,
+            row.item,
+            row.rep,
+            row.qtd,
+            row.unidade,
+            row.qtd_texto,
+            row.referencia,
+            row.descricao,
+            nivel,
+            itemPai,
+            hierarquiaStr,
+            row.dimensoes,
+            row.preco
+          ]
+        );
+      }
+
+      console.log(`[CarregarOrcamentoListagem] Gravados ${rawRows.length} itens na tabela Projeto_Listagem para o projeto ID ${finalProjectId} (empresa ${empresaId})`);
+    }
+  } catch (err) {
+    console.error('Erro na rotina CarregarOrcamentoListagem:', err);
+    throw err;
+  }
+}
+
 app.post('/api/arquivos-importados', authenticateToken, uploadLayouts.array('arquivos'), async (req, res) => {
   const empresaId = req.auth.empresaId;
   if (!req.files || req.files.length === 0) {
@@ -4629,9 +4803,12 @@ app.post('/api/arquivos-importados', authenticateToken, uploadLayouts.array('arq
         .replace(/[^a-zA-Z0-9_\-\s]/g, "");
 
       const lowerName = normalizedName.toLowerCase();
+      const layoutForcado = req.body?.tipo_layout_forcado || req.body?.tipo_layout || '';
       let resolvedLayout = 'Outro';
 
-      if (lowerName.includes('cuttingplan') || lowerName.includes('cutting plan') || lowerName.includes('cutting_plan') || lowerName.includes('plano de corte') || lowerName.includes('plano_de_corte') || lowerName.includes('planocorte')) {
+      if (layoutForcado === 'Orçamento' || layoutForcado === 'Orcamento') {
+        resolvedLayout = 'Orçamento';
+      } else if (lowerName.includes('cuttingplan') || lowerName.includes('cutting plan') || lowerName.includes('cutting_plan') || lowerName.includes('plano de corte') || lowerName.includes('plano_de_corte') || lowerName.includes('planocorte')) {
         resolvedLayout = 'PlanoCorte';
       } else if (lowerName.includes('etiqueta') || lowerName.includes('etiquetas')) {
         resolvedLayout = 'Etiqueta';
@@ -4639,6 +4816,8 @@ app.post('/api/arquivos-importados', authenticateToken, uploadLayouts.array('arq
         resolvedLayout = 'Modulo';
       } else if (lowerName.includes('relatorio_para_compra_de_materiais') || lowerName.includes('compra de materiais') || lowerName.includes('compra_de_materiais')) {
         resolvedLayout = 'Materiais';
+      } else if (lowerName.includes('orcamento') || lowerName.includes('orcamentocompleto')) {
+        resolvedLayout = 'Orçamento';
       }
 
       console.log(`[Upload] Arquivo original: "${file.originalname}" -> Decodificado: "${originalName}" -> Normalizado: "${normalizedName}" -> Layout: "${resolvedLayout}" -> Projeto: ${finalProjectId}`);
@@ -4648,6 +4827,14 @@ app.post('/api/arquivos-importados', authenticateToken, uploadLayouts.array('arq
         [empresaId, originalName, file.size, resolvedLayout, file.path, finalProjectId]
       );
       insertedIds.push(result.lastID);
+
+      if (resolvedLayout === 'Orçamento') {
+        try {
+          await CarregarOrcamentoListagem(file, finalProjectId, empresaId);
+        } catch (parseErr) {
+          console.error('Erro no upload ao invocar rotina CarregarOrcamentoListagem:', parseErr);
+        }
+      }
 
       if (resolvedLayout === 'Materiais') {
         try {
@@ -4902,10 +5089,43 @@ app.delete('/api/arquivos-importados/:id', authenticateToken, async (req, res) =
       }
     }
 
+    // Se for layout Orçamento, remove a listagem vinculada se não houver outro arquivo de Orçamento para este projeto
+    if ((file.tipo_layout === 'Orçamento' || file.tipo_layout === 'Orcamento') && file.projeto_id) {
+      const remainingOrc = await db.get(
+        "SELECT id FROM arquivos_importados WHERE empresa_id = ? AND projeto_id = ? AND tipo_layout IN ('Orçamento', 'Orcamento') AND id != ?",
+        [empresaId, file.projeto_id, id]
+      );
+      if (!remainingOrc) {
+        await ensureProjetoListagemTable(db);
+        await db.run('DELETE FROM Projeto_Listagem WHERE empresa_id = ? AND projeto_id = ?', [empresaId, file.projeto_id]);
+      }
+    }
+
     res.json({ message: 'Arquivo de layout removido com sucesso.' });
   } catch (error) {
     console.error('DELETE LAYOUT ERROR:', error);
     res.status(500).json({ error: 'Erro ao excluir arquivo de layout.' });
+  }
+});
+
+// GET /api/projetos/:id/listagem - Consultar itens carregados na tabela Projeto_Listagem
+app.get('/api/projetos/:id/listagem', authenticateToken, async (req, res) => {
+  const empresaId = req.auth.empresaId;
+  const { id } = req.params;
+  try {
+    await ensureProjetoListagemTable(db);
+    const owned = await db.get('SELECT id FROM projetos WHERE empresa_id = ? AND id = ?', [empresaId, id]);
+    if (!owned) {
+      return res.status(404).json({ error: 'Projeto não encontrado.' });
+    }
+    const rows = await db.all(
+      'SELECT * FROM Projeto_Listagem WHERE empresa_id = ? AND projeto_id = ? ORDER BY item ASC, id ASC',
+      [empresaId, id]
+    );
+    res.json(rows || []);
+  } catch (error) {
+    console.error('GET PROJETO LISTAGEM ERROR:', error);
+    res.status(500).json({ error: 'Erro ao buscar listagem do orçamento do projeto.' });
   }
 });
 
@@ -6253,6 +6473,9 @@ app.delete('/api/projetos/:id', authenticateToken, async (req, res) => {
     await db.run('DELETE FROM Projeto_Pecas WHERE empresa_id = ? AND projeto_id = ?', [empresaId, id]);
     await db.run('DELETE FROM Projeto_Modulo WHERE empresa_id = ? AND projeto_id = ?', [empresaId, id]);
     await db.run('DELETE FROM Projeto_Chapa WHERE empresa_id = ? AND projeto_id = ?', [empresaId, id]);
+    try {
+      await db.run('DELETE FROM Projeto_Listagem WHERE empresa_id = ? AND projeto_id = ?', [empresaId, id]);
+    } catch (_) {}
 
     // 4. Excluir o projeto principal
     await db.run('DELETE FROM projetos WHERE empresa_id = ? AND id = ?', [empresaId, id]);

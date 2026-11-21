@@ -13745,7 +13745,7 @@ function PlantaBaixa() {
 }
 
 // 4.9. Importação de Layouts Page
-function ImportarLayouts({ isModal = false, projetoId = null, projetoNome = '', projeto = null, orcamento = null, onClose = null }) {
+function ImportarLayouts({ isModal = false, projetoId = null, projetoNome = '', projeto = null, orcamento = null, onClose = null, modoOrcamento = false }) {
   const navigate = useNavigate();
   const [layoutFiles, setLayoutFiles] = useState([]);
   const [selectedFiles, setSelectedFiles] = useState([]);
@@ -13793,6 +13793,12 @@ function ImportarLayouts({ isModal = false, projetoId = null, projetoNome = '', 
   const [pecasToConfer, setPecasToConfer] = useState([]);
   const [pecasError, setPecasError] = useState('');
   const [selectedFileForPecas, setSelectedFileForPecas] = useState(null);
+
+  // Orçamento Listagem (Projeto_Listagem) Confer state
+  const [showListagemModal, setShowListagemModal] = useState(false);
+  const [listagemToConfer, setListagemToConfer] = useState([]);
+  const [listagemError, setListagemError] = useState('');
+  const [selectedFileForListagem, setSelectedFileForListagem] = useState(null);
 
   const [generatingOrcamento, setGeneratingOrcamento] = useState(false);
 
@@ -13878,15 +13884,34 @@ function ImportarLayouts({ isModal = false, projetoId = null, projetoNome = '', 
       } catch (err) {
         setPecasError('Erro ao buscar as peças cadastradas.');
       }
+    } else if (file.tipo_layout === 'Orçamento' || file.tipo_layout === 'Orcamento') {
+      setSelectedFileForListagem(file);
+      setListagemError('');
+      setListagemToConfer([]);
+      setShowListagemModal(true);
+
+      try {
+        const res = await api.get(`/projetos/${projId}/listagem`);
+        setListagemToConfer(res.data || []);
+      } catch (err) {
+        setListagemError('Erro ao buscar os itens carregados em Projeto_Listagem.');
+      }
     }
   };
+
+  const isOrcamentoLayout = (tipo) => tipo === 'Orçamento' || tipo === 'Orcamento';
 
   const fetchLayoutFiles = async () => {
     try {
       const res = await api.get('/arquivos-importados');
-      const data = projetoId 
+      let data = projetoId 
         ? res.data.filter(file => file.projeto_id === parseInt(projetoId))
         : res.data;
+      if (modoOrcamento) {
+        data = data.filter(file => isOrcamentoLayout(file.tipo_layout));
+      } else {
+        data = data.filter(file => !isOrcamentoLayout(file.tipo_layout));
+      }
       setLayoutFiles(data);
     } catch (err) {
       console.error(err);
@@ -13896,7 +13921,7 @@ function ImportarLayouts({ isModal = false, projetoId = null, projetoNome = '', 
 
   useEffect(() => {
     fetchLayoutFiles();
-  }, []);
+  }, [projetoId, modoOrcamento]);
 
   const handleDrag = (e) => {
     e.preventDefault();
@@ -13950,6 +13975,9 @@ function ImportarLayouts({ isModal = false, projetoId = null, projetoNome = '', 
     if (projetoId) {
       formData.append('projeto_id', projetoId);
     }
+    if (modoOrcamento) {
+      formData.append('tipo_layout_forcado', 'Orçamento');
+    }
 
     try {
       await api.post('/arquivos-importados', formData, {
@@ -13957,7 +13985,11 @@ function ImportarLayouts({ isModal = false, projetoId = null, projetoNome = '', 
           'Content-Type': 'multipart/form-data'
         }
       });
-      setSuccess('Arquivos de layout carregados com sucesso!');
+      setSuccess(
+        modoOrcamento
+          ? 'Arquivo de Orçamento carregado e tabela Projeto_Listagem atualizada com sucesso!'
+          : 'Arquivos de layout carregados com sucesso!'
+      );
       setSelectedFiles([]);
       fetchLayoutFiles();
     } catch (err) {
@@ -14007,6 +14039,9 @@ function ImportarLayouts({ isModal = false, projetoId = null, projetoNome = '', 
 
   const getLayoutBadge = (type) => {
     switch (type) {
+      case 'Orçamento':
+      case 'Orcamento':
+        return { label: 'Orçamento', className: 'badge-info' };
       case 'Etiqueta':
         return { label: 'Etiqueta', className: 'badge-info' };
       case 'PlanoCorte':
@@ -14030,10 +14065,14 @@ function ImportarLayouts({ isModal = false, projetoId = null, projetoNome = '', 
       <div className="content-header" style={{ marginBottom: '20px' }}>
         <div>
           <h1 className="page-title">
-            Carregar Arquivos do Projeto{projetoNome ? ` - ${projetoNome}` : ''}
+            {modoOrcamento
+              ? `Carregar Arquivo de Orçamento${projetoNome ? ` - ${projetoNome}` : ''}`
+              : `Carregar Arquivos do Projeto${projetoNome ? ` - ${projetoNome}` : ''}`}
           </h1>
           <div style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginTop: '4px' }}>
-            Carregue e gerencie múltiplos arquivos de layouts para este projeto
+            {modoOrcamento
+              ? 'Faça o upload do arquivo de Orçamento (PDF) para atualizar a tabela Projeto_Listagem vinculada a este projeto'
+              : 'Carregue e gerencie múltiplos arquivos de layouts para este projeto'}
           </div>
         </div>
       </div>
@@ -14044,7 +14083,9 @@ function ImportarLayouts({ isModal = false, projetoId = null, projetoNome = '', 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '20px', alignItems: 'start' }}>
         {/* Upload Card */}
         <div className="glass-card">
-          <h3 style={{ marginBottom: '16px', fontWeight: 700 }}>Carregar Novo Layout</h3>
+          <h3 style={{ marginBottom: '16px', fontWeight: 700 }}>
+            {modoOrcamento ? 'Carregar Arquivo de Orçamento' : 'Carregar Novo Layout'}
+          </h3>
           
           <form onSubmit={handleUpload}>
             <div className="form-group">
@@ -14135,7 +14176,7 @@ function ImportarLayouts({ isModal = false, projetoId = null, projetoNome = '', 
               ) : (
                 <>
                   <Upload size={18} />
-                  <span>Enviar Arquivos</span>
+                  <span>{modoOrcamento ? 'Enviar Arquivo' : 'Enviar Arquivos'}</span>
                 </>
               )}
             </button>
@@ -14174,7 +14215,9 @@ function ImportarLayouts({ isModal = false, projetoId = null, projetoNome = '', 
                 {filteredFiles.length === 0 ? (
                   <tr>
                     <td colSpan="5" style={{ textAlign: 'center', color: 'var(--text-muted)' }}>
-                      Nenhum arquivo de layout carregado.
+                      {modoOrcamento
+                        ? 'Nenhum arquivo de Orçamento carregado para este projeto.'
+                        : 'Nenhum arquivo de layout carregado.'}
                     </td>
                   </tr>
                 ) : (
@@ -14204,7 +14247,7 @@ function ImportarLayouts({ isModal = false, projetoId = null, projetoNome = '', 
                         </td>
                         <td style={{ textAlign: 'right' }}>
                           <div className="flex-gap-2" style={{ justifyContent: 'flex-end' }}>
-                            {(file.tipo_layout === 'Materiais' || file.tipo_layout === 'Modulo' || file.tipo_layout === 'PlanoCorte' || file.tipo_layout === 'Etiqueta') && (
+                            {(file.tipo_layout === 'Materiais' || file.tipo_layout === 'Modulo' || file.tipo_layout === 'PlanoCorte' || file.tipo_layout === 'Etiqueta' || file.tipo_layout === 'Orçamento' || file.tipo_layout === 'Orcamento') && (
                               <button 
                                 onClick={() => handleViewFileDetails(file)} 
                                 className="btn btn-secondary" 
@@ -14250,23 +14293,25 @@ function ImportarLayouts({ isModal = false, projetoId = null, projetoNome = '', 
             </table>
           </div>
 
-          <div style={{ marginTop: '20px', display: 'flex', justifyContent: 'flex-end', borderTop: '1px solid var(--glass-border)', paddingTop: '15px' }}>
-            <button
-              onClick={handleGerarOrcamento}
-              className="btn btn-primary"
-              disabled={generatingOrcamento || !isEmAberto}
-              style={{ 
-                display: 'flex', 
-                alignItems: 'center', 
-                gap: '8px',
-                opacity: (!isEmAberto || generatingOrcamento) ? 0.5 : 1,
-                cursor: (!isEmAberto || generatingOrcamento) ? 'not-allowed' : 'pointer'
-              }}
-              title={!isEmAberto ? 'Não é possível gerar orçamento pois a situação do projeto é diferente de "Em aberto"' : ''}
-            >
-              {generatingOrcamento ? 'Gerando orçamento...' : 'Gerar orçamento'}
-            </button>
-          </div>
+          {!modoOrcamento && (
+            <div style={{ marginTop: '20px', display: 'flex', justifyContent: 'flex-end', borderTop: '1px solid var(--glass-border)', paddingTop: '15px' }}>
+              <button
+                onClick={handleGerarOrcamento}
+                className="btn btn-primary"
+                disabled={generatingOrcamento || !isEmAberto}
+                style={{ 
+                  display: 'flex', 
+                  alignItems: 'center', 
+                  gap: '8px',
+                  opacity: (!isEmAberto || generatingOrcamento) ? 0.5 : 1,
+                  cursor: (!isEmAberto || generatingOrcamento) ? 'not-allowed' : 'pointer'
+                }}
+                title={!isEmAberto ? 'Não é possível gerar orçamento pois a situação do projeto é diferente de "Em aberto"' : ''}
+              >
+                {generatingOrcamento ? 'Gerando orçamento...' : 'Gerar orçamento'}
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
@@ -14618,6 +14663,94 @@ function ImportarLayouts({ isModal = false, projetoId = null, projetoNome = '', 
             
             <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '24px' }}>
               <button onClick={() => setShowPecasModal(false)} className="btn btn-secondary">Fechar</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Conferir Listagem do Orçamento (Projeto_Listagem) */}
+      {showListagemModal && (
+        <div className="modal-overlay" onClick={() => setShowListagemModal(false)}>
+          <div className="glass-card modal-content" style={{ maxWidth: '1220px', width: '96%', maxHeight: '85vh', overflowY: 'auto' }} onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3 className="modal-title">
+                Conferir Listagem do Orçamento (Projeto_Listagem): {selectedFileForListagem?.nome_arquivo}
+              </h3>
+              <button onClick={() => setShowListagemModal(false)} className="close-btn">&times;</button>
+            </div>
+
+            <div style={{ marginTop: '16px' }}>
+              {listagemError && <div className="alert alert-danger">{listagemError}</div>}
+
+              {listagemToConfer.length === 0 && !listagemError ? (
+                <div style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '24px' }}>
+                  Nenhum registro carregado em Projeto_Listagem para este projeto.
+                </div>
+              ) : (
+                <div className="table-container" style={{ margin: 0 }}>
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th style={{ width: '6%' }}>Item</th>
+                        <th style={{ width: '5%', textAlign: 'center' }}>Rep</th>
+                        <th style={{ width: '9%', textAlign: 'center' }}>Qtd</th>
+                        <th style={{ width: '16%' }}>Referência</th>
+                        <th style={{ width: '32%' }}>Descrição (Indentação Hierárquica)</th>
+                        <th style={{ width: '10%', textAlign: 'center' }}>Hierarquia</th>
+                        <th style={{ width: '13%', textAlign: 'center' }}>Dimensões</th>
+                        <th style={{ width: '9%', textAlign: 'right' }}>Preço</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {listagemToConfer.map((row) => {
+                        const lvl = Math.max(1, parseInt(row.nivel, 10) || 1);
+                        const indentPx = (lvl - 1) * 18;
+                        return (
+                          <tr key={row.id}>
+                            <td style={{ fontWeight: 700, color: 'var(--accent-cyan)' }}>{row.item}</td>
+                            <td style={{ textAlign: 'center' }}>{row.rep}</td>
+                            <td style={{ textAlign: 'center', fontWeight: 600 }}>{row.qtd_texto || `${row.qtd} ${row.unidade || ''}`}</td>
+                            <td style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>{row.referencia || '-'}</td>
+                            <td>
+                              <div style={{ paddingLeft: `${indentPx}px`, display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                {lvl > 1 && (
+                                  <span style={{ color: 'var(--accent-cyan)', opacity: 0.7, fontSize: '0.78rem' }}>
+                                    {'└─'}
+                                  </span>
+                                )}
+                                <span style={{ fontWeight: lvl === 1 ? 800 : lvl === 2 ? 600 : 400, color: lvl === 1 ? 'var(--text-main)' : 'var(--text-muted)' }}>
+                                  {row.descricao}
+                                </span>
+                              </div>
+                              {row.categoria && lvl === 1 && (
+                                <div style={{ fontSize: '0.7rem', color: 'var(--accent-cyan)', marginTop: '2px' }}>
+                                  Seção: {row.categoria}
+                                </div>
+                              )}
+                            </td>
+                            <td style={{ textAlign: 'center' }}>
+                              <span className="badge badge-info" style={{ fontSize: '0.72rem' }} title={`Nível ${lvl}${row.item_pai ? ` (Pai: Item ${row.item_pai})` : ''}`}>
+                                N{lvl} • {row.hierarquia || row.item}
+                              </span>
+                            </td>
+                            <td style={{ textAlign: 'center', fontSize: '0.82rem' }}>{row.dimensoes || '-'}</td>
+                            <td style={{ textAlign: 'right', fontWeight: 700, color: row.preco ? 'var(--color-success)' : 'var(--text-muted)' }}>
+                              {row.preco !== null && row.preco !== undefined ? `R$ ${formatDecimalPtBr(row.preco)}` : '-'}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '20px' }}>
+              <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+                Total de registros em <strong>Projeto_Listagem</strong>: <strong>{listagemToConfer.length}</strong>
+              </span>
+              <button onClick={() => setShowListagemModal(false)} className="btn btn-secondary">Fechar</button>
             </div>
           </div>
         </div>
@@ -21226,6 +21359,7 @@ function Orcamentos() {
   const [parametroFinanceiroId, setParametroFinanceiroId] = useState(1);
   const [parametrosFinanceiros, setParametrosFinanceiros] = useState([]);
   const [showUploadPopup, setShowUploadPopup] = useState(false);
+  const [uploadModoOrcamento, setUploadModoOrcamento] = useState(false);
   const [selectedProjectForUpload, setSelectedProjectForUpload] = useState(null);
   const [showAnexosModal, setShowAnexosModal] = useState(false);
   const [selectedProjectForAnexos, setSelectedProjectForAnexos] = useState(null);
@@ -22950,12 +23084,20 @@ function Orcamentos() {
                             <td style={{ textAlign: 'right' }}>
                               <div className="flex-gap-2" style={{ justifyContent: 'flex-end' }}>
                                 <button 
-                                  onClick={() => { setSelectedProjectForUpload(p); setShowUploadPopup(true); }} 
+                                  onClick={() => { setUploadModoOrcamento(false); setSelectedProjectForUpload(p); setShowUploadPopup(true); }} 
                                   className="btn btn-secondary" 
                                   style={{ padding: '6px' }} 
                                   title="Carregar Arquivos de Corte / Layout"
                                 >
                                   <Upload size={14} />
+                                </button>
+                                <button 
+                                  onClick={() => { setUploadModoOrcamento(true); setSelectedProjectForUpload(p); setShowUploadPopup(true); }} 
+                                  className="btn btn-secondary" 
+                                  style={{ padding: '6px', color: 'var(--accent-cyan)' }} 
+                                  title="Carregar Arquivo de Orçamento (Projeto_Listagem)"
+                                >
+                                  <FileSpreadsheet size={14} />
                                 </button>
                                 <button onClick={() => handleOpenItensModal(p)} className="btn btn-secondary" style={{ padding: '6px' }} title="Itens do Orçamento">
                                   <DollarSign size={14} />
@@ -23736,6 +23878,7 @@ function Orcamentos() {
             <div style={{ padding: '8px' }}>
               <ImportarLayouts 
                 isModal={true} 
+                modoOrcamento={uploadModoOrcamento}
                 projetoId={selectedProjectForUpload?.id} 
                 projetoNome={selectedProjectForUpload?.nome} 
                 projeto={selectedProjectForUpload}
@@ -25890,6 +26033,7 @@ function Projetos() {
   const [showPropostasModal, setShowPropostasModal] = useState(false);
   const [loadingPropostaAction, setLoadingPropostaAction] = useState(false);
   const [showUploadPopup, setShowUploadPopup] = useState(false);
+  const [uploadModoOrcamento, setUploadModoOrcamento] = useState(false);
   const [selectedProjectForUpload, setSelectedProjectForUpload] = useState(null);
   const [editMode, setEditMode] = useState(false);
   const [projectIdToEdit, setProjectIdToEdit] = useState(null);
@@ -26758,8 +26902,11 @@ function Projetos() {
                       </td>
                       <td style={{ textAlign: 'right' }}>
                         <div className="flex-gap-2" style={{ justifyContent: 'flex-end' }}>
-                          <button onClick={() => { setSelectedProjectForUpload(p); setShowUploadPopup(true); }} className="btn btn-secondary" style={{ padding: '6px' }} title="Carregar Arquivos de Corte / Layout">
+                          <button onClick={() => { setUploadModoOrcamento(false); setSelectedProjectForUpload(p); setShowUploadPopup(true); }} className="btn btn-secondary" style={{ padding: '6px' }} title="Carregar Arquivos de Corte / Layout">
                             <Upload size={14} />
+                          </button>
+                          <button onClick={() => { setUploadModoOrcamento(true); setSelectedProjectForUpload(p); setShowUploadPopup(true); }} className="btn btn-secondary" style={{ padding: '6px', color: 'var(--accent-cyan)' }} title="Carregar Arquivo de Orçamento (Projeto_Listagem)">
+                            <FileSpreadsheet size={14} />
                           </button>
                           <button onClick={() => handleOpenItensModal(p)} className="btn btn-secondary" style={{ padding: '6px' }} title="Itens do Orçamento">
                             <DollarSign size={14} />
@@ -27104,6 +27251,7 @@ function Projetos() {
             <div style={{ padding: '8px' }}>
               <ImportarLayouts 
                 isModal={true} 
+                modoOrcamento={uploadModoOrcamento}
                 projetoId={selectedProjectForUpload?.id} 
                 projetoNome={selectedProjectForUpload?.nome} 
                 projeto={selectedProjectForUpload}

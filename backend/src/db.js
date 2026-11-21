@@ -492,6 +492,32 @@ export async function initDb(options = {}) {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
   `);
 
+  // Tabela: Projeto_Listagem (Listagem completa do arquivo de Orçamento do Projeto com hierarquia de indentação)
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS Projeto_Listagem (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      empresa_id INT NOT NULL DEFAULT 1,
+      projeto_id INT NOT NULL,
+      categoria VARCHAR(255) DEFAULT NULL,
+      item INT NOT NULL,
+      rep INT NOT NULL DEFAULT 1,
+      qtd DECIMAL(15,4) NOT NULL DEFAULT 0,
+      unidade VARCHAR(20) DEFAULT NULL,
+      qtd_texto VARCHAR(50) DEFAULT NULL,
+      referencia VARCHAR(255) DEFAULT NULL,
+      descricao TEXT NOT NULL,
+      nivel INT NOT NULL DEFAULT 1,
+      item_pai INT DEFAULT NULL,
+      hierarquia VARCHAR(255) DEFAULT NULL,
+      dimensoes VARCHAR(255) DEFAULT NULL,
+      preco DECIMAL(15,2) DEFAULT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_proj_listagem_emp_proj (empresa_id, projeto_id),
+      INDEX idx_proj_listagem_item (empresa_id, projeto_id, item),
+      FOREIGN KEY (projeto_id) REFERENCES projetos(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+  `);
+
   // Tabela: Material
   await db.exec(`
     CREATE TABLE IF NOT EXISTS Material (
