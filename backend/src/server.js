@@ -4203,19 +4203,21 @@ async function CarregarMateriais(file, finalProjectId, empresaId = 1) {
       );
       let validModuloCount = 0;
       let especialModuloCount = 0;
+      const normalizeModText = (str) => (str || '').toString().normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+      const monCxaKeywords = ['caixa', 'armario', 'balcao', 'gaveta'];
+      const espPcaKeywords = ['porta de vidro', 'painel ripado', 'ripado'];
       if (existingModules && existingModules.length > 0) {
-        const especialKeywords = ['vidro', 'espelho', 'perfil', 'provençal', 'provencal', 'ripado'];
         for (const modRow of existingModules) {
-          const moduloName = (modRow.modulo || '').toLowerCase();
-          const isEspecial = especialKeywords.some(keyword => moduloName.includes(keyword));
-          if (isEspecial) {
+          const moduloNorm = normalizeModText(modRow.modulo);
+          if (moduloNorm.startsWith('frente de gaveta')) continue;
+          if (espPcaKeywords.some(keyword => moduloNorm.includes(keyword))) {
             especialModuloCount++;
-          } else if (!moduloName.includes('tamponamento') && !moduloName.includes('painel')) {
+          } else if (monCxaKeywords.some(keyword => moduloNorm.includes(keyword))) {
             validModuloCount++;
           }
         }
       }
-      const totalEmbalagem = validModuloCount + especialModuloCount;
+      const totalEmbalagem = validModuloCount;
 
       // Calcular a soma de todas as fitas (referência começa com 'FT')
       let totalFita = 0;
@@ -4791,26 +4793,58 @@ async function AgruparMateriaisDaListagem(finalProjectId, empresaId = 1) {
   const chapasNoPlano = existingChapasRow ? (parseInt(existingChapasRow.totalChapas, 10) || 0) : 0;
   const qtdUsinagemChapas = chapasNoPlano > 0 ? chapasNoPlano : totalChapasMDF;
 
-  // Se já houver módulos carregados em Projeto_Modulo para este projeto, preserva as quantidades de montagem/especial/embalagem
-  const existingModules = await db.all(
-    'SELECT modulo FROM Projeto_Modulo WHERE empresa_id = ? AND projeto_id = ?',
-    [empresaId, finalProjectId]
-  );
+  // Consolida FAB.MON.CXA, FAB.ESP.PCA e FAB.EMB.UND a partir da tabela Projeto_Listagem (ou Projeto_Modulo se carregado)
+  const normalizeTextSearch = (str) => (str || '')
+    .toString()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+
+  // Palavras para FAB.MON.CXA: "Caixa", "Armário", "Balcão", "Gaveta"
+  const monCxaKeywords = ['caixa', 'armario', 'balcao', 'gaveta'];
+  // Palavras para FAB.ESP.PCA: "Porta de vidro", "Ripado", "Painel ripado"
+  const espPcaKeywords = ['porta de vidro', 'painel ripado', 'ripado'];
+
   let validModuloCount = 0;
   let especialModuloCount = 0;
-  if (existingModules && existingModules.length > 0) {
-    const especialKeywords = ['vidro', 'espelho', 'perfil', 'provençal', 'provencal', 'ripado'];
-    for (const modRow of existingModules) {
-      const moduloName = (modRow.modulo || '').toLowerCase();
-      const isEspecial = especialKeywords.some(keyword => moduloName.includes(keyword));
-      if (isEspecial) {
-        especialModuloCount++;
-      } else if (!moduloName.includes('tamponamento') && !moduloName.includes('painel')) {
-        validModuloCount++;
+
+  // Na tabela Projeto_Listagem, consolida os módulos/itens de nível 1 (evitando contar subpeças ou parafusos internos dos níveis 2/3/4)
+  for (const row of listagemRows) {
+    if (Number(row.nivel) !== 1) continue;
+    const descNorm = normalizeTextSearch(row.descricao);
+    // Exclui frentes de gaveta/painéis avulsos (ex: "Frente de Gaveta Perfil") que não são caixas/gavetas montadas
+    if (descNorm.startsWith('frente de gaveta')) continue;
+
+    const itemQtd = parseFloat(row.qtd) || 1;
+
+    if (espPcaKeywords.some(kw => descNorm.includes(kw))) {
+      especialModuloCount += itemQtd;
+    } else if (monCxaKeywords.some(kw => descNorm.includes(kw))) {
+      validModuloCount += itemQtd;
+    }
+  }
+
+  // Fallback para Projeto_Modulo caso a contagem na listagem seja zero e existam módulos carregados
+  if (validModuloCount === 0 && especialModuloCount === 0) {
+    const existingModules = await db.all(
+      'SELECT modulo FROM Projeto_Modulo WHERE empresa_id = ? AND projeto_id = ?',
+      [empresaId, finalProjectId]
+    );
+    if (existingModules && existingModules.length > 0) {
+      for (const modRow of existingModules) {
+        const moduloNorm = normalizeTextSearch(modRow.modulo);
+        if (moduloNorm.startsWith('frente de gaveta')) continue;
+        if (espPcaKeywords.some(kw => moduloNorm.includes(kw))) {
+          especialModuloCount++;
+        } else if (monCxaKeywords.some(kw => moduloNorm.includes(kw))) {
+          validModuloCount++;
+        }
       }
     }
   }
-  const totalEmbalagem = validModuloCount + especialModuloCount;
+
+  // Para o serviço FAB.EMB.UND considerar a mesma contagem da sigla FAB.MON.CXA
+  const totalEmbalagem = validModuloCount;
 
   // Calcular a soma de todas as fitas (referência começa com 'FT')
   let totalFita = 0;
@@ -5067,24 +5101,26 @@ app.post('/api/arquivos-importados', authenticateToken, uploadLayouts.array('arq
             }
             console.log(`[Modules] Gravados ${modules.length} módulos (com ${imageBase64List.length} imagens reais) para o projeto ID ${finalProjectId}`);
 
-            const especialKeywords = ['vidro', 'espelho', 'perfil', 'provençal', 'provencal', 'ripado'];
+            const normalizeModText = (str) => (str || '').toString().normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+            const monCxaKeywords = ['caixa', 'armario', 'balcao', 'gaveta'];
+            const espPcaKeywords = ['porta de vidro', 'painel ripado', 'ripado'];
 
             let validModuloCount = 0;
             let especialModuloCount = 0;
             for (const m of modules) {
-              const moduloName = (m.modulo || '').toLowerCase();
-              const isEspecial = especialKeywords.some(keyword => moduloName.includes(keyword));
+              const moduloNorm = normalizeModText(m.modulo);
+              if (moduloNorm.startsWith('frente de gaveta')) continue;
 
-              if (isEspecial) {
+              if (espPcaKeywords.some(keyword => moduloNorm.includes(keyword))) {
                 especialModuloCount++;
-              } else if (!moduloName.includes('tamponamento') && !moduloName.includes('painel')) {
+              } else if (monCxaKeywords.some(keyword => moduloNorm.includes(keyword))) {
                 validModuloCount++;
               }
             }
 
             totalValidModulosBatch += validModuloCount;
             totalEspecialModulosBatch += especialModuloCount;
-            const totalEmbalagem = totalValidModulosBatch + totalEspecialModulosBatch;
+            const totalEmbalagem = totalValidModulosBatch;
 
             await upsertFabMaterialInProject('FAB.MON.CXA', 'Montagem caixa', totalValidModulosBatch, 'UND');
             await upsertFabMaterialInProject('FAB.ESP.PCA', 'Item especial', totalEspecialModulosBatch, 'UND');
@@ -6208,10 +6244,8 @@ async function ensureProjetoItemsPopulated(projectId, empresaId = null) {
     if (materials && materials.length > 0) {
       let currentSeq = 1;
       const monItem = materials.find(m => m.referencia === 'FAB.MON.CXA');
-      const espItem = materials.find(m => m.referencia === 'FAB.ESP.PCA');
       const qtdMonCxa = monItem ? (parseFloat(monItem.qtd) || 0.0) : 0.0;
-      const qtdEspPca = espItem ? (parseFloat(espItem.qtd) || 0.0) : 0.0;
-      const qtdEmbUnd = qtdMonCxa + qtdEspPca;
+      const qtdEmbUnd = qtdMonCxa;
 
       // Calcula a quantidade acumulada de chapas (FAB.USI.CHP) considerando Projeto_Chapa ou a soma das chapas de MDF/MDP
       const chapasRow = await db.get(
@@ -7486,12 +7520,17 @@ app.post('/api/projetos/:id/gerar-orcamento', authenticateToken, async (req, res
     let currentSeq = 1;
     let custoTotal = 0;
 
-    // Calcula a quantidade de FAB.EMB.UND com base na soma de FAB.MON.CXA + FAB.ESP.PCA
+    // Calcula a quantidade de FAB.EMB.UND considerando a mesma contagem de FAB.MON.CXA
     const monItem = materials.find(m => m.referencia === 'FAB.MON.CXA');
-    const espItem = materials.find(m => m.referencia === 'FAB.ESP.PCA');
     const qtdMonCxa = monItem ? (parseFloat(monItem.qtd) || 0.0) : 0.0;
-    const qtdEspPca = espItem ? (parseFloat(espItem.qtd) || 0.0) : 0.0;
-    const qtdEmbUnd = qtdMonCxa + qtdEspPca;
+    const qtdEmbUnd = qtdMonCxa;
+    const embItem = materials.find(m => m.referencia === 'FAB.EMB.UND');
+    if (embItem && (parseFloat(embItem.qtd) || 0.0) !== qtdEmbUnd) {
+      await db.run(
+        "UPDATE Projeto_Materiais SET qtd = ? WHERE empresa_id = ? AND projeto_id = ? AND referencia = 'FAB.EMB.UND'",
+        [qtdEmbUnd, empresaId, id]
+      );
+    }
 
     // Calcula a quantidade acumulada de chapas (FAB.USI.CHP) considerando Projeto_Chapa ou a soma das chapas de MDF/MDP
     const chapasRow = await db.get(
