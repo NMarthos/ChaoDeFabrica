@@ -4672,6 +4672,196 @@ async function CarregarOrcamentoListagem(file, finalProjectId, empresaId = 1) {
   }
 }
 
+// Rotina que lê a tabela Projeto_Listagem e agrupa os materiais na tabela Projeto_Materiais
+// seguindo as mesmas regras da rotina CarregarMateriais
+async function AgruparMateriaisDaListagem(finalProjectId, empresaId = 1) {
+  await ensureProjetoListagemTable(db);
+  const listagemRows = await db.all(
+    'SELECT * FROM Projeto_Listagem WHERE empresa_id = ? AND projeto_id = ? ORDER BY item ASC, id ASC',
+    [empresaId, finalProjectId]
+  );
+
+  if (!listagemRows || listagemRows.length === 0) {
+    return [];
+  }
+
+  // Identifica todos os itens que possuem filhos (módulos, componentes compostos ou submontagens)
+  const parentItemSet = new Set(
+    listagemRows
+      .filter(r => r.item_pai !== null && r.item_pai !== undefined)
+      .map(r => Number(r.item_pai))
+  );
+
+  // Operações internas do Promob na listagem (referência numérica 1..6: Cortar, Corte em Policorte, Furar, Bordear, Rasgar, Montagem)
+  const operacoesDescSet = new Set([
+    'cortar',
+    'corte em policorte',
+    'furar',
+    'bordear',
+    'rasgar',
+    'montagem'
+  ]);
+
+  // Agrupa materiais folha por referência + unidade, somando as quantidades
+  const groupedMap = new Map();
+  for (const row of listagemRows) {
+    const itemNum = Number(row.item);
+    // Ignora itens pais (módulos/submontagens que se decompõem em subitens)
+    if (parentItemSet.has(itemNum)) continue;
+
+    const ref = (row.referencia || '').trim();
+    const desc = (row.descricao || '').trim();
+    const un = (row.unidade || 'UN').trim().toUpperCase();
+    const qtd = parseFloat(row.qtd) || 0;
+
+    if (!ref || qtd <= 0) continue;
+
+    // Ignora linhas de operações de usinagem/montagem do Promob (ex: ref "1".."6")
+    if (/^\d+$/.test(ref) || operacoesDescSet.has(desc.toLowerCase())) {
+      continue;
+    }
+
+    const groupKey = `${ref.toUpperCase()}||${un}`;
+    if (!groupedMap.has(groupKey)) {
+      groupedMap.set(groupKey, {
+        referencia: ref,
+        descricao: desc,
+        qtd: 0,
+        un: un
+      });
+    }
+    const entry = groupedMap.get(groupKey);
+    entry.qtd = Number((entry.qtd + qtd).toFixed(4));
+  }
+
+  const materials = Array.from(groupedMap.values());
+  if (materials.length === 0) {
+    return [];
+  }
+
+  // Limpa materiais anteriores desse projeto para evitar duplicatas
+  await db.run('DELETE FROM Projeto_Materiais WHERE empresa_id = ? AND projeto_id = ?', [empresaId, finalProjectId]);
+
+  // Converte chapas de MDF/MDP de M2 para CHP se necessário e limpa descrições de MDF (mesma regra de CarregarMateriais)
+  for (const m of materials) {
+    const isMdf = (m.referencia && /^(MDF|MDP)/i.test(m.referencia.trim())) ||
+                  (m.descricao && /^(chapa\s+mdf|chapa\s+mdp|mdf|mdp)\b/i.test(m.descricao.trim()));
+    if (isMdf) {
+      m.descricao = cleanMdfDescription(m.descricao);
+
+      if (m.un && m.un.toUpperCase() === 'M2') {
+        let qtdCHP;
+        if (m.qtd <= 5) {
+          qtdCHP = 1;
+        } else {
+          const base = Math.floor(m.qtd / 5);
+          const remainder = m.qtd % 5;
+          qtdCHP = remainder > 0 ? base + 1 : base;
+        }
+        m.qtd = qtdCHP;
+        m.un = 'CHP';
+      }
+    }
+  }
+
+  // 1. Inserir itens agrupados na tabela Projeto_Materiais
+  for (const m of materials) {
+    await db.run(
+      'INSERT INTO Projeto_Materiais (empresa_id, projeto_id, referencia, descricao, qtd, un) VALUES (?, ?, ?, ?, ?, ?)',
+      [empresaId, finalProjectId, m.referencia, m.descricao, m.qtd, m.un]
+    );
+  }
+
+  // Calcular a soma de todas as chapas de MDF/MDP do projeto
+  let totalChapasMDF = 0;
+  for (const m of materials) {
+    const isMdf = (m.referencia && /^(MDF|MDP)/i.test(m.referencia.trim())) ||
+                  (m.descricao && /^(chapa\s+mdf|chapa\s+mdp|mdf|mdp)\b/i.test(m.descricao.trim()));
+    if (isMdf && m.un && m.un.toUpperCase() === 'CHP') {
+      totalChapasMDF += (parseFloat(m.qtd) || 0);
+    }
+  }
+
+  // Se já houver plano de corte carregado em Projeto_Chapa para este projeto, preserva o total acumulado de chapas do plano de corte
+  const existingChapasRow = await db.get(
+    `SELECT COUNT(DISTINCT CONCAT(COALESCE(chapa, ''), '|', COALESCE(acabamento, ''), '|', COALESCE(DescChapa, ''))) as totalChapas
+     FROM Projeto_Chapa WHERE empresa_id = ? AND projeto_id = ?`,
+    [empresaId, finalProjectId]
+  );
+  const chapasNoPlano = existingChapasRow ? (parseInt(existingChapasRow.totalChapas, 10) || 0) : 0;
+  const qtdUsinagemChapas = chapasNoPlano > 0 ? chapasNoPlano : totalChapasMDF;
+
+  // Se já houver módulos carregados em Projeto_Modulo para este projeto, preserva as quantidades de montagem/especial/embalagem
+  const existingModules = await db.all(
+    'SELECT modulo FROM Projeto_Modulo WHERE empresa_id = ? AND projeto_id = ?',
+    [empresaId, finalProjectId]
+  );
+  let validModuloCount = 0;
+  let especialModuloCount = 0;
+  if (existingModules && existingModules.length > 0) {
+    const especialKeywords = ['vidro', 'espelho', 'perfil', 'provençal', 'provencal', 'ripado'];
+    for (const modRow of existingModules) {
+      const moduloName = (modRow.modulo || '').toLowerCase();
+      const isEspecial = especialKeywords.some(keyword => moduloName.includes(keyword));
+      if (isEspecial) {
+        especialModuloCount++;
+      } else if (!moduloName.includes('tamponamento') && !moduloName.includes('painel')) {
+        validModuloCount++;
+      }
+    }
+  }
+  const totalEmbalagem = validModuloCount + especialModuloCount;
+
+  // Calcular a soma de todas as fitas (referência começa com 'FT')
+  let totalFita = 0;
+  for (const m of materials) {
+    if (m.referencia && m.referencia.toUpperCase().startsWith('FT')) {
+      totalFita += (parseFloat(m.qtd) || 0);
+    }
+  }
+  totalFita = Number(totalFita.toFixed(4));
+
+  // 2. Inserir os registros extras de fabricação na tabela Projeto_Materiais
+  const extraItems = [
+    { referencia: 'FAB.USI.CHP', descricao: 'Usinagem de chapas', qtd: qtdUsinagemChapas, un: 'CHP' },
+    { referencia: 'FAB.FIT.PCA', descricao: 'Fitagem', qtd: totalFita, un: 'M' },
+    { referencia: 'FAB.MON.CXA', descricao: 'Montagem caixa', qtd: validModuloCount, un: 'UND' },
+    { referencia: 'FAB.ESP.PCA', descricao: 'Item especial', qtd: especialModuloCount, un: 'UND' },
+    { referencia: 'FAB.EMB.UND', descricao: 'Embalagem', qtd: totalEmbalagem, un: 'UND' },
+    { referencia: 'FAB.MON.CLI', descricao: 'Montagem cliente', qtd: 0, un: 'DIA' }
+  ];
+
+  for (const item of extraItems) {
+    await db.run(
+      'INSERT INTO Projeto_Materiais (empresa_id, projeto_id, referencia, descricao, qtd, un) VALUES (?, ?, ?, ?, ?, ?)',
+      [empresaId, finalProjectId, item.referencia, item.descricao, item.qtd, item.un]
+    );
+  }
+
+  // 3. Inserir todos na tabela Material da empresa se a referência não existir
+  const mappedMaterials = materials.map(m => ({ ...m, tipo: 'Produto' }));
+  const mappedExtras = extraItems.map(e => ({ ...e, tipo: 'Serviço' }));
+  const allItems = [...mappedMaterials, ...mappedExtras];
+
+  for (const m of allItems) {
+    const existing = await db.get(
+      'SELECT MaterialReferencia FROM Material WHERE empresa_id = ? AND MaterialReferencia = ?',
+      [empresaId, m.referencia]
+    );
+    if (!existing) {
+      const normUn = normalizeMaterialUnit(m.un, 'UNI');
+      await db.run(
+        `INSERT INTO Material (empresa_id, MaterialReferencia, MaterialDescricao, MaterialUnidade, MaterialValorUnitario, GrupoSigla, ProdutoGrupo, MaterialTipo, MaterialTempo)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [empresaId, m.referencia, m.descricao, normUn, 0.0, null, 8, m.tipo, 0]
+      );
+    }
+  }
+
+  console.log(`[AgruparMateriaisDaListagem] Gravados ${materials.length} materiais agrupados e ${extraItems.length} itens de fabricação em Projeto_Materiais para o projeto ID ${finalProjectId} (empresa ${empresaId})`);
+  return [...materials, ...extraItems];
+}
+
 app.post('/api/arquivos-importados', authenticateToken, uploadLayouts.array('arquivos'), async (req, res) => {
   const empresaId = req.auth.empresaId;
   if (!req.files || req.files.length === 0) {
@@ -7267,15 +7457,28 @@ app.post('/api/projetos/:id/atualizar-precos-materiais', authenticateToken, asyn
 app.post('/api/projetos/:id/gerar-orcamento', authenticateToken, async (req, res) => {
   const empresaId = req.auth.empresaId;
   const { id } = req.params;
+  const { origem } = req.body || {};
   try {
     const project = await db.get('SELECT * FROM projetos WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     if (!project) {
       return res.status(404).json({ error: 'Projeto não encontrado.' });
     }
 
-    const materials = await db.all('SELECT * FROM Projeto_Materiais WHERE empresa_id = ? AND projeto_id = ?', [empresaId, id]);
-
     await db.run('BEGIN TRANSACTION');
+
+    if (origem === 'listagem') {
+      await AgruparMateriaisDaListagem(id, empresaId);
+    } else {
+      const existingMatsCount = await db.get(
+        'SELECT COUNT(*) as cnt FROM Projeto_Materiais WHERE empresa_id = ? AND projeto_id = ?',
+        [empresaId, id]
+      );
+      if (!existingMatsCount || Number(existingMatsCount.cnt) === 0) {
+        await AgruparMateriaisDaListagem(id, empresaId);
+      }
+    }
+
+    const materials = await db.all('SELECT * FROM Projeto_Materiais WHERE empresa_id = ? AND projeto_id = ?', [empresaId, id]);
 
     // 1 - Limpa itens antigos para este projeto na tabela ProjetoItem
     await db.run('DELETE FROM ProjetoItem WHERE empresa_id = ? AND ProjetoID = ?', [empresaId, id]);

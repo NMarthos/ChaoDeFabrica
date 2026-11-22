@@ -13815,7 +13815,9 @@ function ImportarLayouts({ isModal = false, projetoId = null, projetoNome = '', 
     setError('');
     setSuccess('');
     try {
-      const res = await api.post(`/projetos/${projetoId}/gerar-orcamento`);
+      const res = await api.post(`/projetos/${projetoId}/gerar-orcamento`, {
+        origem: modoOrcamento ? 'listagem' : 'materiais'
+      });
       setSuccess(`Orçamento gerado com sucesso! Custo total do projeto: R$ ${formatDecimalPtBr(res.data.CustoTotal)}`);
       if (onClose) {
         onClose();
@@ -14293,25 +14295,23 @@ function ImportarLayouts({ isModal = false, projetoId = null, projetoNome = '', 
             </table>
           </div>
 
-          {!modoOrcamento && (
-            <div style={{ marginTop: '20px', display: 'flex', justifyContent: 'flex-end', borderTop: '1px solid var(--glass-border)', paddingTop: '15px' }}>
-              <button
-                onClick={handleGerarOrcamento}
-                className="btn btn-primary"
-                disabled={generatingOrcamento || !isEmAberto}
-                style={{ 
-                  display: 'flex', 
-                  alignItems: 'center', 
-                  gap: '8px',
-                  opacity: (!isEmAberto || generatingOrcamento) ? 0.5 : 1,
-                  cursor: (!isEmAberto || generatingOrcamento) ? 'not-allowed' : 'pointer'
-                }}
-                title={!isEmAberto ? 'Não é possível gerar orçamento pois a situação do projeto é diferente de "Em aberto"' : ''}
-              >
-                {generatingOrcamento ? 'Gerando orçamento...' : 'Gerar orçamento'}
-              </button>
-            </div>
-          )}
+          <div style={{ marginTop: '20px', display: 'flex', justifyContent: 'flex-end', borderTop: '1px solid var(--glass-border)', paddingTop: '15px' }}>
+            <button
+              onClick={handleGerarOrcamento}
+              className="btn btn-primary"
+              disabled={generatingOrcamento || !isEmAberto}
+              style={{ 
+                display: 'flex', 
+                alignItems: 'center', 
+                gap: '8px',
+                opacity: (!isEmAberto || generatingOrcamento) ? 0.5 : 1,
+                cursor: (!isEmAberto || generatingOrcamento) ? 'not-allowed' : 'pointer'
+              }}
+              title={!isEmAberto ? 'Não é possível gerar orçamento pois a situação do projeto é diferente de "Em aberto"' : ''}
+            >
+              {generatingOrcamento ? 'Gerando orçamento...' : 'Gerar orçamento'}
+            </button>
+          </div>
         </div>
       </div>
 
